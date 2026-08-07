@@ -9,7 +9,7 @@ public final class EncodedKeyImmutabilityTest {
     public void byteAccessCannotMutateThePrecomputedKey() {
         byte[] source = {1, 2, 3, 4};
         EncodedKey key = EncodedKey.copyOf(source);
-        long expectedHash = key.hash();
+        int expectedHash = key.hash();
 
         source[0] = 9;
         byte[] exposed = key.bytes();

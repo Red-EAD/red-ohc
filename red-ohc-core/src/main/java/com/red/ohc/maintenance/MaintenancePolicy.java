@@ -2,7 +2,6 @@ package com.red.ohc.maintenance;
 
 import com.red.ohc.Eviction;
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.FlatConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** Worker-owned eviction links. Java Entry references avoid native pointer chasing. */
@@ -42,7 +41,7 @@ public final class MaintenancePolicy {
             entry.policyAccessCount(0);
             linkLruHead(entry);
         }
-        if (sketch != null) sketch.increment(entry.hash);
+        if (sketch != null) sketch.increment(entry.keyHash());
     }
 
     public void access(Entry entry) {
@@ -53,7 +52,7 @@ public final class MaintenancePolicy {
             if (entry.policyMain()) moveMainToHead(entry);
             return;
         }
-        if (sketch != null) sketch.increment(entry.hash);
+        if (sketch != null) sketch.increment(entry.keyHash());
         if (head != entry) {
             unlinkLru(entry);
             linkLruHead(entry);
@@ -110,7 +109,7 @@ public final class MaintenancePolicy {
         return contains(entry);
     }
 
-    boolean repair(FlatConcurrentMap data, int limit) {
+    boolean repair(int limit) {
         int inspected = 0;
         while (inspected < limit) {
             if (repairCursor == null) {
@@ -128,7 +127,7 @@ public final class MaintenancePolicy {
             Entry current = repairCursor;
             repairCursor = current.policyNext;
             inspected++;
-            if (current.valueAddress == 0L || !data.isCurrent(current)) remove(current, false);
+            if (current.valueAddress == 0L || !current.isMapped()) remove(current, false);
             if (repairCursor == null) {
                 if (eviction == Eviction.S3_FIFO && repairList == 0) {
                     repairList = 1;
@@ -144,10 +143,10 @@ public final class MaintenancePolicy {
     private Entry tinyLfuVictim() {
         Entry selected = tail;
         if (selected == null) return null;
-        int selectedFrequency = sketch.frequency(selected.hash);
+        int selectedFrequency = sketch.frequency(selected.keyHash());
         Entry cursor = selected.policyPrev;
         for (int inspected = 0; cursor != null && inspected < 7; inspected++) {
-            int frequency = sketch.frequency(cursor.hash);
+            int frequency = sketch.frequency(cursor.keyHash());
             if (frequency < selectedFrequency) {
                 selected = cursor;
                 selectedFrequency = frequency;

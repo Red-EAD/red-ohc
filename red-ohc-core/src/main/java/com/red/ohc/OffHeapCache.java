@@ -7,8 +7,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
@@ -16,9 +16,8 @@ import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.codec.KeyEncoder;
+import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.FlatConcurrentMap;
-import com.red.ohc.index.FlatIndexStats;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.runtime.ReaderGuard;
 import com.red.ohc.runtime.ReaderSlot;
@@ -29,11 +28,11 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
-/** Flat concurrent authority with native payloads and one asynchronous maintenance worker. */
+/** CHM authority with native payloads and one asynchronous maintenance worker. */
 public final class OffHeapCache<K, V> implements OHCache<K, V> {
     private static final long DEFAULT_TTL = Long.MIN_VALUE;
 
-    final FlatConcurrentMap data;
+    final ConcurrentHashMap<Entry, Entry> data;
     private final CacheSerializer<K> keySerializer;
     private final CacheSerializer<V> valueSerializer;
     private final Ticker ticker;
@@ -50,8 +49,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     private final MaintenanceEventLoop worker;
     private final ReaderGuard readerGuard;
     private final AtomicLong liveEntryBytes = new AtomicLong();
-    private final int initialCapacity;
-    private final int tableCapacity;
     private volatile boolean closing;
     private volatile boolean closed;
 
@@ -69,15 +66,17 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         this.closeTimeoutMillis = closeTimeoutMillis;
         this.capacity = capacity;
         this.maxEntrySize = maxEntrySize;
-        long initialEntries = estimatedIndexEntries(expectedEntries, capacity, maxEntrySize);
-        this.data = new FlatConcurrentMap(initialEntries);
-        FlatIndexStats indexStats = data.snapshot();
-        this.initialCapacity = indexStats.slotCapacity;
-        this.tableCapacity = indexStats.slotCapacity;
+        int initialCapacity = ChmSizing.constructorCapacity(expectedEntries, capacity, maxEntrySize);
+        this.data = new ConcurrentHashMap<>(initialCapacity, 0.75f, 1);
+        Entry bootstrap = Entry.bootstrap();
+        data.put(bootstrap, bootstrap);
+        data.remove(bootstrap, bootstrap);
         this.memory = new NativeMemory.Memory(allocatorType);
         this.budget = new Budget(capacity);
         this.worker = new MaintenanceEventLoop(data, memory, budget, ticker, capacity,
-                                             eviction, maintenanceQueueCapacity(initialEntries), liveEntryBytes, readers);
+                                             eviction,
+                                             ChmSizing.maintenanceQueueCapacity(expectedEntries, capacity, maxEntrySize),
+                                             liveEntryBytes, readers);
         this.readerGuard = new ReaderGuard(worker, () -> closing);
         worker.start();
     }
@@ -110,8 +109,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         Objects.requireNonNull(value, "value");
         if (closing) return false;
         ThreadContext context = contexts.get();
-        context.lookupKey.setPrecomputed(key.bytes(), key.length(), key.hash());
-        return putSerialized(context, context.lookupKey, key.bytes(), key.length(), value, value.length,
+        context.lookupKey.setPrecomputed(key.bytes, key.length(), key.hash());
+        return putSerialized(context, context.lookupKey, key.bytes, key.length(), value, value.length,
                              DEFAULT_TTL);
     }
 
@@ -155,6 +154,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 return true;
             }
             freeEntry(candidate, ValueBlock.allocationLength(valueLength));
+            candidate.markUnmapped();
             existing = winner;
             int result = replaceExisting(context, lookup, existing, valueBytes, valueLength, expireAtMillis);
             if (result > 0) return true;
@@ -188,7 +188,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 return -1;
             }
             locked = true;
-            if (!mappingIsCurrent(context, lookup, entry)) {
+            if (!mappingIsCurrent(entry)) {
                 entry.finishWriter();
                 locked = false;
                 freeBlock(replacement, newAllocation);
@@ -217,7 +217,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
     }
 
-    private Entry allocateEntry(ThreadContext context, long hash, byte[] keyBytes, int keyLength,
+    private Entry allocateEntry(ThreadContext context, int hash, byte[] keyBytes, int keyLength,
                                 byte[] valueBytes, int valueLength, long expireAtMillis) {
         long keyAllocation = Math.max(8L, CacheMath.roundUpTo8(keyLength));
         long valueAllocation = ValueBlock.allocationLength(valueLength);
@@ -272,7 +272,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 return false;
             }
             try {
-                removed = data.removeIfSame(entry);
+                removed = removeCurrent(entry);
             } finally {
                 exit(context);
             }
@@ -353,7 +353,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         ThreadContext context = contexts.get();
         if (!enter(context)) return false;
         try {
-            return withDirectEntered(context, data.get(key), consumer);
+            context.lookupKey.setPrecomputed(key.bytes, key.length(), key.hash());
+            return withDirectEntered(context, data.get(context.lookupKey), consumer);
         } finally {
             exit(context);
         }
@@ -498,6 +499,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 return true;
             }
             freeEntry(candidate, ValueBlock.allocationLength(valueLength));
+            candidate.markUnmapped();
             if (!enter(context)) return false;
             boolean winnerLive;
             try {
@@ -531,7 +533,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                     && value != 0L
                     && Entry.hasTtl(taggedValue)
                     && ValueBlock.expired(value, worker.nowMillis())
-                    && data.removeIfSame(entry);
+                    && removeCurrent(entry);
         } finally {
             exit(context);
         }
@@ -601,7 +603,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             locked = true;
             long oldTagged = entry.valueAddress;
             long old = Entry.rawValueAddress(oldTagged);
-            boolean match = mappingIsCurrent(context, lookup, entry) && old != 0L
+            boolean match = mappingIsCurrent(entry) && old != 0L
                     && (!Entry.hasTtl(oldTagged) || !ValueBlock.expired(old, worker.nowMillis()))
                     && ValueBlock.length(old) == expected.length
                     && NativeMemory.equals(ValueBlock.payloadAddress(old), expected, 0, expected.length);
@@ -673,20 +675,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         long watermark = worker.queueCapacity() - Math.max(1L, worker.queueCapacity() / 8L);
         return worker.queueDepth() > watermark || budget.reserved() > capacity - capacity / 8L;
     }
-    FlatConcurrentMap indexForTest() { return data; }
+    ConcurrentHashMap<Entry, Entry> dataForTest() { return data; }
 
     @Override
     public OHCacheStats stats() {
         final long unavailable = -1L;
         long pending = budget.reserved();
         MaintenanceEventLoop.Snapshot snapshot = worker.snapshot();
-        FlatIndexStats indexStats = data.snapshot();
         return new OHCacheStats(snapshot.hits, snapshot.misses, snapshot.accessDropped,
-                snapshot.accepted, snapshot.rejectedQueue, snapshot.rejectedBudget, snapshot.applied, 0L,
+                snapshot.accepted, snapshot.rejectedQueue, snapshot.rejectedBudget, snapshot.applied,
                 snapshot.queueDepth, unavailable, pending, snapshot.maintenanceLoopNanos, snapshot.unhealthy,
-                initialCapacity, tableCapacity == 0 ? 0d : (double) data.size() / tableCapacity,
-                indexStats.maxProbe, indexStats.resizeInProgress, indexStats.heapPayloadBytes,
-                indexStats.overflowSize, indexStats.fallbackHeapBytes,
                 snapshot.logicalExpired, snapshot.physicalExpired, snapshot.timeoutLagMillis,
                 snapshot.evicted, unavailable, unavailable, unavailable, unavailable, unavailable,
                 snapshot.retiredEntries, snapshot.retiredBytes, snapshot.oldestRetireEpoch,
@@ -718,8 +716,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         readerGuard.exit(context);
     }
 
-    private boolean mappingIsCurrent(ThreadContext context, LookupKey lookup, Entry entry) {
-        return data.isCurrent(entry);
+    private boolean mappingIsCurrent(Entry entry) {
+        return entry.isMapped();
+    }
+
+    private boolean removeCurrent(Entry entry) {
+        if (!entry.isMapped()) return false;
+        entry.markUnmapped();
+        if (data.remove(entry, entry)) return true;
+        entry.markMapped();
+        return false;
     }
 
     private boolean claimWriter(Entry entry) {
@@ -766,19 +772,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             return now > Long.MAX_VALUE - duration ? Long.MAX_VALUE : now + duration;
         }
         return Long.MAX_VALUE - now < defaultTtlMillis ? Long.MAX_VALUE : now + defaultTtlMillis;
-    }
-
-    private static long estimatedIndexEntries(long expectedEntries, long capacity, long maxEntrySize) {
-        if (expectedEntries > 0L) return Math.max(64L, expectedEntries);
-        long divisor = Math.max(1L, maxEntrySize + Math.min(128L, Long.MAX_VALUE - maxEntrySize));
-        return Math.max(64L, Math.max(1L, capacity / divisor));
-    }
-
-    private static int maintenanceQueueCapacity(long entries) {
-        long requested = Math.max(1024L, Math.min(1L << 20, Math.max(1L, entries / 64L)));
-        int capacity = 1;
-        while (capacity < requested && capacity < (1 << 20)) capacity <<= 1;
-        return capacity;
     }
 
     private static long mix64(long value) {

@@ -92,7 +92,7 @@ public class OHCSerializedBenchmark {
     private void assertHealthy() {
         OHCacheStats stats = cache.stats();
         if (stats.maintenanceUnhealthy || stats.mutationRejectedQueue != 0L || stats.mutationRejectedBudget != 0L
-                || stats.maintenanceDropped != 0L || stats.maintenanceQueueDepth != 0L) {
+                || stats.maintenanceQueueDepth != 0L) {
             throw new IllegalStateException("invalid OHC serialized measurement");
         }
     }

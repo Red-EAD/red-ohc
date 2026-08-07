@@ -3,12 +3,12 @@ package com.red.ohc;
 import static org.testng.Assert.assertTrue;
 
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.FlatConcurrentMap;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.Budget;
@@ -56,13 +56,13 @@ public class MaintenanceEventLoopTest {
         WriterArena arena = memory.newWriterArena();
         long value = arena.allocate(ValueBlock.allocationLength(1));
         ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1);
-        Entry real = new Entry(0L, 0, 7L, value);
-        FlatConcurrentMap data = index();
+        Entry real = new Entry(0L, 0, 7, value);
+        ConcurrentHashMap<Entry, Entry> data = index();
         data.putIfAbsent(real, real);
         MaintenanceEventLoop loop = new MaintenanceEventLoop(data, memory, new Budget(1 << 20),
                 Ticker.DEFAULT, 1 << 20, Eviction.LRU, 256, new AtomicLong(),
                 new CopyOnWriteArrayList<ReaderSlot>());
-        for (int i = 0; i < 256; i++) assertTrue(loop.enqueue(new Entry(0L, 0, i + 100L, 0L), Entry.PENDING_UPDATE));
+        for (int i = 0; i < 256; i++) assertTrue(loop.enqueue(new Entry(0L, 0, i + 100, 0L), Entry.PENDING_UPDATE));
         assertTrue(!loop.enqueue(real, Entry.PENDING_UPDATE));
         loop.start();
         try {
@@ -77,7 +77,7 @@ public class MaintenanceEventLoopTest {
         }
     }
 
-    private static FlatConcurrentMap index() {
-        return new FlatConcurrentMap(64L, 0L);
+    private static ConcurrentHashMap<Entry, Entry> index() {
+        return new ConcurrentHashMap<>();
     }
 }

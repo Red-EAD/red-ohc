@@ -1,7 +1,6 @@
 package com.red.ohc.maintenance;
 
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.FlatConcurrentMap;
 import com.red.ohc.storage.ValueBlock;
 
 /** A worker-owned 1024-slot time wheel. Stale slots are harmless and are re-bucketed. */
@@ -87,7 +86,7 @@ public final class TimerWheel {
                 ? Long.MAX_VALUE : delayMillis * 1_000_000L;
     }
 
-    boolean repair(FlatConcurrentMap data, int limit) {
+    boolean repair(int limit) {
         int inspected = 0;
         while (inspected < limit) {
             if (repairEntry == null) {
@@ -104,7 +103,7 @@ public final class TimerWheel {
             Entry current = repairEntry;
             repairEntry = current.timerNext;
             inspected++;
-            if (current.valueAddress == 0L || !data.isCurrent(current)) remove(current);
+            if (current.valueAddress == 0L || !current.isMapped()) remove(current);
             if (repairEntry == null) repairSlot++;
         }
         return repairSlot == SLOT_COUNT;

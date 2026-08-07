@@ -14,7 +14,7 @@ public class TimerWheelTest {
     @Test
     public void maximumExpiryDoesNotOverflowIntoTheCurrentWheelRound() {
         TimerWheel wheel = new TimerWheel(0L);
-        Entry entry = new Entry(0L, 0, 1L, 0L);
+        Entry entry = new Entry(0L, 0, 1, 0L);
         wheel.add(entry, Long.MAX_VALUE);
 
         AtomicInteger expiries = new AtomicInteger();

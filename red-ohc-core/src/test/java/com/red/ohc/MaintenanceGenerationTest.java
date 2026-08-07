@@ -5,12 +5,12 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertSame;
 
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.FlatConcurrentMap;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.Budget;
@@ -25,8 +25,8 @@ public class MaintenanceGenerationTest {
         ValueBlock.initialize(oldValue, 1L, 1);
         long newValue = memory.allocate(ValueBlock.allocationLength(1));
         ValueBlock.initialize(newValue, 2L, 1);
-        Entry entry = new Entry(0L, 0, 7L, oldValue);
-        FlatConcurrentMap data = index();
+        Entry entry = new Entry(0L, 0, 7, oldValue);
+        ConcurrentHashMap<Entry, Entry> data = index();
         data.putIfAbsent(entry, entry);
         MaintenanceEventLoop worker = new MaintenanceEventLoop(data, memory, new Budget(1 << 20),
                 Ticker.DEFAULT, 1 << 20, Eviction.LRU, 256, new AtomicLong(),
@@ -48,8 +48,8 @@ public class MaintenanceGenerationTest {
     @Test
     public void detachedEntryCannotRemoveAChmMappingWithNoValueAddress() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-        Entry entry = new Entry(0L, 0, 7L, 0L);
-        FlatConcurrentMap data = index();
+        Entry entry = new Entry(0L, 0, 7, 0L);
+        ConcurrentHashMap<Entry, Entry> data = index();
         data.putIfAbsent(entry, entry);
         MaintenanceEventLoop worker = new MaintenanceEventLoop(data, memory, new Budget(1 << 20),
                 Ticker.DEFAULT, 1 << 20, Eviction.LRU, 256, new AtomicLong(),
@@ -65,7 +65,7 @@ public class MaintenanceGenerationTest {
         if (!value) throw new AssertionError("expected true");
     }
 
-    private static FlatConcurrentMap index() {
-        return new FlatConcurrentMap(64L, 0L);
+    private static ConcurrentHashMap<Entry, Entry> index() {
+        return new ConcurrentHashMap<>();
     }
 }

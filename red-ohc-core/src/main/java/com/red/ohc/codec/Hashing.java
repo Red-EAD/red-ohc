@@ -4,7 +4,7 @@ import java.nio.ByteOrder;
 
 import com.red.ohc.storage.NativeMemory;
 
-/** Allocation-free xxHash64 for serialized cache keys (seed = 0). */
+/** Allocation-free seed-zero xxHash64 folded to the int hash used by CHM. */
 public final class Hashing {
     private static final long PRIME1 = 0x9e3779b185ebca87L;
     private static final long PRIME2 = 0xc2b2ae3d27d4eb4fL;
@@ -15,7 +15,7 @@ public final class Hashing {
 
     private Hashing() { }
 
-    public static long xxHash64(byte[] bytes, int offset, int length) {
+    public static int xxHash64Folded(byte[] bytes, int offset, int length) {
         if (offset < 0 || length < 0 || offset > bytes.length - length) {
             throw new IndexOutOfBoundsException("offset=" + offset + ", length=" + length);
         }
@@ -65,7 +65,8 @@ public final class Hashing {
         hash *= PRIME2;
         hash ^= hash >>> 29;
         hash *= PRIME3;
-        return hash ^ (hash >>> 32);
+        hash ^= hash >>> 32;
+        return (int) (hash ^ (hash >>> 32));
     }
 
     private static long round(long accumulator, long input) {

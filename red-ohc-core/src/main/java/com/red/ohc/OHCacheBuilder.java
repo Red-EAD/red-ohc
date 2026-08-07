@@ -3,7 +3,7 @@ package com.red.ohc;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 
-/** Builder for the flat-index off-heap cache. */
+/** Builder for the off-heap cache. */
 public final class OHCacheBuilder<K, V> {
     private long capacity = 64L << 20;
     private long maxEntrySize;

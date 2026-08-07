@@ -11,8 +11,8 @@ public class MaintenancePolicyTest {
     @Test
     public void s3FifoPromotesAHotWindowEntryBeforeEvictingIt() {
         MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, new java.util.concurrent.atomic.AtomicLong());
-        Entry hot = new Entry(0L, 1, 1L, 0L);
-        Entry cold = new Entry(0L, 1, 2L, 0L);
+        Entry hot = new Entry(0L, 1, 1, 0L);
+        Entry cold = new Entry(0L, 1, 2, 0L);
 
         policy.add(hot);
         policy.add(cold);

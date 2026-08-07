@@ -3,6 +3,7 @@ package com.red.ohc.maintenance;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -14,7 +15,6 @@ import org.jctools.queues.MpscArrayQueue;
 import com.red.ohc.Eviction;
 import com.red.ohc.Ticker;
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.FlatConcurrentMap;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.Budget;
 import com.red.ohc.storage.NativeMemory;
@@ -22,10 +22,10 @@ import com.red.ohc.storage.ValueBlock;
 
 /**
  * One parked maintenance event-loop for a cache. It owns policy/timer state and never decides
- * ordinary index visibility. Business threads publish those changes directly to the flat index.
+ * ordinary index visibility. Business threads publish those changes directly to the CHM.
  */
 public final class MaintenanceEventLoop implements Runnable {
-    private final FlatConcurrentMap data;
+    private final ConcurrentHashMap<Entry, Entry> data;
     private final NativeMemory.Memory memory;
     private final Budget budget;
     private final Ticker ticker;
@@ -64,7 +64,7 @@ public final class MaintenanceEventLoop implements Runnable {
     private boolean timerRepairDone;
     private boolean evictionBlocked;
 
-    public MaintenanceEventLoop(FlatConcurrentMap data,
+    public MaintenanceEventLoop(ConcurrentHashMap<Entry, Entry> data,
                                 NativeMemory.Memory memory, Budget budget, Ticker ticker,
                                 long capacity, Eviction eviction, int queueCapacity,
                                 AtomicLong liveBytes, CopyOnWriteArrayList<ReaderSlot> readers) {
@@ -264,7 +264,7 @@ public final class MaintenanceEventLoop implements Runnable {
     private void applyEntry(Entry entry) {
         long taggedAddress = entry.valueAddress;
         long address = Entry.rawValueAddress(taggedAddress);
-        if (address == 0L || !data.isCurrent(entry)) {
+        if (address == 0L || !isCurrent(entry)) {
             wheel.remove(entry);
             policy.remove(entry, false);
             return;
@@ -297,7 +297,7 @@ public final class MaintenanceEventLoop implements Runnable {
             slot.consumedMisses = slot.publishedMisses;
             slot.consumedAccessDropped = slot.publishedAccessDropped;
             while (work < limit && slot.access.poll((entry, generation) -> {
-                if (entry.generation() == generation && data.isCurrent(entry)) policy.access(entry);
+                if (entry.generation() == generation && isCurrent(entry)) policy.access(entry);
             })) work++;
             if (work >= limit) return work;
         }
@@ -311,13 +311,13 @@ public final class MaintenanceEventLoop implements Runnable {
             Entry entry = repairIterator.next();
             int flags = entry.takePending();
             if (flags != 0) processEntry(entry, flags);
-            else if (entry.valueAddress != 0L && data.isCurrent(entry)) applyEntry(entry);
+            else if (entry.valueAddress != 0L && isCurrent(entry)) applyEntry(entry);
             work++;
         }
         if (repairIterator.hasNext()) return work;
         repairIterator = null;
-        policyRepairDone = policy.repair(data, limit);
-        timerRepairDone = wheel.repair(data, limit);
+        policyRepairDone = policy.repair(limit);
+        timerRepairDone = wheel.repair(limit);
         if (policyRepairDone && timerRepairDone) {
             repairNeeded.set(false);
             policyRepairDone = false;
@@ -343,7 +343,7 @@ public final class MaintenanceEventLoop implements Runnable {
         if (expiry > 0L) updateMax(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
         if (removeFromMap(entry, false, expectedGeneration, expectedValueAddress)) {
             physicalExpired.incrementAndGet();
-        } else if (entry.valueAddress == expectedValueAddress && data.isCurrent(entry)) {
+        } else if (entry.valueAddress == expectedValueAddress && isCurrent(entry)) {
             wheel.add(entry, ValueBlock.expireAtMillis(address));
         }
     }
@@ -357,9 +357,9 @@ public final class MaintenanceEventLoop implements Runnable {
             long expectedGeneration = victim.generation();
             long expectedValueAddress = victim.valueAddress;
             if (!removeFromMap(victim, true, expectedGeneration, expectedValueAddress)
-                    && (victim.valueAddress == 0L || !data.isCurrent(victim))) {
+                    && (victim.valueAddress == 0L || !isCurrent(victim))) {
                 policy.remove(victim, false);
-            } else if (victim.valueAddress != 0L && data.isCurrent(victim)) {
+            } else if (victim.valueAddress != 0L && isCurrent(victim)) {
                 evictionBlocked = true;
                 break;
             }
@@ -380,7 +380,7 @@ public final class MaintenanceEventLoop implements Runnable {
                 rejectedBudget.incrementAndGet();
                 return false;
             }
-            removed = data.removeIfSame(entry);
+            removed = removeCurrent(entry);
             if (removed) {
                 value = Entry.rawValueAddress(entry.valueAddress);
                 entry.valueAddress = 0L;
@@ -399,6 +399,18 @@ public final class MaintenanceEventLoop implements Runnable {
     private void retireEntryBlocks(Entry entry, long value) {
         if (value != 0L) retireValue(value, ValueBlock.allocationLength(ValueBlock.length(value)));
         retireValue(entry.nativeKeyAddress, entry.keyAllocationLength());
+    }
+
+    private boolean isCurrent(Entry entry) {
+        return entry.isMapped();
+    }
+
+    private boolean removeCurrent(Entry entry) {
+        if (!entry.isMapped()) return false;
+        entry.markUnmapped();
+        if (data.remove(entry, entry)) return true;
+        entry.markMapped();
+        return false;
     }
 
     private void shutdownAndFree() {
