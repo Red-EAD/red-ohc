@@ -1,0 +1,73 @@
+package com.red.ohc;
+
+import com.red.ohc.*;
+
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
+
+import java.nio.ByteBuffer;
+
+import org.testng.annotations.Test;
+
+public class OffHeapCacheTest {
+    private static final CacheSerializer<String> STRING = new CacheSerializer<String>() {
+        @Override
+        public void serialize(String value, ByteBuffer buffer) {
+            buffer.put(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public String deserialize(ByteBuffer buffer) {
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public int serializedSize(String value) {
+            return value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        }
+    };
+
+    @Test
+    public void builderConstructsTheOffHeapEntryPoint() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                                                           .capacity(1 << 20)
+                                                           .keySerializer(STRING)
+                                                           .valueSerializer(STRING)
+                                                           .build()) {
+            assertEquals(cache.getClass().getName(), "com.red.ohc.OffHeapCache");
+        }
+    }
+
+    @Test
+    public void putBecomesVisibleAfterFlushAndSupportsDirectValue() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                                                           .capacity(1 << 20)
+                                                           .keySerializer(STRING)
+                                                           .valueSerializer(STRING)
+                                                           .build()) {
+            assertTrue(cache.put("key", "value"));
+            cache.flushAsync().join();
+            assertEquals(readEventually(cache, "key"), "value");
+            assertTrue(directEventually(cache));
+        }
+    }
+
+    private static String readEventually(OHCache<String, String> cache, String key) {
+        for (int i = 0; i < 100; i++) {
+            String value = cache.get(key);
+            if (value != null) return value;
+            Thread.yield();
+        }
+        return null;
+    }
+
+    private static boolean directEventually(OHCache<String, String> cache) {
+        for (int i = 0; i < 100; i++) {
+            if (cache.withDirectValue("key", view -> assertEquals(view.length(), 5))) return true;
+            Thread.yield();
+        }
+        return false;
+    }
+}
