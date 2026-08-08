@@ -1,9 +1,10 @@
 package com.red.ohc.storage;
 
 import java.lang.reflect.Field;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import com.red.ohc.AllocatorType;
 
@@ -29,15 +30,37 @@ public final class NativeMemory {
 
     public static final class Memory {
         private final NativeAllocator allocator;
+        private final long hardLimit;
         private final AtomicLong allocated = new AtomicLong();
         private final AtomicLong rawAllocations = new AtomicLong();
         private final AtomicLong entryAllocations = new AtomicLong();
-        private final AtomicInteger nextArenaId = new AtomicInteger();
-        private final CopyOnWriteArrayList<WriterArena> arenas = new CopyOnWriteArrayList<>();
-        private final PageDepot depot = new PageDepot();
+        private final WriterArena[] arenas;
+        private final int stripeMask;
+        private static final int PAGE_CHUNK_BITS = 10;
+        private static final int PAGE_CHUNK_SIZE = 1 << PAGE_CHUNK_BITS;
+        private static final int PAGE_CHUNK_COUNT = 1 << 12;
+        private static final int MAX_PAGE_ID = (1 << 22) - 1;
+        private final AtomicInteger nextPageId = new AtomicInteger(1);
+        private final AtomicReferenceArray<AtomicReferenceArray<WriterArena.Page>> pageChunks =
+                new AtomicReferenceArray<>(PAGE_CHUNK_COUNT);
+        private final ConcurrentLinkedQueue<WriterArena.Page> entryPages = new ConcurrentLinkedQueue<>();
+        private final PageDepot pageDepot;
 
         public Memory(AllocatorType type) {
+            this(type, Long.MAX_VALUE);
+        }
+
+        public Memory(AllocatorType type, long hardLimit) {
+            if (hardLimit <= 0L) throw new IllegalArgumentException("hardLimit must be positive");
             this.allocator = new NativeAllocator(type);
+            this.hardLimit = hardLimit;
+            this.pageDepot = new PageDepot(this);
+            int stripeCount = 1;
+            int target = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
+            while (stripeCount < target && stripeCount < (1 << 30)) stripeCount <<= 1;
+            this.arenas = new WriterArena[stripeCount];
+            for (int index = 0; index < stripeCount; index++) arenas[index] = new WriterArena(this, index + 1);
+            this.stripeMask = stripeCount - 1;
         }
 
         public long allocate(long bytes) {
@@ -47,10 +70,16 @@ public final class NativeMemory {
         }
 
         public long allocateRaw(long bytes) {
-            long address = allocator.allocate(bytes);
-            allocated.addAndGet(bytes);
-            rawAllocations.incrementAndGet();
-            return address;
+            if (bytes <= 0L) throw new IllegalArgumentException("bytes must be positive");
+            reservePhysical(bytes);
+            try {
+                long address = allocator.allocate(bytes);
+                rawAllocations.incrementAndGet();
+                return address;
+            } catch (Throwable failure) {
+                allocated.addAndGet(-bytes);
+                throw failure;
+            }
         }
 
         public void free(long address, long bytes) {
@@ -60,6 +89,7 @@ public final class NativeMemory {
         }
 
         public long allocated() { return allocated.get(); }
+        public long hardLimit() { return hardLimit; }
 
         public long rawAllocationCount() { return rawAllocations.get(); }
         public long entryAllocationCount() { return entryAllocations.get(); }
@@ -75,10 +105,15 @@ public final class NativeMemory {
         }
 
         public WriterArena newWriterArena() {
-            int id = nextArenaId.incrementAndGet();
-            WriterArena arena = new WriterArena(this, id, depot);
-            arenas.add(arena);
-            return arena;
+            return writerForCurrentThread();
+        }
+
+        public WriterArena writerForCurrentThread() {
+            return arenas[((int) Thread.currentThread().getId()) & stripeMask];
+        }
+
+        public int writerStripeCount() {
+            return arenas.length;
         }
 
         public void releaseEntry(long entryAddress, long entryBytes) {
@@ -92,18 +127,92 @@ public final class NativeMemory {
                 return;
             }
             int index = arenaId - 1;
-            WriterArena arena = index >= 0 && index < arenas.size() ? arenas.get(index) : null;
-            if (arena == null) {
-                depot.offer(block, sizeClass);
-            } else {
-                arena.remoteFree(block, sizeClass);
+            if (index < 0 || index >= arenas.length) {
+                throw new IllegalStateException("unknown allocator stripe: " + arenaId);
             }
+            arenas[index].remoteFree(block, sizeClass);
         }
 
         public void closeArenas() {
             for (WriterArena arena : arenas) arena.releasePages();
-            arenas.clear();
-            depot.clear();
+            pageDepot.clear();
+            WriterArena.Page page;
+            while ((page = entryPages.poll()) != null) freeEntryPage(page);
+        }
+
+        WriterArena.Page acquireEntryPage(int sizeClass) {
+            WriterArena.Page reused = pageDepot.acquire(sizeClass);
+            if (reused != null) return reused;
+            int pageId = nextPageId();
+            long address = allocateEntryPage();
+            WriterArena.Page page = new WriterArena.Page(pageId, address, sizeClass, SizeClasses.slotBytes(sizeClass));
+            registerPage(page);
+            return page;
+        }
+
+        void returnUnusedPage(WriterArena.Page page) {
+            freeEntryPage(page);
+        }
+
+        void releaseEmptyPage(WriterArena.Page page) {
+            pageDepot.release(page);
+        }
+
+        void freeEntryPage(WriterArena.Page page) {
+            if (!page.freePhysical()) return;
+            unregisterPage(page);
+            free(page.address, SizeClasses.PAGE_BYTES);
+        }
+
+        int nextPageId() {
+            int pageId = nextPageId.getAndIncrement();
+            if (pageId <= 0 || pageId > MAX_PAGE_ID) {
+                throw new AllocationLimitException(hardLimit, allocated.get(), SizeClasses.PAGE_BYTES);
+            }
+            return pageId;
+        }
+
+        void registerPage(WriterArena.Page page) {
+            int chunkIndex = page.id >>> PAGE_CHUNK_BITS;
+            AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(chunkIndex);
+            if (chunk == null) {
+                AtomicReferenceArray<WriterArena.Page> created = new AtomicReferenceArray<>(PAGE_CHUNK_SIZE);
+                if (!pageChunks.compareAndSet(chunkIndex, null, created)) created = pageChunks.get(chunkIndex);
+                chunk = created;
+            }
+            if (!chunk.compareAndSet(page.id & (PAGE_CHUNK_SIZE - 1), null, page)) {
+                throw new IllegalStateException("duplicate native page id " + page.id);
+            }
+            entryPages.offer(page);
+        }
+
+        void unregisterPage(WriterArena.Page page) {
+            AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(page.id >>> PAGE_CHUNK_BITS);
+            if (chunk != null) chunk.compareAndSet(page.id & (PAGE_CHUNK_SIZE - 1), page, null);
+        }
+
+        WriterArena.Page pageForHandle(int handle) {
+            int pageId = handle >>> WriterArena.HANDLE_SLOT_BITS;
+            if (pageId == 0) return null;
+            AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(pageId >>> PAGE_CHUNK_BITS);
+            return chunk == null ? null : chunk.get(pageId & (PAGE_CHUNK_SIZE - 1));
+        }
+
+        private void reservePhysical(long bytes) {
+            for (;;) {
+                long current = allocated.get();
+                if (current > hardLimit - bytes) {
+                    throw new AllocationLimitException(hardLimit, current, bytes);
+                }
+                if (allocated.compareAndSet(current, current + bytes)) return;
+            }
+        }
+    }
+
+    /** Admission failure is recoverable for cache writes; it is not a JVM-wide OutOfMemoryError. */
+    public static final class AllocationLimitException extends RuntimeException {
+        AllocationLimitException(long hardLimit, long allocated, long requested) {
+            super("native hard limit " + hardLimit + " exceeded: allocated=" + allocated + ", requested=" + requested);
         }
     }
 

@@ -5,20 +5,22 @@ import java.util.Objects;
 
 import com.red.ohc.codec.Hashing;
 
-/** Immutable, pre-serialized key with the folded CHM hash cached at construction. */
+/** Immutable, pre-serialized key with one xxHash64 result and its folded CHM hash cached. */
 public final class EncodedKey {
     final byte[] bytes;
     final int hash;
+    final long hash64;
 
-    private EncodedKey(byte[] bytes, int hash) {
+    private EncodedKey(byte[] bytes, long hash64) {
         this.bytes = bytes;
-        this.hash = hash;
+        this.hash64 = hash64;
+        this.hash = (int) (hash64 ^ (hash64 >>> 32));
     }
 
     public static EncodedKey copyOf(byte[] bytes) {
         Objects.requireNonNull(bytes, "bytes");
         byte[] copy = Arrays.copyOf(bytes, bytes.length);
-        return new EncodedKey(copy, Hashing.xxHash64Folded(copy, 0, copy.length));
+        return new EncodedKey(copy, Hashing.xxHash64(copy, 0, copy.length));
     }
 
     public int length() {
@@ -34,6 +36,10 @@ public final class EncodedKey {
         return hash;
     }
 
+    public long hash64() {
+        return hash64;
+    }
+
     @Override
     public int hashCode() {
         return hash;
@@ -44,6 +50,6 @@ public final class EncodedKey {
         if (this == other) return true;
         if (!(other instanceof EncodedKey)) return false;
         EncodedKey key = (EncodedKey) other;
-        return hash == key.hash && Arrays.equals(bytes, key.bytes);
+        return hash64 == key.hash64 && Arrays.equals(bytes, key.bytes);
     }
 }

@@ -7,6 +7,17 @@ import org.testng.annotations.Test;
 import com.red.ohc.AllocatorType;
 
 public class NativeAllocatorTest {
+    @Test(expectedExceptions = NativeMemory.AllocationLimitException.class)
+    public void nativeHardLimitRejectsTheNextPhysicalAllocation() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA, 64L);
+        long address = memory.allocate(64L);
+        try {
+            memory.allocate(8L);
+        } finally {
+            memory.free(address, 64L);
+        }
+    }
+
     @Test
     public void allocatesAndFreesThroughTheConfiguredNativeBackend() {
         NativeAllocator allocator = new NativeAllocator(AllocatorType.JNA);

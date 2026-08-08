@@ -15,4 +15,12 @@ public class FrequencySketchTest {
         assertEquals(sketch.frequency(0x123456789abcdef0L), 15);
         assertEquals(sketch.bytes(), 131_072L);
     }
+
+    @Test
+    public void sketchStorageTracksPlannedIndexSlotsRatherThanUsingAFixedLargeTable() {
+        FrequencySketch sketch = new FrequencySketch(8_192L);
+
+        assertEquals(sketch.bytes(), 8_192L,
+                "8,192 planned slots require 1,024 packed long words");
+    }
 }

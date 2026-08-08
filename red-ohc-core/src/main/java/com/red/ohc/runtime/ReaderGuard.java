@@ -21,6 +21,7 @@ public final class ReaderGuard {
     }
 
     public boolean enter(ThreadContext context) {
+        context.bindMaintenance(worker);
         if (!context.isRegistered()) {
             context.markRegistered();
             worker.registerReader(context.slot);
@@ -28,6 +29,14 @@ public final class ReaderGuard {
         while (!closing.getAsBoolean()) {
             long observed = worker.epoch();
             context.slot.epoch = observed;
+            // This closes the admission race with shutdown: a close that starts after the loop
+            // condition but before epoch publication must observe us as quiescent, not let this
+            // reader pass through to a native pointer that its actor has already freed.
+            if (closing.getAsBoolean()) {
+                context.slot.epoch = 0L;
+                worker.readerQuiescent();
+                return false;
+            }
             if (observed == worker.epoch()) return true;
             context.slot.epoch = 0L;
             LockSupport.parkNanos(this, 1_000L);
@@ -38,5 +47,6 @@ public final class ReaderGuard {
 
     public void exit(ThreadContext context) {
         context.slot.epoch = 0L;
+        worker.readerQuiescent();
     }
 }

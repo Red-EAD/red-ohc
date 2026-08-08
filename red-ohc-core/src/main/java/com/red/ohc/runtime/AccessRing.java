@@ -27,4 +27,8 @@ public final class AccessRing {
         tail = (current + 1) & 15;
         return true;
     }
+
+    public boolean isEmpty() {
+        return tail == head;
+    }
 }

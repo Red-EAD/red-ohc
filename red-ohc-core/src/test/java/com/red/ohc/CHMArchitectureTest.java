@@ -9,6 +9,7 @@ import java.lang.reflect.Field;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.red.ohc.index.ChmSizing;
+import com.red.ohc.runtime.ReaderRegistry;
 
 import org.testng.annotations.Test;
 
@@ -55,5 +56,12 @@ public final class CHMArchitectureTest {
     public void expectedEntriesSizingDoesNotWrapBeforeApplyingHeadroom() {
         assertEquals(ChmSizing.plannedEntries(2_000_000_000_000_000_000L),
                 2_250_000_000_000_000_000L);
+    }
+
+    @Test
+    public void readerRegistrationUsesOnlyAppendOnlyCas() throws Exception {
+        Field readers = OffHeapCache.class.getDeclaredField("readers");
+        assertEquals(readers.getType(), ReaderRegistry.class,
+                "reader registration must be append-only CAS without a global lock");
     }
 }

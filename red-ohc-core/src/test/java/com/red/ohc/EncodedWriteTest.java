@@ -68,6 +68,28 @@ public class EncodedWriteTest {
         }
     }
 
+    @Test
+    public void sameWeightPermanentReplacementDoesNotCreateAMaintenanceMutation() {
+        try (OffHeapCache<byte[], byte[]> cache = (OffHeapCache<byte[], byte[]>) OHCacheBuilder
+                .<byte[], byte[]>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(FORBIDDEN_SERIALIZER)
+                .valueSerializer(FORBIDDEN_SERIALIZER)
+                .build()) {
+            EncodedKey key = EncodedKey.copyOf(new byte[] {21, 22, 23, 24});
+            assertTrue(cache.putEncoded(key, new byte[] {1, 2, 3, 4}));
+            cache.flushAsync().join();
+            long applied = cache.stats().mutationApplied;
+
+            assertTrue(cache.putEncoded(key, new byte[] {5, 6, 7, 8}));
+            cache.flushAsync().join();
+
+            assertEquals(cache.stats().mutationApplied, applied,
+                    "same allocation weight and deadline leave actor-owned policy/timer state unchanged");
+            assertTrue(cache.withDirectValue(key, view -> assertEquals(view.getByte(0), (byte) 5)));
+        }
+    }
+
     @Test(timeOut = 10_000L)
     public void pendingByteWatermarkKeepsAContinuousEncodedWriteStreamAccepted() {
         final int keys = 4_096;
@@ -93,7 +115,9 @@ public class EncodedWriteTest {
                         OHCacheStats stats = cache.stats();
                         fail("write " + write + " rejected: queue=" + stats.mutationRejectedQueue
                                 + ", budget=" + stats.mutationRejectedBudget + ", unhealthy=" + stats.maintenanceUnhealthy
-                                + ", pending=" + stats.pendingBytes + ", retired=" + stats.retiredBytes);
+                                + ", resident=" + stats.residentWeight + ", retired=" + stats.retiredWeight
+                                + ", native=" + stats.nativeAllocatedBytes
+                                + ", nativeLimit=" + cache.nativeHardLimitForTest());
                     }
                 }
             }

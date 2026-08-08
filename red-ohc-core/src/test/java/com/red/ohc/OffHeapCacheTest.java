@@ -3,11 +3,15 @@ package com.red.ohc;
 import com.red.ohc.*;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.lang.reflect.Method;
 
 import org.testng.annotations.Test;
+
+import com.red.ohc.index.Entry;
 
 public class OffHeapCacheTest {
     private static final CacheSerializer<String> STRING = new CacheSerializer<String>() {
@@ -51,6 +55,26 @@ public class OffHeapCacheTest {
             cache.flushAsync().join();
             assertEquals(readEventually(cache, "key"), "value");
             assertTrue(directEventually(cache));
+        }
+    }
+
+    @Test(timeOut = 1_000L)
+    public void writerClaimDoesNotWaitForAnEntryThatWasAlreadyRetired() throws Exception {
+        try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+            Entry entry = Entry.bootstrap();
+            assertTrue(entry.claimWriter());
+            entry.markRetired();
+            entry.finishWriter();
+
+            Method claimWriter = OffHeapCache.class.getDeclaredMethod("claimWriter", Entry.class);
+            claimWriter.setAccessible(true);
+            assertFalse((Boolean) claimWriter.invoke(cache, entry),
+                    "a stale CHM read must retry rather than park forever on a retired entry");
         }
     }
 

@@ -41,4 +41,25 @@ public final class PermanentReadClockTest {
             assertEquals(readerClockCalls.get(), 0);
         }
     }
+
+    @Test
+    public void ttlReadUsesTheCurrentTickerEvenBeforeTheWorkerPhysicallyRemovesTheEntry() {
+        AtomicInteger now = new AtomicInteger();
+        Ticker ticker = new Ticker() {
+            @Override public long nanos() { return now.get() * 1_000_000L; }
+            @Override public long currentTimeMillis() { return now.get(); }
+        };
+        byte[] key = {9, 8, 7, 6};
+        try (OHCache<byte[], byte[]> cache = OHCacheBuilder.<byte[], byte[]>newBuilder()
+                .capacity(1 << 20)
+                .ticker(ticker)
+                .keySerializer(BYTES)
+                .valueSerializer(BYTES)
+                .build()) {
+            assertTrue(cache.put(key, new byte[16], 64L));
+            cache.flushAsync().join();
+            now.set(64);
+            assertTrue(!cache.withDirectValue(EncodedKey.copyOf(key), value -> value.getLong(0)));
+        }
+    }
 }

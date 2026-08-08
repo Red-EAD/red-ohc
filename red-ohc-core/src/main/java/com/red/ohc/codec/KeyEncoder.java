@@ -16,6 +16,7 @@ public final class KeyEncoder {
         context.ensureKey(length);
         ByteBuffer buffer = context.keyBuffer(length);
         serializer.serialize(key, buffer);
+        context.lookupKey.set(context.keyBytes, length);
         return length;
     }
 }

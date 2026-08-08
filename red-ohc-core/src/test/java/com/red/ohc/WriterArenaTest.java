@@ -7,6 +7,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.SizeClasses;
@@ -71,6 +72,47 @@ public class WriterArenaTest {
     }
 
     @Test
+    public void aCompletelyFreePageIsReusedByAnotherAllocatorStripe() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        try {
+            long bytes = 112L;
+            int slotsPerPage = SizeClasses.PAGE_BYTES / SizeClasses.slotBytes(SizeClasses.indexForEntry(bytes));
+            WriterArena first = arena(memory, 0);
+            WriterArena second = arena(memory, 1);
+            List<Long> entries = new ArrayList<>(slotsPerPage);
+
+            for (int i = 0; i < slotsPerPage; i++) entries.add(first.allocate(bytes));
+            for (long entry : entries) memory.releaseEntry(entry, bytes);
+
+            Assert.assertEquals(memory.rawAllocationCount(), 1L);
+            long reused = second.allocate(bytes);
+            Assert.assertEquals(memory.rawAllocationCount(), 1L,
+                    "a full idle page must leave its stripe and be reused before allocating another native page");
+            memory.releaseEntry(reused, bytes);
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    @Test
+    public void idlePageDepotIsBoundedAndReturnsExcessPagesToTheNativeAllocator() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        try {
+            WriterArena arena = arena(memory, 0);
+            long bytes = 32_752L;
+            int pages = 129;
+            List<Long> entries = new ArrayList<>(pages * 2);
+            for (int index = 0; index < pages * 2; index++) entries.add(arena.allocate(bytes));
+            for (long entry : entries) memory.releaseEntry(entry, bytes);
+
+            Assert.assertEquals(memory.allocated(), 128L * SizeClasses.PAGE_BYTES,
+                    "only the bounded shared idle-page reserve may remain physically allocated");
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    @Test
     public void sizeClassLookupCoversEachSmallAllocationBoundary() {
         Assert.assertEquals(SizeClasses.indexForEntry(112L), 0);
         Assert.assertEquals(SizeClasses.indexForEntry(113L), 1);
@@ -80,7 +122,7 @@ public class WriterArenaTest {
     }
 
     @Test
-    public void drainingRemoteFreesReturnsTheirBytesToTheRemoteBudget() throws Exception {
+    public void reusingFreeSlotsDoesNotAllocateAnotherNativePage() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         try {
             WriterArena arena = memory.newWriterArena();
@@ -90,21 +132,67 @@ public class WriterArenaTest {
             List<Long> entries = new ArrayList<>(count);
 
             for (int i = 0; i < count; i++) entries.add(arena.allocate(bytes));
+            long pagesBeforeReuse = memory.rawAllocationCount();
             for (long entry : entries) memory.releaseEntry(entry, bytes);
-            Assert.assertEquals(remoteBytes(arena), count * (long) SizeClasses.slotBytes(sizeClass));
 
             long reclaimed = arena.allocate(bytes);
-            Assert.assertEquals(remoteBytes(arena), 0L,
-                    "a drained remote stack must no longer consume the remote-free budget");
+            Assert.assertEquals(memory.rawAllocationCount(), pagesBeforeReuse,
+                    "a reclaimed small slot must be served from the cache-owned page pool");
             memory.releaseEntry(reclaimed, bytes);
         } finally {
             memory.closeArenas();
         }
     }
 
-    private static long remoteBytes(WriterArena arena) throws Exception {
-        Field field = WriterArena.class.getDeclaredField("remoteBytes");
+    @Test
+    public void cacheOwnsAFixedPowerOfTwoSetOfAllocatorStripes() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        try {
+            int expected = 1;
+            int target = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
+            while (expected < target) expected <<= 1;
+            Assert.assertEquals(memory.writerStripeCount(), expected);
+            Assert.assertSame(memory.newWriterArena(), memory.newWriterArena(),
+                    "a calling thread must select a cache-owned stripe rather than create a permanent arena");
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    @Test
+    public void smallFreeListUsesAStampedSlotHandleRatherThanABareNativeAddress() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        try {
+            WriterArena arena = memory.newWriterArena();
+            long bytes = 112L;
+            long first = arena.allocate(bytes);
+            memory.releaseEntry(first, bytes);
+            long before = headState(arena, SizeClasses.indexForEntry(bytes));
+
+            long reused = arena.allocate(bytes);
+            memory.releaseEntry(reused, bytes);
+            long after = headState(arena, SizeClasses.indexForEntry(bytes));
+
+            Assert.assertEquals(reused, first);
+            Assert.assertNotEquals(before >>> 31, after >>> 31,
+                    "each pop/push must advance the head stamp so a paused CAS cannot suffer ABA");
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    private static long headState(WriterArena arena, int sizeClass) throws Exception {
+        Field pagesField = WriterArena.class.getDeclaredField("currentPages");
+        pagesField.setAccessible(true);
+        Object page = ((AtomicReferenceArray<?>) pagesField.get(arena)).get(sizeClass);
+        Field headField = page.getClass().getDeclaredField("freeHead");
+        headField.setAccessible(true);
+        return ((AtomicLong) headField.get(page)).get();
+    }
+
+    private static WriterArena arena(NativeMemory.Memory memory, int index) throws Exception {
+        Field field = NativeMemory.Memory.class.getDeclaredField("arenas");
         field.setAccessible(true);
-        return ((AtomicLong) field.get(arena)).get();
+        return ((WriterArena[]) field.get(memory))[index];
     }
 }

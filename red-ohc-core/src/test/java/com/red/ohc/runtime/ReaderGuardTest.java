@@ -1,11 +1,11 @@
 package com.red.ohc.runtime;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
 
@@ -22,14 +22,32 @@ public class ReaderGuardTest {
     public void enterPublishesAnEpochAndExitQuiescesTheReader() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         MaintenanceEventLoop loop = new MaintenanceEventLoop(new ConcurrentHashMap<>(), memory,
-                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, 256,
-                new AtomicLong(), new CopyOnWriteArrayList<ReaderSlot>());
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
         ReaderGuard guard = new ReaderGuard(loop, () -> false);
         ThreadContext context = new ThreadContext();
         try {
             assertTrue(guard.enter(context));
             assertTrue(context.slot.epoch != 0L);
             guard.exit(context);
+            assertEquals(context.slot.epoch, 0L);
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    @Test
+    public void closeRacingAfterEpochPublicationRejectsTheReaderBeforeItCanDereferenceNativeMemory() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(new ConcurrentHashMap<>(), memory,
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
+        AtomicInteger closeChecks = new AtomicInteger();
+        ReaderGuard guard = new ReaderGuard(loop, () -> closeChecks.getAndIncrement() != 0);
+        ThreadContext context = new ThreadContext();
+        try {
+            assertFalse(guard.enter(context),
+                    "close after epoch publication must reject the reader instead of letting it race shutdown free");
             assertEquals(context.slot.epoch, 0L);
         } finally {
             memory.closeArenas();
