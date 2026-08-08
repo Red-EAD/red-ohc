@@ -14,6 +14,10 @@ import sun.misc.Unsafe;
 public final class NativeMemory {
     static final Unsafe U;
     static final long BYTE_ARRAY_BASE;
+    /** Start block-wise comparison only when the key is large enough to amortize aggregation. */
+    static final int BULK_EQUALS_THRESHOLD = 128;
+    /** Eight machine words form one comparison block (64 bytes). */
+    static final int BULK_EQUALS_LONGS = 8;
 
     static {
         try {
@@ -277,6 +281,24 @@ public final class NativeMemory {
     }
     public static boolean equals(long address, byte[] bytes, int offset, int length) {
         int i = 0;
+        if (length >= BULK_EQUALS_THRESHOLD) {
+            int blockBytes = BULK_EQUALS_LONGS * Long.BYTES;
+            for (; i + blockBytes <= length; i += blockBytes) {
+                // Aggregate all word differences in the block before branching. This is a
+                // portable SWAR-style optimization: it reduces branch frequency without
+                // requiring the JVM to generate platform-specific SIMD instructions.
+                long diff = 0L;
+                diff |= U.getLong(address + i) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i);
+                diff |= U.getLong(address + i + 8) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 8);
+                diff |= U.getLong(address + i + 16) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 16);
+                diff |= U.getLong(address + i + 24) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 24);
+                diff |= U.getLong(address + i + 32) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 32);
+                diff |= U.getLong(address + i + 40) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 40);
+                diff |= U.getLong(address + i + 48) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 48);
+                diff |= U.getLong(address + i + 56) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 56);
+                if (diff != 0L) return false;
+            }
+        }
         for (; i + 8 <= length; i += 8) {
             if (U.getLong(address + i) != U.getLong(bytes, BYTE_ARRAY_BASE + offset + i)) return false;
         }
@@ -285,6 +307,23 @@ public final class NativeMemory {
     }
     public static boolean equals(long left, long right, int length) {
         int i = 0;
+        if (length >= BULK_EQUALS_THRESHOLD) {
+            int blockBytes = BULK_EQUALS_LONGS * Long.BYTES;
+            for (; i + blockBytes <= length; i += blockBytes) {
+                // Keep the same block shape as the heap-array overload so both hot paths
+                // have identical early-exit semantics and are easy to benchmark together.
+                long diff = 0L;
+                diff |= U.getLong(left + i) ^ U.getLong(right + i);
+                diff |= U.getLong(left + i + 8) ^ U.getLong(right + i + 8);
+                diff |= U.getLong(left + i + 16) ^ U.getLong(right + i + 16);
+                diff |= U.getLong(left + i + 24) ^ U.getLong(right + i + 24);
+                diff |= U.getLong(left + i + 32) ^ U.getLong(right + i + 32);
+                diff |= U.getLong(left + i + 40) ^ U.getLong(right + i + 40);
+                diff |= U.getLong(left + i + 48) ^ U.getLong(right + i + 48);
+                diff |= U.getLong(left + i + 56) ^ U.getLong(right + i + 56);
+                if (diff != 0L) return false;
+            }
+        }
         for (; i + 8 <= length; i += 8) if (U.getLong(left + i) != U.getLong(right + i)) return false;
         for (; i < length; i++) if (U.getByte(left + i) != U.getByte(right + i)) return false;
         return true;
