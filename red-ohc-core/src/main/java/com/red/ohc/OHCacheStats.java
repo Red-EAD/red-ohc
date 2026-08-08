@@ -8,6 +8,7 @@ public final class OHCacheStats {
     public final long mutationAccepted;
     public final long mutationRejectedQueue;
     public final long mutationRejectedBudget;
+    public final long mutationRejectedRetirement;
     public final long mutationApplied;
     public final long maintenanceQueueDepth;
     public final long maintenanceQueueCapacity;
@@ -29,11 +30,14 @@ public final class OHCacheStats {
     public final long sketchHeapBytes;
     public final long ghostHeapBytes;
     public final long retirementQueueNativeBytes;
+    public final long retirementQueueDepth;
+    public final long retirementQueueCapacity;
     public final long wakeSignals;
     public final long mergedWakeSignals;
 
     public OHCacheStats(long readHits, long readMisses, long readAccessDropped,
                         long mutationAccepted, long mutationRejectedQueue, long mutationRejectedBudget,
+                        long mutationRejectedRetirement,
                         long mutationApplied, long maintenanceQueueDepth, long maintenanceQueueCapacity,
                         long maintenanceLoopNanos, boolean maintenanceUnhealthy,
                         long logicalExpired, long physicalExpired, long ttlLagMillis, long ttlBacklog,
@@ -41,6 +45,7 @@ public final class OHCacheStats {
                         long retiredEntries, long liveWeight, long residentWeight, long retiredWeight,
                         long nativeAllocatedBytes, long timerHeapBytes, long sketchHeapBytes,
                         long ghostHeapBytes, long retirementQueueNativeBytes,
+                        long retirementQueueDepth, long retirementQueueCapacity,
                         long wakeSignals, long mergedWakeSignals) {
         this.readHits = readHits;
         this.readMisses = readMisses;
@@ -48,6 +53,7 @@ public final class OHCacheStats {
         this.mutationAccepted = mutationAccepted;
         this.mutationRejectedQueue = mutationRejectedQueue;
         this.mutationRejectedBudget = mutationRejectedBudget;
+        this.mutationRejectedRetirement = mutationRejectedRetirement;
         this.mutationApplied = mutationApplied;
         this.maintenanceQueueDepth = maintenanceQueueDepth;
         this.maintenanceQueueCapacity = maintenanceQueueCapacity;
@@ -69,6 +75,8 @@ public final class OHCacheStats {
         this.sketchHeapBytes = sketchHeapBytes;
         this.ghostHeapBytes = ghostHeapBytes;
         this.retirementQueueNativeBytes = retirementQueueNativeBytes;
+        this.retirementQueueDepth = retirementQueueDepth;
+        this.retirementQueueCapacity = retirementQueueCapacity;
         this.wakeSignals = wakeSignals;
         this.mergedWakeSignals = mergedWakeSignals;
     }

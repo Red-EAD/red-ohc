@@ -3,8 +3,8 @@ package com.red.ohc.storage;
 import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicReferenceArray;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 import com.red.ohc.AllocatorType;
 
@@ -38,12 +38,17 @@ public final class NativeMemory {
         private final int stripeMask;
         private static final int PAGE_CHUNK_BITS = 10;
         private static final int PAGE_CHUNK_SIZE = 1 << PAGE_CHUNK_BITS;
-        private static final int PAGE_CHUNK_COUNT = 1 << 12;
-        private static final int MAX_PAGE_ID = (1 << 22) - 1;
+        private static final int PAGE_CHUNK_COUNT = 1 << (WriterArena.PAGE_ID_BITS - PAGE_CHUNK_BITS);
+        private static final int MAX_PAGE_ID = WriterArena.PAGE_ID_MASK;
+        private static final int PAGE_VERSION_BITS = 22 - WriterArena.PAGE_ID_BITS;
+        private static final int PAGE_VERSION_MASK = (1 << PAGE_VERSION_BITS) - 1;
         private final AtomicInteger nextPageId = new AtomicInteger(1);
+        /** Sparse page-id free stack; nodes are indices in fixed primitive arrays, never Page objects. */
+        private final AtomicInteger freePageIdHead = new AtomicInteger();
+        private final AtomicIntegerArray freePageIdNext = new AtomicIntegerArray(MAX_PAGE_ID + 1);
+        private final AtomicIntegerArray pageVersions = new AtomicIntegerArray(MAX_PAGE_ID + 1);
         private final AtomicReferenceArray<AtomicReferenceArray<WriterArena.Page>> pageChunks =
                 new AtomicReferenceArray<>(PAGE_CHUNK_COUNT);
-        private final ConcurrentLinkedQueue<WriterArena.Page> entryPages = new ConcurrentLinkedQueue<>();
         private final PageDepot pageDepot;
 
         public Memory(AllocatorType type) {
@@ -136,16 +141,24 @@ public final class NativeMemory {
         public void closeArenas() {
             for (WriterArena arena : arenas) arena.releasePages();
             pageDepot.clear();
-            WriterArena.Page page;
-            while ((page = entryPages.poll()) != null) freeEntryPage(page);
+            for (int chunkIndex = 0; chunkIndex < pageChunks.length(); chunkIndex++) {
+                AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(chunkIndex);
+                if (chunk == null) continue;
+                for (int slot = 0; slot < chunk.length(); slot++) {
+                    WriterArena.Page page = chunk.get(slot);
+                    if (page != null) freeEntryPage(page);
+                }
+            }
         }
 
         WriterArena.Page acquireEntryPage(int sizeClass) {
             WriterArena.Page reused = pageDepot.acquire(sizeClass);
             if (reused != null) return reused;
-            int pageId = nextPageId();
+            int pageKey = nextPageKey();
+            int pageId = pageKey & MAX_PAGE_ID;
             long address = allocateEntryPage();
-            WriterArena.Page page = new WriterArena.Page(pageId, address, sizeClass, SizeClasses.slotBytes(sizeClass));
+            WriterArena.Page page = new WriterArena.Page(pageId, pageKey, address,
+                    sizeClass, SizeClasses.slotBytes(sizeClass));
             registerPage(page);
             return page;
         }
@@ -162,14 +175,17 @@ public final class NativeMemory {
             if (!page.freePhysical()) return;
             unregisterPage(page);
             free(page.address, SizeClasses.PAGE_BYTES);
+            recyclePageId(page.id);
         }
 
-        int nextPageId() {
-            int pageId = nextPageId.getAndIncrement();
+        int nextPageKey() {
+            int pageId = takeFreePageId();
+            if (pageId == 0) pageId = nextPageId.getAndIncrement();
             if (pageId <= 0 || pageId > MAX_PAGE_ID) {
                 throw new AllocationLimitException(hardLimit, allocated.get(), SizeClasses.PAGE_BYTES);
             }
-            return pageId;
+            int version = pageVersions.incrementAndGet(pageId) & PAGE_VERSION_MASK;
+            return (version << WriterArena.PAGE_ID_BITS) | pageId;
         }
 
         void registerPage(WriterArena.Page page) {
@@ -183,7 +199,6 @@ public final class NativeMemory {
             if (!chunk.compareAndSet(page.id & (PAGE_CHUNK_SIZE - 1), null, page)) {
                 throw new IllegalStateException("duplicate native page id " + page.id);
             }
-            entryPages.offer(page);
         }
 
         void unregisterPage(WriterArena.Page page) {
@@ -192,10 +207,29 @@ public final class NativeMemory {
         }
 
         WriterArena.Page pageForHandle(int handle) {
-            int pageId = handle >>> WriterArena.HANDLE_SLOT_BITS;
+            int pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
+            int pageId = pageKey & MAX_PAGE_ID;
             if (pageId == 0) return null;
             AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(pageId >>> PAGE_CHUNK_BITS);
-            return chunk == null ? null : chunk.get(pageId & (PAGE_CHUNK_SIZE - 1));
+            WriterArena.Page page = chunk == null ? null : chunk.get(pageId & (PAGE_CHUNK_SIZE - 1));
+            return page != null && page.pageKey == pageKey ? page : null;
+        }
+
+        private int takeFreePageId() {
+            for (;;) {
+                int head = freePageIdHead.get();
+                if (head == 0) return 0;
+                int next = freePageIdNext.get(head);
+                if (freePageIdHead.compareAndSet(head, next)) return head;
+            }
+        }
+
+        private void recyclePageId(int pageId) {
+            for (;;) {
+                int head = freePageIdHead.get();
+                freePageIdNext.set(pageId, head);
+                if (freePageIdHead.compareAndSet(head, pageId)) return;
+            }
         }
 
         private void reservePhysical(long bytes) {

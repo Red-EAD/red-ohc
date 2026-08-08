@@ -25,17 +25,22 @@ public final class Budget {
         int target = Math.max(1, Runtime.getRuntime().availableProcessors());
         while (count < target && count < (1 << 30)) count <<= 1;
         this.credits = new Stripe[count];
-        for (int index = 0; index < count; index++) credits[index] = new Stripe();
+        for (int index = 0; index < count; index++) credits[index] = new Stripe(this, index);
         this.stripeMask = count - 1;
         this.available = new AtomicLong(capacity);
         long fairShare = Math.max(1L, capacity / count);
         this.refillBytes = Math.min(MAX_REFILL_BYTES, fairShare);
     }
 
+    /** Selects the fixed writer stripe once while a cache-local ThreadContext is created. */
+    public Stripe stripeForCurrentThread() {
+        return credits[((int) Thread.currentThread().getId()) & stripeMask];
+    }
+
     /** Atomically admits actual native resident weight; no allocation can exceed {@link #capacity}. */
-    public boolean reserve(long bytes) {
+    public boolean reserve(Stripe stripe, long bytes) {
         if (bytes <= 0L || bytes > capacity) return false;
-        int stripe = stripeForCurrentThread();
+        if (stripe == null || stripe.owner != this) throw new IllegalArgumentException("foreign budget stripe");
         if (consumeCredit(stripe, bytes)) return true;
         return refillAndConsume(stripe, bytes);
     }
@@ -78,16 +83,15 @@ public final class Budget {
         available.set(capacity);
     }
 
-    private boolean consumeCredit(int stripe, long bytes) {
+    private boolean consumeCredit(Stripe stripe, long bytes) {
         for (;;) {
-            Stripe creditsForStripe = credits[stripe];
-            long credit = creditsForStripe.credit;
+            long credit = stripe.credit;
             if (credit < bytes) return false;
-            if (Stripe.CREDIT.compareAndSet(creditsForStripe, credit, credit - bytes)) return true;
+            if (Stripe.CREDIT.compareAndSet(stripe, credit, credit - bytes)) return true;
         }
     }
 
-    private boolean refillAndConsume(int stripe, long bytes) {
+    private boolean refillAndConsume(Stripe stripe, long bytes) {
         for (;;) {
             if (consumeCredit(stripe, bytes)) return true;
             long requested = Math.max(bytes, refillBytes);
@@ -97,13 +101,13 @@ public final class Budget {
     }
 
     /** Moves one bounded chunk into this stripe and consumes the requested part in one operation. */
-    private boolean borrowGlobalCredit(int stripe, long bytes, long requested) {
+    private boolean borrowGlobalCredit(Stripe stripe, long bytes, long requested) {
         for (;;) {
             long free = available.get();
             if (free < bytes) return false;
             long grant = Math.min(free, requested);
             if (!available.compareAndSet(free, free - grant)) continue;
-            Stripe.CREDIT.getAndAdd(credits[stripe], grant - bytes);
+            Stripe.CREDIT.getAndAdd(stripe, grant - bytes);
             return true;
         }
     }
@@ -112,11 +116,11 @@ public final class Budget {
      * Stripes retain at most a refill chunk. Under pressure a writer reclaims those idle chunks
      * before rejecting, so short-lived producer threads cannot pin cache capacity forever.
      */
-    private boolean reclaimIdleCredits(int requestingStripe) {
+    private boolean reclaimIdleCredits(Stripe requestingStripe) {
         boolean reclaimed = false;
         for (int offset = 0; offset < credits.length; offset++) {
-            int stripe = (requestingStripe + offset) & stripeMask;
-            Stripe creditsForStripe = credits[stripe];
+            int index = (requestingStripe.index + offset) & stripeMask;
+            Stripe creditsForStripe = credits[index];
             for (;;) {
                 long credit = creditsForStripe.credit;
                 if (credit == 0L) break;
@@ -130,15 +134,18 @@ public final class Budget {
         return reclaimed;
     }
 
-    private int stripeForCurrentThread() {
-        return ((int) Thread.currentThread().getId()) & stripeMask;
-    }
-
     /** Separate objects prevent different CPU stripes from sharing one AtomicLongArray cache line. */
-    private static final class Stripe {
+    public static final class Stripe {
         private static final AtomicLongFieldUpdater<Stripe> CREDIT =
                 AtomicLongFieldUpdater.newUpdater(Stripe.class, "credit");
+        private final Budget owner;
+        private final int index;
         volatile long credit;
         @SuppressWarnings("unused") private long pad0, pad1, pad2, pad3, pad4, pad5, pad6;
+
+        private Stripe(Budget owner, int index) {
+            this.owner = owner;
+            this.index = index;
+        }
     }
 }

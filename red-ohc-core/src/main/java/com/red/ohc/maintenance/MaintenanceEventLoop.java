@@ -1,18 +1,20 @@
 package com.red.ohc.maintenance;
 
+import java.util.ArrayDeque;
+import java.lang.ref.WeakReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
-import org.jctools.queues.MpscArrayQueue;
+import org.jctools.queues.MpscUnboundedXaddArrayQueue;
 
 import com.red.ohc.Eviction;
 import com.red.ohc.Ticker;
-import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
 import com.red.ohc.runtime.AccessConsumer;
 import com.red.ohc.runtime.ReaderSlot;
@@ -27,6 +29,8 @@ import com.red.ohc.storage.WriterArena;
  * ordinary index visibility. Business threads publish those changes directly to the CHM.
  */
 public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerConsumer, AccessConsumer {
+    private static final int MUTATION_CHUNK_SIZE = 1_024;
+    private static final int MUTATION_POOLED_CHUNKS = 4;
     private static final long EPOCH_ADVANCE_INTERVAL_NANOS = 1_000_000L;
     /**
      * After draining a producer burst, stay in REQUIRED and sleep briefly before returning to an
@@ -41,17 +45,19 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
      * native wall/monotonic-clock trip for every tiny retirement batch.
      */
     private static final int CLOCK_SAMPLE_INTERVAL_PASSES = 16;
+    /** A deferred mutation has a writer in progress; retry it without turning idle into a poll loop. */
+    private static final long DEFERRED_MUTATION_RETRY_NANOS = 1_000L;
     private final ConcurrentHashMap<Entry, Entry> data;
     private final NativeMemory.Memory memory;
     private final Budget budget;
     private final Ticker ticker;
     private final long capacity;
-    private final int queueLimit;
     private final int dirtyLimit;
     private final AtomicInteger dirtyEventCount = new AtomicInteger();
-    private final MpscArrayQueue<Entry> queue;
-    private final AtomicReference<Entry> repairHead = new AtomicReference<>();
-    private final AtomicInteger repairCount = new AtomicInteger();
+    private final MpscUnboundedXaddArrayQueue<Entry> queue;
+    /** Actor-owned Entries whose transport item arrived while a writer owns the Entry mutex. */
+    private final ArrayDeque<Entry> deferredMutations = new ArrayDeque<>();
+    private long deferredMutationRetryNanos = Long.MAX_VALUE;
     private final AtomicBoolean accessHint = new AtomicBoolean();
     private final ReaderRegistry readers;
     private final RetirementQueue retirements;
@@ -86,9 +92,11 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     private final AtomicLong hits = new AtomicLong();
     private final AtomicLong misses = new AtomicLong();
     private final AtomicLong accessDropped = new AtomicLong();
-    private final AtomicLong accepted = new AtomicLong();
+    /** A write-path statistic: striped so successful puts do not serialize on one cache line. */
+    private final LongAdder accepted = new LongAdder();
     private final AtomicLong rejectedQueue = new AtomicLong();
     private final AtomicLong rejectedBudget = new AtomicLong();
+    private final AtomicLong rejectedRetirement = new AtomicLong();
     private final AtomicLong applied = new AtomicLong();
     private final AtomicLong evicted = new AtomicLong();
     private final AtomicLong logicalExpired = new AtomicLong();
@@ -100,8 +108,10 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     /** Updated only on the rare idle-to-required wake transition, never on a merged put. */
     private final AtomicLong wakeUnparks = new AtomicLong();
     private final AtomicBoolean unhealthy = new AtomicBoolean();
-    /** An over-capacity policy whose remaining candidates are writer-locked must park, not spin. */
-    private boolean evictionDeferred;
+    /** A bounded S3 scan continues immediately; a writer-lock conflict sleeps until this retry deadline. */
+    private boolean evictionScanExhausted;
+    private long evictionRetryNanos = Long.MAX_VALUE;
+    private long evictionRetryBackoffNanos = 1_000L;
     /** A sealed retirement could not pass QSBR; recheck it on the bounded epoch deadline. */
     private boolean reclaimBlocked;
     /** Actor-owned marker: publish the policy weight only after a policy mutation. */
@@ -110,25 +120,13 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public MaintenanceEventLoop(ConcurrentHashMap<Entry, Entry> data,
                                 NativeMemory.Memory memory, Budget budget, Ticker ticker,
                                 long capacity, Eviction eviction, ReaderRegistry readers) {
-        this(data, memory, budget, ticker, capacity, eviction, readers,
-                ChmSizing.maintenanceQueueCapacity(0L, capacity, 1L));
-    }
-
-    public MaintenanceEventLoop(ConcurrentHashMap<Entry, Entry> data,
-                                NativeMemory.Memory memory, Budget budget, Ticker ticker,
-                                long capacity, Eviction eviction, ReaderRegistry readers,
-                                int queueCapacity) {
-        if (Integer.bitCount(queueCapacity) != 1 || queueCapacity < 2) {
-            throw new IllegalArgumentException("queueCapacity must be a power of two >= 2");
-        }
         this.data = data;
         this.memory = memory;
         this.budget = budget;
         this.ticker = ticker;
         this.capacity = capacity;
-        this.queueLimit = queueCapacity;
-        this.dirtyLimit = dirtyLimit(queueCapacity);
-        this.queue = new MpscArrayQueue<>(queueCapacity);
+        this.dirtyLimit = dirtyLimit();
+        this.queue = new MpscUnboundedXaddArrayQueue<>(MUTATION_CHUNK_SIZE, MUTATION_POOLED_CHUNKS);
         this.policy = new MaintenancePolicy(eviction, capacity);
         this.readers = readers;
         this.retirements = new RetirementQueue(memory, stripeCount(), retirementRecordsPerStripe());
@@ -156,8 +154,12 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public long epoch() { return epoch; }
     public long nowMillis() { return nowMillis; }
     public Thread thread() { return thread; }
-    public long queueDepth() { return (long) queue.size() + repairCount.get(); }
-    public long queueCapacity() { return queueLimit; }
+    /** Logical unique-entry backlog; the physical XADD queue is deliberately unbounded. */
+    public long queueDepth() { return dirtyEventCount.get(); }
+    public long queueCapacity() { return dirtyLimit; }
+    public boolean mutationBacklogExceeds() {
+        return dirtyEventCount.get() >= (dirtyLimit * 7L + 7L) / 8L;
+    }
     public long retiredBytes() { return retirements.retiredBytes(); }
     public int retiredEntries() { return retirements.retiredEntries(); }
     public long oldestRetireEpoch() { return retirements.oldestEpoch(); }
@@ -169,6 +171,9 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public long ledgerBytes() {
         return retirements.allocatedBytes();
     }
+    public long retirementQueueDepth() { return retirements.queuedRecords(); }
+    public long retirementQueueCapacity() { return retirements.capacityRecords(); }
+    public boolean retirementBacklogExceeds() { return retirements.exceedsHighWatermark(); }
 
     public void registerReader(ReaderSlot slot) {
         readers.register(slot);
@@ -192,8 +197,9 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public void recordHit() { hits.incrementAndGet(); }
     public void recordMiss() { misses.incrementAndGet(); }
     public void recordDropped() { accessDropped.incrementAndGet(); }
-    public void recordAccepted() { accepted.incrementAndGet(); }
+    public void recordAccepted() { accepted.increment(); }
     public void recordBudgetRejected() { rejectedBudget.incrementAndGet(); }
+    public void recordRetirementRejected() { rejectedRetirement.incrementAndGet(); }
     public void markUnhealthy() { unhealthy.set(true); }
 
     /**
@@ -202,28 +208,32 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
      */
     public boolean reserveMutation(Entry entry, int flags) {
         if (unhealthy.get()) return false;
-        if (!entry.beginPending(flags)) return true;
-        if (!tryAcquireDirtyCredit()) {
+        boolean needsCredit = entry.beginPending(flags);
+        if (needsCredit && !tryAcquireDirtyCredit()) {
             entry.cancelPendingClaim();
             rejectedQueue.incrementAndGet();
             return false;
         }
-        entry.commitPendingClaim(flags);
         return true;
     }
 
     /** Publishes a reservation after the associated CHM/value mutation is visible. */
     public void publishMutation(Entry entry) {
+        entry.completePendingClaim();
         if (!entry.publishPending()) return;
-        if (queue.offer(entry)) return;
-        if (entry.moveToRepair()) {
-            pushRepair(entry);
+        try {
+            queue.offer(entry);
+        } catch (OutOfMemoryError error) {
+            // The mapping/value pointer is already visible. No later write may rely on actor
+            // state if the transport cannot allocate another chunk.
+            unhealthy.set(true);
+            throw error;
         }
     }
 
     /** Cancels a pre-publication reservation and returns its unique dirty credit. */
     public void cancelMutation(Entry entry) {
-        if (entry.cancelPending()) releaseDirtyCredit();
+        if (entry.cancelPendingClaim()) releaseDirtyCredit();
     }
 
     /** Publishes a pre-reserved block to the cache-owned native retirement transport. */
@@ -247,7 +257,9 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
 
     /** Reserves native retirement records before an index mutation publishes a replacement or removal. */
     public boolean prepareRetirement(com.red.ohc.runtime.ThreadContext context, int records) {
-        return retirements.reserve(context.retirement, records);
+        boolean reserved = retirements.reserve(context.retirement, records);
+        if (!reserved) rejectedRetirement.incrementAndGet();
+        return reserved;
     }
 
     public void cancelRetirement(com.red.ohc.runtime.ThreadContext context) {
@@ -269,13 +281,14 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     }
 
     public Snapshot snapshot() {
-        return new Snapshot(hits.get(), misses.get(), accessDropped.get(), accepted.get(),
-                rejectedQueue.get(), rejectedBudget.get(), applied.get(), evicted.get(),
+        return new Snapshot(hits.get(), misses.get(), accessDropped.get(), accepted.sum(),
+                rejectedQueue.get(), rejectedBudget.get(), rejectedRetirement.get(), applied.get(), evicted.get(),
                 logicalExpired.get(), physicalExpired.get(), maintenanceLoopNanos.get(), publishedLiveWeight,
                 timeoutLagMillis.get(),
                 unhealthy.get(), queueDepth(), retiredEntries(), retiredBytes(), oldestRetireEpoch(),
                 policyEvictions(), evictionScans.get(), evictionLockedSkips.get(),
-                timerBytes(), ttlBacklog(), sketchBytes(), ghostHeapBytes(), ledgerBytes(), queueLimit,
+                timerBytes(), ttlBacklog(), sketchBytes(), ghostHeapBytes(), ledgerBytes(), dirtyLimit,
+                retirementQueueDepth(), retirementQueueCapacity(),
                 wakeUnparks.get(), wakeGate.mergedTransitions());
     }
 
@@ -283,7 +296,8 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public void run() {
         wakeGate.requireProcessing();
         while (!stopping || hasWork()) {
-            if (!stopping && !hasSourceWork() && !retirements.hasPendingReclaim()) {
+            if (!stopping && !hasImmediateSourceWork() && deferredMutations.isEmpty()
+                    && !retirements.hasPendingReclaim() && !evictionWorkDue()) {
                 parkUntilWorkOrTimer(false);
                 continue;
             }
@@ -292,18 +306,19 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
                     || retirements.hasPendingReclaim();
             boolean sampledClock = needsClock && sampleClockIfDue();
             int work = wheel.hasPending() ? wheel.advance(nowMillis, 1_000, this) : 0;
+            boolean mutationsPending = !queue.isEmpty() || !deferredMutations.isEmpty();
+            if (mutationsPending) policy.beginWriteBatch();
             if (!queue.isEmpty()) work += drainMutations(4096);
-            if (repairHead.get() != null) work += drainRepairs(4096);
+            if (!deferredMutations.isEmpty()) work += drainDeferredMutations(4096);
             if (accessHint.get()) work += drainAccesses(4096);
             if (retirements.hasReadyHint()) work += sealRetirements(1024);
             if (advanceEpochIfDue(nowNanos)) work++;
             if (retirements.hasPendingReclaim()) work += reclaim(1024);
-            evictionDeferred = false;
             if (!stopping) work += evictIfNeeded(64);
             publishLiveWeight();
             completeFlushIfIdle();
             if (sampledClock) maintenanceLoopNanos.set(ticker.nanos() - nowNanos);
-            if (!hasSourceWork()) {
+            if (!hasImmediateSourceWork() && !evictionScanExhausted) {
                 parkUntilWorkOrTimer(work != 0 && !stopping);
             }
         }
@@ -322,7 +337,11 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     }
 
     private boolean hasSourceWork() {
-        return !queue.isEmpty() || repairHead.get() != null || accessHint.get()
+        return hasImmediateSourceWork() || !deferredMutations.isEmpty();
+    }
+
+    private boolean hasImmediateSourceWork() {
+        return !queue.isEmpty() || accessHint.get()
                 || flushRequest.get() != null || retirements.hasReadyHint()
                 || clockRefreshRequested;
     }
@@ -331,7 +350,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         if (batchGrace) {
             parked = true;
             try {
-                long timerDelay = wheel.nextDelayNanos(nowMillis);
+                long timerDelay = nextParkDelayNanos();
                 LockSupport.parkNanos(this, Math.min(WRITE_BATCH_GRACE_NANOS, timerDelay));
                 if (timerDelay != Long.MAX_VALUE) clockRefreshRequested = true;
             } finally {
@@ -344,7 +363,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         // this point observes it and changes PROCESSING_TO_IDLE to PROCESSING_TO_REQUIRED;
         // a producer before it is still covered by hasWork().
         idleGeneration++;
-        if (stopping || hasSourceWork()) {
+        if (stopping || hasImmediateSourceWork()) {
             wakeGate.requireProcessing();
             return;
         }
@@ -358,7 +377,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         if (!wakeGate.finishIdle()) return;
         parked = true;
         try {
-            long delay = wheel.nextDelayNanos(nowMillis);
+            long delay = nextParkDelayNanos();
             if (retirements.hasPendingReclaim()) {
                 delay = Math.min(delay, epochAdvanceDelayNanos(ticker.nanos()));
             }
@@ -380,7 +399,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         CompletableFuture<Void> future = flushRequest.get();
         if (future == null) return;
         if (clockRefreshRequested) return;
-        if (!queue.isEmpty() || repairHead.get() != null || accessHint.get()
+        if (!queue.isEmpty() || !deferredMutations.isEmpty() || accessHint.get()
                 || retirements.hasReadyHint()) return;
         if (flushRequest.compareAndSet(future, null)) future.complete(null);
     }
@@ -396,26 +415,44 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         return work;
     }
 
-    private int drainRepairs(int limit) {
-        Entry current = repairHead.getAndSet(null);
-        int work = 0;
-        while (current != null && work < limit) {
-            Entry next = current.repairNext;
-            current.repairNext = null;
-            repairCount.decrementAndGet();
-            processEntry(current);
-            current = next;
-            work++;
-        }
-        if (current != null) pushRepairChain(current);
-        return work;
-    }
-
     private void processEntry(Entry entry) {
         int flags = entry.takePending();
+        // beginPending() holds this claim from reservation through pointer publication. It is
+        // stronger than observing the writer mutex: a racing actor can never clear the merged
+        // flags after a writer started but before the writer publishes its new value pointer.
+        if (flags == Entry.PENDING_BUSY) {
+            deferMutation(entry);
+            return;
+        }
         if (flags == 0) return;
         releaseDirtyCredit();
         processEntry(entry, flags);
+    }
+
+    private int drainDeferredMutations(int limit) {
+        int attempts = deferredMutations.size();
+        int work = 0;
+        while (attempts-- > 0 && work < limit) {
+            Entry entry = deferredMutations.removeFirst();
+            int flags = entry.takePending();
+            if (flags == Entry.PENDING_BUSY) {
+                deferredMutations.addLast(entry);
+                continue;
+            }
+            if (flags != 0) {
+                releaseDirtyCredit();
+                processEntry(entry, flags);
+                work++;
+            }
+        }
+        deferredMutationRetryNanos = deferredMutations.isEmpty()
+                ? Long.MAX_VALUE : ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
+        return work;
+    }
+
+    private void deferMutation(Entry entry) {
+        deferredMutations.addLast(entry);
+        deferredMutationRetryNanos = ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
     }
 
     private void processEntry(Entry entry, int flags) {
@@ -491,10 +528,37 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         return elapsed >= EPOCH_ADVANCE_INTERVAL_NANOS ? 0L : EPOCH_ADVANCE_INTERVAL_NANOS - elapsed;
     }
 
+    private long nextParkDelayNanos() {
+        long delay = wheel.nextDelayNanos(nowMillis);
+        if (deferredMutationRetryNanos != Long.MAX_VALUE) {
+            long retryDelay = deferredMutationRetryNanos - ticker.nanos();
+            if (retryDelay <= 0L) delay = 1L;
+            else delay = Math.min(delay, retryDelay);
+        }
+        if (policy.usedBytes() <= capacity || evictionScanExhausted || evictionRetryNanos == Long.MAX_VALUE) {
+            return delay;
+        }
+        long evictionDelay = evictionRetryNanos - ticker.nanos();
+        return evictionDelay <= 0L ? 1L : Math.min(delay, evictionDelay);
+    }
+
+    private boolean evictionWorkDue() {
+        if (policy.usedBytes() <= capacity) return false;
+        return evictionScanExhausted || evictionRetryNanos <= ticker.nanos();
+    }
+
+    private void scheduleEvictionRetry() {
+        long now = ticker.nanos();
+        evictionRetryNanos = now + evictionRetryBackoffNanos;
+        evictionRetryBackoffNanos = Math.min(1_000_000L, evictionRetryBackoffNanos << 1);
+    }
+
     private int drainAccesses(int limit) {
         if (!accessHint.getAndSet(false)) return 0;
         int work = 0;
-        for (ReaderSlot slot : readers.snapshot()) {
+        for (WeakReference<ReaderSlot> reference : readers.snapshot()) {
+            ReaderSlot slot = reference.get();
+            if (slot == null) continue;
             if (!slot.accessPending && slot.access.isEmpty()) continue;
             // Clear before reading the counters/ring. A producer racing after this point either
             // publishes data into this scan or leaves the hint set for the next pass.
@@ -504,12 +568,10 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
             long droppedDelta = slot.publishedAccessDropped - slot.consumedAccessDropped;
             if (hitDelta != 0L) {
                 hits.addAndGet(hitDelta);
-                policy.recordHits(hitDelta);
                 slot.consumedHits += hitDelta;
             }
             if (missDelta != 0L) {
                 misses.addAndGet(missDelta);
-                policy.recordMisses(missDelta);
                 slot.consumedMisses += missDelta;
             }
             if (droppedDelta != 0L) {
@@ -532,7 +594,10 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
 
     @Override
     public void accept(Entry entry, long generation) {
-        if (entry.generation() == generation && isCurrent(entry)) policy.access(entry);
+        if (entry.generation() == generation && isCurrent(entry)) {
+            policy.access(entry);
+            policy.recordAccessHit();
+        }
     }
 
     private int reclaim(int limit) {
@@ -566,14 +631,17 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         int work = 0;
         int scans = 0;
         long target = capacity;
+        boolean scanExhausted = false;
         while (work < limit && scans < limit && policy.usedBytes() > target) {
-            Entry victim = policy.victim(limit - scans);
+            MaintenancePolicy.Selection selection = policy.selectVictim(limit - scans);
             int selectionScans = policy.lastVictimScanCount();
             scans += selectionScans;
-            if (victim == null) {
-                evictionDeferred = policy.usedBytes() > target;
+            if (selection.kind == MaintenancePolicy.Selection.Kind.SCAN_EXHAUSTED) {
+                scanExhausted = true;
                 break;
             }
+            if (selection.kind == MaintenancePolicy.Selection.Kind.NONE) break;
+            Entry victim = selection.entry;
             long expectedGeneration = victim.generation();
             long expectedValueAddress = victim.valueAddress;
             if (!removeFromMap(victim, true, expectedGeneration, expectedValueAddress)
@@ -581,15 +649,24 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
                 policy.remove(victim, false);
                 policyDirty = true;
                 work++;
-            } else if (victim.valueAddress != 0L && isCurrent(victim)) {
+            } else if (victim.valueAddress != 0L && isCurrent(victim) && victim.isWriterLocked()) {
                 policy.skipLocked(victim);
                 evictionLockedSkips.incrementAndGet();
+                scheduleEvictionRetry();
             } else {
-                work++;
+                scheduleEvictionRetry();
+                break;
             }
         }
         if (scans != 0) evictionScans.addAndGet(scans);
-        if (policy.usedBytes() > target && work == 0) evictionDeferred = true;
+        if (policy.usedBytes() <= target) {
+            evictionScanExhausted = false;
+            evictionRetryNanos = Long.MAX_VALUE;
+            evictionRetryBackoffNanos = 1_000L;
+        } else {
+            evictionScanExhausted = scanExhausted;
+            if (!scanExhausted && evictionRetryNanos == Long.MAX_VALUE) scheduleEvictionRetry();
+        }
         return work;
     }
 
@@ -602,7 +679,6 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         try {
             if (entry.generation() != expectedGeneration || entry.valueAddress != expectedValueAddress) return false;
             if (!prepareActorRetirement(2)) {
-                rejectedBudget.incrementAndGet();
                 return false;
             }
             removed = removeCurrent(entry);
@@ -682,7 +758,9 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     }
 
     private boolean prepareActorRetirement(int records) {
-        return retirements.reserve(actorRetirement, records);
+        boolean reserved = retirements.reserve(actorRetirement, records);
+        if (!reserved) rejectedRetirement.incrementAndGet();
+        return reserved;
     }
 
     private void retireActorValue(long address, long allocation) {
@@ -696,27 +774,11 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         }
     }
 
-    private void pushRepair(Entry entry) {
-        repairCount.incrementAndGet();
-        for (;;) {
-            Entry head = repairHead.get();
-            entry.repairNext = head;
-            if (repairHead.compareAndSet(head, entry)) return;
-        }
-    }
-
-    private void pushRepairChain(Entry chain) {
-        Entry tail = chain;
-        while (tail.repairNext != null) tail = tail.repairNext;
-        for (;;) {
-            Entry head = repairHead.get();
-            tail.repairNext = head;
-            if (repairHead.compareAndSet(head, chain)) return;
-        }
-    }
-
-    private static int dirtyLimit(int queueCapacity) {
-        return Math.multiplyExact(queueCapacity, 2);
+    private static int dirtyLimit() {
+        int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
+        int cpuPowerOfTwo = 1;
+        while (cpuPowerOfTwo < processors) cpuPowerOfTwo <<= 1;
+        return Math.multiplyExact(128, cpuPowerOfTwo);
     }
 
     private static int stripeCount() {
@@ -748,6 +810,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         public final long accepted;
         public final long rejectedQueue;
         public final long rejectedBudget;
+        public final long rejectedRetirement;
         public final long applied;
         public final long evicted;
         public final long logicalExpired;
@@ -769,15 +832,18 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         public final long ghostHeapBytes;
         public final long ledgerBytes;
         public final long queueCapacity;
+        public final long retirementQueueDepth;
+        public final long retirementQueueCapacity;
         public final long wakeSignals;
         public final long mergedWakeSignals;
 
         Snapshot(long hits, long misses, long accessDropped, long accepted, long rejectedQueue,
-                 long rejectedBudget, long applied, long evicted, long logicalExpired,
+                 long rejectedBudget, long rejectedRetirement, long applied, long evicted, long logicalExpired,
                  long physicalExpired, long maintenanceLoopNanos, long liveWeight, long timeoutLagMillis, boolean unhealthy, long queueDepth,
                  long retiredEntries, long retiredBytes, long oldestRetireEpoch, long policyEvictions,
                  long evictionScans, long evictionLockedSkips, long timerBytes, long ttlBacklog,
                  long sketchBytes, long ghostHeapBytes, long ledgerBytes, long queueCapacity,
+                 long retirementQueueDepth, long retirementQueueCapacity,
                  long wakeSignals, long mergedWakeSignals) {
             this.hits = hits;
             this.misses = misses;
@@ -785,6 +851,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
             this.accepted = accepted;
             this.rejectedQueue = rejectedQueue;
             this.rejectedBudget = rejectedBudget;
+            this.rejectedRetirement = rejectedRetirement;
             this.applied = applied;
             this.evicted = evicted;
             this.logicalExpired = logicalExpired;
@@ -806,6 +873,8 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
             this.ghostHeapBytes = ghostHeapBytes;
             this.ledgerBytes = ledgerBytes;
             this.queueCapacity = queueCapacity;
+            this.retirementQueueDepth = retirementQueueDepth;
+            this.retirementQueueCapacity = retirementQueueCapacity;
             this.wakeSignals = wakeSignals;
             this.mergedWakeSignals = mergedWakeSignals;
         }

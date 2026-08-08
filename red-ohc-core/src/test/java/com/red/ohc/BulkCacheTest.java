@@ -4,12 +4,15 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
@@ -66,6 +69,41 @@ public class BulkCacheTest {
             assertTrue(fetched instanceof HashMap);
             assertEquals(fetched, values);
         }
+    }
+
+    @Test
+    public void bulkDeserializationRunsAfterTheReaderEpochIsReleased() throws Exception {
+        AtomicReference<com.red.ohc.runtime.ThreadContext> context = new AtomicReference<>();
+        AtomicBoolean deserializedOutsideEpoch = new AtomicBoolean();
+        CacheSerializer<String> checkingValueSerializer = new CacheSerializer<String>() {
+            @Override public void serialize(String value, ByteBuffer buffer) { STRING.serialize(value, buffer); }
+            @Override public String deserialize(ByteBuffer buffer) {
+                deserializedOutsideEpoch.set(context.get().slot.epoch == 0L);
+                return STRING.deserialize(buffer);
+            }
+            @Override public int serializedSize(String value) { return STRING.serializedSize(value); }
+        };
+        try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(STRING)
+                .valueSerializer(checkingValueSerializer)
+                .build()) {
+            assertTrue(cache.put("key", "value"));
+            cache.flushAsync().join();
+            context.set(threadContext(cache));
+
+            assertEquals(cache.getAll(Arrays.asList("key")).get("key"), "value");
+            assertTrue(deserializedOutsideEpoch.get(),
+                    "getAll must deserialize only after it releases its QSBR reader epoch");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static com.red.ohc.runtime.ThreadContext threadContext(OffHeapCache<?, ?> cache) throws Exception {
+        Field field = OffHeapCache.class.getDeclaredField("contexts");
+        field.setAccessible(true);
+        return ((ThreadLocal<com.red.ohc.runtime.ThreadContext>) field.get(cache)).get();
     }
 
     private static Map<String, String> getAllEventually(OHCache<String, String> cache, java.util.Collection<String> keys) {

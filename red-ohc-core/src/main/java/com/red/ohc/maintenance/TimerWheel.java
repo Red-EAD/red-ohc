@@ -262,16 +262,25 @@ public final class TimerWheel {
         int firstSlot = (int) (tick + 1L) & (L0_SIZE - 1);
         int firstWord = firstSlot >>> 6;
         int firstBit = firstSlot & 63;
-        for (int wordOffset = 0; wordOffset < level0Occupied.length; wordOffset++) {
+        long firstOccupied = level0Occupied[firstWord];
+        long occupied = firstOccupied & (-1L << firstBit);
+        if (occupied != 0L) return wakeTickFor(firstWord, occupied, firstSlot);
+        for (int wordOffset = 1; wordOffset < level0Occupied.length; wordOffset++) {
             int word = (firstWord + wordOffset) & (level0Occupied.length - 1);
-            long occupied = level0Occupied[word];
-            if (wordOffset == 0) occupied &= -1L << firstBit;
-            if (occupied == 0L) continue;
-            int slot = (word << 6) + Long.numberOfTrailingZeros(occupied);
-            long offset = (slot - firstSlot) & (L0_SIZE - 1L);
-            return tick + 1L + offset;
+            occupied = level0Occupied[word];
+            if (occupied != 0L) return wakeTickFor(word, occupied, firstSlot);
         }
+        // The physical word wraps too. Its lower bits are strictly later than firstSlot after
+        // one complete L0 rotation, so they must be examined after every intervening word.
+        occupied = firstOccupied & ((1L << firstBit) - 1L);
+        if (occupied != 0L) return wakeTickFor(firstWord, occupied, firstSlot);
         return Long.MAX_VALUE;
+    }
+
+    private long wakeTickFor(int word, long occupied, int firstSlot) {
+        int slot = (word << 6) + Long.numberOfTrailingZeros(occupied);
+        long offset = (slot - firstSlot) & (L0_SIZE - 1L);
+        return tick + 1L + offset;
     }
 
     private static long nextCascade(long occupied, long cycle, int shift, int size) {

@@ -5,6 +5,8 @@ import java.nio.ByteBuffer;
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.maintenance.RetirementQueue;
+import com.red.ohc.index.Entry;
+import com.red.ohc.storage.Budget;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
 
@@ -18,11 +20,18 @@ public final class ThreadContext {
     public final DirectValueView valueView = new DirectValueView();
     /** Reusable native-retirement reservation; it is active only across one writer critical section. */
     public final RetirementQueue.Reservation retirement = new RetirementQueue.Reservation();
+    private final WriterArena writerArena;
+    private final Budget.Stripe budgetStripe;
     private long readSequence;
     private MaintenanceEventLoop maintenance;
     /** Last actor idle generation this writer has already signalled. */
     private long maintenanceWakeGeneration = Long.MIN_VALUE;
     boolean registered;
+
+    public ThreadContext(WriterArena writerArena, Budget.Stripe budgetStripe) {
+        this.writerArena = writerArena;
+        this.budgetStripe = budgetStripe;
+    }
 
     public void ensureKey(int length) {
         if (keyBytes.length < length) {
@@ -50,9 +59,8 @@ public final class ThreadContext {
         return valueBuffer;
     }
 
-    public WriterArena writer(NativeMemory.Memory memory) {
-        return memory.writerForCurrentThread();
-    }
+    public WriterArena writer() { return writerArena; }
+    public Budget.Stripe budgetStripe() { return budgetStripe; }
 
     public boolean isRegistered() {
         return registered;
@@ -66,9 +74,25 @@ public final class ThreadContext {
     public long miss() { slot.localMisses++; return ++readSequence; }
     public void dropped() { slot.localAccessDropped++; }
 
+    /** Delivers every hit to the policy stream; only an empty-to-nonempty transition wakes it. */
+    public void access(Entry entry) {
+        boolean wasEmpty = slot.access.isEmpty();
+        if (!slot.access.offer(entry, entry.generation())) {
+            dropped();
+            return;
+        }
+        if (!wasEmpty) return;
+        slot.accessPending = true;
+        MaintenanceEventLoop loop = maintenance;
+        if (loop != null) loop.signalAccess(slot);
+    }
+
     public void finishRead(long sequence) {
         if ((sequence & 1023L) == 0L) {
             publish();
+            // Global counters are deliberately decoupled from the policy stream. This bounded
+            // stats publication may wake the actor even when an earlier access burst was already
+            // drained; hit delivery itself still signals only on an empty-to-nonempty ring edge.
             slot.accessPending = true;
             MaintenanceEventLoop loop = maintenance;
             if (loop != null) loop.signalAccess(slot);

@@ -46,11 +46,4 @@ public final class ChmSizing {
         return table;
     }
 
-    public static int maintenanceQueueCapacity(long expectedEntries, long capacity, long maxEntrySize) {
-        long planned = initialCapacity(expectedEntries, capacity, maxEntrySize);
-        long requested = Math.max(1024L, Math.min(1L << 20, Math.max(1L, planned / 64L)));
-        int queue = 1;
-        while (queue < requested && queue < (1 << 20)) queue <<= 1;
-        return queue;
-    }
 }

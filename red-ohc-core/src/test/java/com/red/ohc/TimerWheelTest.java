@@ -3,6 +3,7 @@ package com.red.ohc.maintenance;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
+import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
@@ -57,5 +58,36 @@ public class TimerWheelTest {
 
         assertEquals(wheel.advance(64L, 1_000, (ignored, generation, address) -> { }), 1);
         assertEquals(wheel.scheduled(), 0L, "the deferred entry must not wait for a full wheel round");
+    }
+
+    @Test
+    public void levelZeroWakeSearchFindsSameWordSlotAfterWheelWrap() {
+        long nowMillis = 100L * 64L;
+        TimerWheel wheel = new TimerWheel(nowMillis);
+        // tick=100 starts the search at slot 101. target=1114 maps back to slot 90, which is
+        // in the same bitmap word but below the starting bit after one L0 rotation.
+        wheel.add(new Entry(0L, 0, 6, 0L), 1_114L * 64L);
+
+        assertEquals(wheel.nextDelayNanos(nowMillis), 1_014L * 64L * 1_000_000L,
+                "a same-word slot after the L0 wrap must not be mistaken for no deadline");
+    }
+
+    @Test
+    public void cascadesEveryHierarchicalLevelBeforeTheDeadlineBucketIsConsumed() throws Exception {
+        assertCascadeConsumesDeadline(1_024L);
+        assertCascadeConsumesDeadline(65_536L);
+        assertCascadeConsumesDeadline(4_194_304L);
+        assertCascadeConsumesDeadline(134_217_728L);
+    }
+
+    private static void assertCascadeConsumesDeadline(long targetTick) throws Exception {
+        TimerWheel wheel = new TimerWheel(0L);
+        wheel.add(new Entry(0L, 0, (int) targetTick, 0L), targetTick * 64L);
+        Field tick = TimerWheel.class.getDeclaredField("tick");
+        tick.setAccessible(true);
+        tick.setLong(wheel, targetTick - 1L);
+
+        wheel.advance(targetTick * 64L, (ignored, generation, address) -> { });
+        assertEquals(wheel.scheduled(), 0L, "cascade did not return level deadline " + targetTick + " to L0");
     }
 }

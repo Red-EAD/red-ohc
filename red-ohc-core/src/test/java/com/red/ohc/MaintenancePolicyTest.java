@@ -9,49 +9,70 @@ import org.testng.annotations.Test;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.MaintenancePolicy;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+
 public class MaintenancePolicyTest {
-    @Test
-    public void s3FifoPromotesAfterOneSampledHitBeforeEvictingIt() {
-        MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
-        Entry hot = new Entry(0L, 1, 1, 0L);
-        Entry cold = new Entry(0L, 1, 2, 0L);
-
-        policy.add(hot);
-        policy.add(cold);
-        policy.access(hot);
-
-        assertSame(policy.victim(), cold);
-    }
-
-    @Test
-    public void tinyLfuRejectsAColdWindowCandidateWhenTheProbationVictimIsHotter() {
-        MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 128L);
-        Entry hotVictim = new Entry(0L, 1, 1, 0L);
-        Entry coldCandidate = new Entry(0L, 1, 2, 0L);
-
-        policy.add(hotVictim);
-        policy.victim(); // move the first window entry into probation without removing it
-        for (int i = 0; i < 8; i++) policy.access(hotVictim);
-
-        policy.add(coldCandidate);
-
-        assertSame(policy.victim(), coldCandidate,
-                "a cold candidate must lose admission to a hotter probation victim");
-    }
-
-    @Test
-    public void s3FifoBoundsAHotTailScanInsteadOfLoopingInsideOneEvictionAttempt() {
-        MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 128L);
-        Entry[] entries = new Entry[32];
-        for (int index = 0; index < entries.length; index++) {
-            entries[index] = new Entry(0L, 1, index + 1, 0L);
-            policy.add(entries[index]);
-            policy.access(entries[index]);
+    private static final CacheSerializer<String> STRING = new CacheSerializer<String>() {
+        @Override public void serialize(String value, ByteBuffer buffer) {
+            buffer.put(value.getBytes(StandardCharsets.UTF_8));
         }
+        @Override public String deserialize(ByteBuffer buffer) {
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+        @Override public int serializedSize(String value) {
+            return value.getBytes(StandardCharsets.UTF_8).length;
+        }
+    };
 
-        assertNull(policy.victim(8), "the maintenance actor must yield after its scan budget");
-        assertEquals(policy.lastVictimScanCount(), 8,
-                "a hot FIFO tail cannot consume an unbounded actor pass");
+    @Test
+    public void tinyLfuMovesAWindowOverflowIntoProbationBeforeCapacityEviction() {
+        MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 128L);
+        Entry entry = new Entry(0L, 1, 1, 0L);
+
+        policy.add(entry);
+
+        assertEquals(entry.policyState(), Entry.POLICY_TINY_PROBATION,
+                "a Window overflow must establish Main probation instead of deleting its own candidate");
+    }
+
+    @Test
+    public void tinyLfuDrainsMultipleWindowCandidatesInPromotionOrder() {
+        MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 256L);
+        Entry oldest = new Entry(0L, 1, 1, 1L, 0L);
+        Entry middle = new Entry(0L, 1, 2, 2L, 0L);
+        Entry newest = new Entry(0L, 1, 3, 3L, 0L);
+
+        policy.add(oldest);
+        policy.add(middle);
+        policy.add(newest);
+
+        assertEquals(policy.selectVictim(8).entry, oldest,
+                "the first promoted Window candidate and probation victim are the same oldest entry");
+    }
+
+    @Test
+    public void tinyLfuDoesNotCarryAnUnneededCandidateIntoTheNextActorWriteBatch() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(512L)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .eviction(Eviction.W_TINY_LFU)
+                .build()) {
+            assertEquals(cache.put("one", "v"), true);
+            cache.flushAsync().join();
+            assertEquals(cache.put("two", "v"), true);
+            cache.flushAsync().join();
+            assertEquals(cache.put("three", "v"), true);
+            cache.flushAsync().join();
+
+            assertEquals(cache.get("one"), "v");
+            assertEquals(cache.get("two"), "v");
+            assertNull(cache.get("three"),
+                    "a fresh candidate must compete with probation, not an old candidate from a prior actor batch");
+        }
     }
 
     @Test
@@ -67,5 +88,37 @@ public class MaintenancePolicyTest {
 
         assertEquals(collision.policyState(), Entry.POLICY_S3_SMALL,
                 "different 64-bit hashes with the same CHM hash must not create a ghost hit");
+    }
+
+    @Test
+    public void s3FifoGhostsColdSmallEvictionsAndReinsertsThemIntoMain() {
+        MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
+        Entry cold = new Entry(0L, 1, 31, 0x1234_5678_9abc_def0L, 0L);
+        Entry returnee = new Entry(0L, 1, 31, 0x1234_5678_9abc_def0L, 0L);
+
+        policy.add(cold);
+        policy.remove(cold, true);
+        policy.add(returnee);
+
+        assertEquals(returnee.policyState(), Entry.POLICY_S3_MAIN,
+                "only a cold Small eviction creates an S3-FIFO ghost admission into Main");
+    }
+
+    @Test
+    public void s3FifoEvictsSmallWhenItIsExactlyAtItsQuotaAndMainIsPopulated() {
+        // A zero-address test Entry still has one 128B rounded key allocation. With a 1280B
+        // cache, one Small Entry exactly fills its 10% Small quota.
+        MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_280L);
+        Entry cold = new Entry(0L, 1, 41, 0x101L, 0L);
+        Entry main = new Entry(0L, 1, 41, 0x101L, 0L);
+        Entry small = new Entry(0L, 1, 42, 0x202L, 0L);
+
+        policy.add(cold);
+        policy.remove(cold, true);
+        policy.add(main); // ghost hit: Main is now populated
+        policy.add(small); // Small is exactly at its 10% quota
+
+        assertSame(policy.selectVictim(1).entry, small,
+                "S3-FIFO evicts Small at >= quota, rather than taking a Main victim early");
     }
 }

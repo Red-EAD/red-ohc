@@ -11,12 +11,13 @@ public class BudgetTest {
     @Test
     public void failedReservationReturnsCreditToTheCallingThread() {
         Budget budget = new Budget(64L);
+        Budget.Stripe stripe = budget.stripeForCurrentThread();
 
-        assertTrue(budget.reserve(32L));
+        assertTrue(budget.reserve(stripe, 32L));
         budget.refund(32L);
 
-        assertTrue(budget.reserve(32L));
-        assertTrue(budget.reserve(32L));
+        assertTrue(budget.reserve(stripe, 32L));
+        assertTrue(budget.reserve(stripe, 32L));
     }
 
     @Test
@@ -31,19 +32,21 @@ public class BudgetTest {
     @Test
     public void reclaimedResidentWeightRestoresAdmissionWithoutLeavingBatchCreditDebt() {
         Budget budget = new Budget(64L);
+        Budget.Stripe stripe = budget.stripeForCurrentThread();
 
-        assertTrue(budget.reserve(32L));
+        assertTrue(budget.reserve(stripe, 32L));
         budget.release(32L);
 
-        assertTrue(budget.reserve(64L), "the first allocation was fully reclaimed, so the full budget is admissible again");
+        assertTrue(budget.reserve(stripe, 64L), "the first allocation was fully reclaimed, so the full budget is admissible again");
     }
 
     @Test
     public void partialStripeCreditIsReclaimedBeforeRejectingAnOtherwiseAdmissibleWrite() {
         Budget budget = new Budget(128L);
+        Budget.Stripe stripe = budget.stripeForCurrentThread();
 
-        assertTrue(budget.reserve(1L), "the first allocation retains a small local refill remainder");
-        assertTrue(budget.reserve(121L),
+        assertTrue(budget.reserve(stripe, 1L), "the first allocation retains a small local refill remainder");
+        assertTrue(budget.reserve(stripe, 121L),
                 "global free bytes plus the caller's partial stripe credit still fit below capacity");
     }
 }

@@ -10,7 +10,7 @@ public final class ReaderSlot {
     public volatile long publishedHits;
     public volatile long publishedMisses;
     public volatile long publishedAccessDropped;
-    /** Producer-to-maintenance hint; the actor clears it before scanning this slot. */
+    /** Producer-to-maintenance hint set only when this SPSC ring changes from empty to non-empty. */
     public volatile boolean accessPending;
     public long consumedHits;
     public long consumedMisses;

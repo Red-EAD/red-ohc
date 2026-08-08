@@ -13,6 +13,8 @@ public final class WriterArena {
     public static final int PREFIX_BYTES = 16;
     public static final int DIRECT_CLASS = 0xffff;
     static final int HANDLE_SLOT_BITS = 9;
+    static final int PAGE_ID_BITS = 18;
+    static final int PAGE_ID_MASK = (1 << PAGE_ID_BITS) - 1;
     private static final int HANDLE_SLOT_MASK = (1 << HANDLE_SLOT_BITS) - 1;
     private static final long HANDLE_MASK = (1L << 31) - 1L;
     private static final long STAMP_MASK = (1L << (Long.SIZE - 31)) - 1L;
@@ -104,7 +106,9 @@ public final class WriterArena {
         private static final int DEPOT = 3;
         private static final int FREED = 4;
 
+        /** Reusable sparse page-table index; the encoded key also carries its allocation version. */
         final int id;
+        final int pageKey;
         final long address;
         final int sizeClass;
         final int slotBytes;
@@ -116,8 +120,9 @@ public final class WriterArena {
         final AtomicLong freeHead = new AtomicLong();
         final AtomicInteger state = new AtomicInteger(ACTIVE);
 
-        Page(int id, long address, int sizeClass, int slotBytes) {
+        Page(int id, int pageKey, long address, int sizeClass, int slotBytes) {
             this.id = id;
+            this.pageKey = pageKey;
             this.address = address;
             this.sizeClass = sizeClass;
             this.slotBytes = slotBytes;
@@ -210,7 +215,7 @@ public final class WriterArena {
 
         int handleAt(int slot) {
             if (slot < 0 || slot >= slotCount) throw new IllegalArgumentException("slot out of range: " + slot);
-            return (id << HANDLE_SLOT_BITS) | slot;
+            return (pageKey << HANDLE_SLOT_BITS) | slot;
         }
 
         long blockFor(int slot) { return address + (long) slot * slotBytes; }

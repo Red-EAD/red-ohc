@@ -14,6 +14,8 @@ public final class Entry {
     public static final int PENDING_ADD = 1;
     public static final int PENDING_UPDATE = 1 << 1;
     public static final int PENDING_REMOVE = 1 << 2;
+    /** Returned to the maintenance actor when a writer owns the pending publication claim. */
+    public static final int PENDING_BUSY = -1;
     public static final int POLICY_NONE = 0;
     public static final int POLICY_LRU = 1;
     public static final int POLICY_S3_SMALL = 2;
@@ -24,7 +26,6 @@ public final class Entry {
     private static final int PENDING_MASK = PENDING_ADD | PENDING_UPDATE | PENDING_REMOVE;
     private static final int PENDING_CLAIMED = 1 << 3;
     private static final int PENDING_QUEUED = 1 << 4;
-    private static final int PENDING_REPAIR = 1 << 5;
     public static final long WRITER_LOCK = 1L << 63;
     private static final long STATE_SHIFT = 61L;
     private static final long STATE_MASK = 3L << STATE_SHIFT;
@@ -48,8 +49,6 @@ public final class Entry {
     public Entry policyNext;
     public Entry timerPrev;
     public Entry timerNext;
-    /** Intrusive, bounded maintenance repair stack link; never used by the hot read path. */
-    public volatile Entry repairNext;
     public short timerSlot;
     public int timerLevel;
     public long timerDeadlineTick;
@@ -59,6 +58,10 @@ public final class Entry {
     private int policyMeta;
     public long policyWeight;
     public volatile int pendingFlags;
+    /** Guarded by the per-Entry writer mutex (or a private, not-yet-published candidate). */
+    private int pendingClaimFlags;
+    /** Guarded by the same owner as {@link #pendingClaimFlags}. */
+    private boolean pendingClaimNeedsCredit;
 
     public Entry(long nativeKeyAddress, int keyLength, int chmHash, long valueAddress) {
         this(nativeKeyAddress, keyLength, chmHash, chmHash & 0xffffffffL, valueAddress);
@@ -140,7 +143,7 @@ public final class Entry {
         long current = lifecycle;
         if ((current & WRITER_LOCK) == 0L) throw new IllegalStateException("writer lock is not held");
         long generation = (current & GENERATION_MASK) + 1L;
-        if (generation == 0L || generation > GENERATION_MASK) generation = 1L;
+        if (generation > GENERATION_MASK) generation = 1L;
         LIFECYCLE.lazySet(this, (current & STATE_MASK) | generation);
     }
 
@@ -150,6 +153,11 @@ public final class Entry {
 
     public boolean isAlive() {
         return (lifecycle & STATE_MASK) == ALIVE;
+    }
+
+    /** The maintenance actor must not consume a coalesced mutation during a writer publication. */
+    public boolean isWriterLocked() {
+        return (lifecycle & WRITER_LOCK) != 0L;
     }
 
     /** Must be called while holding the per-entry writer mutex. */
@@ -182,11 +190,16 @@ public final class Entry {
     }
 
     /**
-     * Claims a new unique mutation event. A true result means the caller must acquire a dirty
-     * credit and then call {@link #commitPendingClaim(int)} before it publishes any visibility
-     * change. A false result means an already queued event has absorbed {@code flags}.
+     * Starts a writer-owned mutation publication. The claim remains held until the writer has
+     * published its CHM/value-pointer change and calls {@link #completePendingClaim()}; the actor
+     * therefore cannot consume a coalesced event between reservation and pointer publication.
+     *
+     * @return whether this is a new unique event that needs one dirty credit
      */
     public boolean beginPending(int flags) {
+        if ((flags & ~PENDING_MASK) != 0 || flags == 0) {
+            throw new IllegalArgumentException("invalid pending flags: " + flags);
+        }
         int spins = 0;
         for (;;) {
             int current = pendingFlags;
@@ -198,31 +211,39 @@ public final class Entry {
                 }
                 continue;
             }
-            if ((current & PENDING_MASK) != 0) {
-                int next = current | flags;
-                if (next == current || PENDING.compareAndSet(this, current, next)) return false;
-                continue;
+            boolean needsCredit = (current & PENDING_MASK) == 0;
+            if (PENDING.compareAndSet(this, current, current | PENDING_CLAIMED)) {
+                pendingClaimFlags = flags;
+                pendingClaimNeedsCredit = needsCredit;
+                return needsCredit;
             }
-            if (PENDING.compareAndSet(this, current, current | PENDING_CLAIMED)) return true;
         }
     }
 
-    /** Completes a successful dirty-credit reservation. */
-    public void commitPendingClaim(int flags) {
+    /** Releases a successful publication claim after the associated pointer or mapping is visible. */
+    public void completePendingClaim() {
+        int flags = pendingClaimFlags;
         for (;;) {
             int current = pendingFlags;
             if ((current & PENDING_CLAIMED) == 0) throw new IllegalStateException("missing pending claim");
             int next = (current & ~PENDING_CLAIMED) | flags;
-            if (PENDING.compareAndSet(this, current, next)) return;
+            if (PENDING.compareAndSet(this, current, next)) {
+                pendingClaimFlags = 0;
+                return;
+            }
         }
     }
 
-    /** Cancels an uncommitted reservation before its mutation becomes visible. */
-    public void cancelPendingClaim() {
+    /** Cancels a writer publication before its associated pointer or mapping becomes visible. */
+    public boolean cancelPendingClaim() {
+        boolean releaseCredit = pendingClaimNeedsCredit;
         for (;;) {
             int current = pendingFlags;
-            if ((current & PENDING_CLAIMED) == 0) return;
-            if (PENDING.compareAndSet(this, current, current & ~PENDING_CLAIMED)) return;
+            if ((current & PENDING_CLAIMED) == 0) throw new IllegalStateException("missing pending claim");
+            if (PENDING.compareAndSet(this, current, current & ~PENDING_CLAIMED)) {
+                pendingClaimFlags = 0;
+                return releaseCredit;
+            }
         }
     }
 
@@ -230,37 +251,19 @@ public final class Entry {
     public boolean publishPending() {
         for (;;) {
             int current = pendingFlags;
-            if ((current & PENDING_MASK) == 0
-                    || (current & (PENDING_QUEUED | PENDING_REPAIR)) != 0) return false;
+            if ((current & PENDING_CLAIMED) != 0) {
+                throw new IllegalStateException("pending publication is still claimed");
+            }
+            if ((current & PENDING_MASK) == 0 || (current & PENDING_QUEUED) != 0) return false;
             if (PENDING.compareAndSet(this, current, current | PENDING_QUEUED)) return true;
-        }
-    }
-
-    /** Moves a failed bounded-queue publication to the intrusive repair transport. */
-    public boolean moveToRepair() {
-        for (;;) {
-            int current = pendingFlags;
-            if ((current & PENDING_MASK) == 0 || (current & PENDING_REPAIR) != 0) return false;
-            if ((current & PENDING_QUEUED) == 0) return false;
-            int next = (current & ~PENDING_QUEUED) | PENDING_REPAIR;
-            if (PENDING.compareAndSet(this, current, next)) return true;
-        }
-    }
-
-    /** Cancels a committed but not yet queued mutation reservation. */
-    public boolean cancelPending() {
-        for (;;) {
-            int current = pendingFlags;
-            if ((current & PENDING_QUEUED) != 0) return false;
-            if ((current & PENDING_MASK) == 0) return true;
-            if (PENDING.compareAndSet(this, current, current & ~PENDING_MASK)) return true;
         }
     }
 
     public int takePending() {
         for (;;) {
             int current = pendingFlags;
-            int next = current & ~(PENDING_MASK | PENDING_QUEUED | PENDING_REPAIR);
+            if ((current & PENDING_CLAIMED) != 0) return PENDING_BUSY;
+            int next = current & ~(PENDING_MASK | PENDING_QUEUED);
             if (PENDING.compareAndSet(this, current, next)) return current & PENDING_MASK;
         }
     }

@@ -5,7 +5,7 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
-import it.unimi.dsi.fastutil.longs.Long2IntLinkedOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 
 /**
  * Maintenance-actor-only eviction policy state. Every list is intrusive in {@link Entry}; no
@@ -16,6 +16,8 @@ public final class MaintenancePolicy {
     private static final double HILL_STEP_DECAY = 0.98d;
     private static final double HILL_RESTART_THRESHOLD = 0.05d;
     private static final long HILL_MIN_STEP = 2L;
+    /** Matches Caffeine's ADMIT_HASHDOS_THRESHOLD: only warm candidates use the 1/128 escape hatch. */
+    private static final int HASHDOS_ADMISSION_THRESHOLD = 6;
     private final Eviction eviction;
     private final long capacity;
     private final FrequencySketch sketch;
@@ -25,8 +27,8 @@ public final class MaintenancePolicy {
     private final EntryDeque window = new EntryDeque();
     private final EntryDeque probation = new EntryDeque();
     private final EntryDeque protectedQueue = new EntryDeque();
-    private final Long2IntLinkedOpenHashMap ghost;
-    private final int ghostLimit;
+    private final Long2LongLinkedOpenHashMap ghost;
+    private final long ghostMaximum;
     private final long smallMaximum;
     private long windowMaximum;
     private long protectedMaximum;
@@ -39,10 +41,14 @@ public final class MaintenancePolicy {
     private long protectedWeight;
     private long evictions;
     private long ghostHits;
+    private long ghostWeight;
     private long hitsInSample;
     private long missesInSample;
     private double previousSampleHitRate;
     private double hillStep;
+    /** First Window entry moved to probation and not yet processed by main admission. */
+    private Entry tinyCandidate;
+    private long admissionSequence;
     /** Actor-visible work consumed while finding the latest victim. */
     private int lastVictimScanCount;
 
@@ -56,14 +62,15 @@ public final class MaintenancePolicy {
         long mainMaximum = mainMaximum();
         this.protectedMaximum = Math.max(1L, mainMaximum * 80L / 100L);
         this.hillStep = -Math.max(HILL_MIN_STEP, capacity * HILL_INITIAL_STEP_PERCENT);
-        this.ghostLimit = (int) Math.min(1_048_576L, Math.max(256L, (plannedEntries * 9L + 9L) / 10L));
-        this.ghost = eviction == Eviction.S3_FIFO ? new Long2IntLinkedOpenHashMap(ghostLimit) : null;
+        this.ghostMaximum = Math.max(1L, capacity - smallMaximum);
+        this.ghost = eviction == Eviction.S3_FIFO
+                ? new Long2LongLinkedOpenHashMap((int) Math.min(1_048_576L, Math.max(256L, plannedEntries)))
+                : null;
     }
 
     public void add(Entry entry) {
         if (entry.policyState() != Entry.POLICY_NONE) {
             updateWeight(entry);
-            access(entry);
             return;
         }
         entry.policyWeight = weightOf(entry);
@@ -71,7 +78,7 @@ public final class MaintenancePolicy {
         switch (eviction) {
             case S3_FIFO:
                 if (ghost.containsKey(entry.keyHash64())) {
-                    ghost.remove(entry.keyHash64());
+                    ghostWeight -= ghost.remove(entry.keyHash64());
                     ghostHits++;
                     link(main, entry, Entry.POLICY_S3_MAIN);
                     mainWeight += entry.policyWeight;
@@ -85,10 +92,20 @@ public final class MaintenancePolicy {
                 link(window, entry, Entry.POLICY_TINY_WINDOW);
                 windowWeight += entry.policyWeight;
                 sketch.increment(entry.keyHash64());
+                recordWriteMiss();
+                drainWindow();
                 break;
             default:
                 link(lru, entry, Entry.POLICY_LRU);
         }
+    }
+
+    /**
+     * Candidates only have meaning for the mutations drained in one actor batch. A batch that
+     * stayed within capacity must not let its old Window candidate compete with a later write.
+     */
+    void beginWriteBatch() {
+        if (eviction == Eviction.W_TINY_LFU) tinyCandidate = null;
     }
 
     public void access(Entry entry) {
@@ -106,6 +123,7 @@ public final class MaintenancePolicy {
                 break;
             case Entry.POLICY_TINY_PROBATION:
                 sketch.increment(entry.keyHash64());
+                advanceTinyCandidate(entry);
                 unlink(probation, entry);
                 probationWeight -= entry.policyWeight;
                 link(protectedQueue, entry, Entry.POLICY_TINY_PROTECTED);
@@ -130,17 +148,18 @@ public final class MaintenancePolicy {
             case Entry.POLICY_S3_SMALL:
                 unlink(small, entry);
                 smallWeight -= entry.policyWeight;
+                if (eviction) addGhost(entry);
                 break;
             case Entry.POLICY_S3_MAIN:
                 unlink(main, entry);
                 mainWeight -= entry.policyWeight;
-                if (eviction) addGhost(entry);
                 break;
             case Entry.POLICY_TINY_WINDOW:
                 unlink(window, entry);
                 windowWeight -= entry.policyWeight;
                 break;
             case Entry.POLICY_TINY_PROBATION:
+                advanceTinyCandidate(entry);
                 unlink(probation, entry);
                 probationWeight -= entry.policyWeight;
                 break;
@@ -157,20 +176,11 @@ public final class MaintenancePolicy {
         if (eviction) evictions++;
     }
 
-    /** Selects one victim. A bounded scan prevents hot FIFO entries monopolising one actor pass. */
-    public Entry victim() {
-        return victim(Integer.MAX_VALUE);
-    }
-
-    /**
-     * Returns a removable candidate or {@code null} after {@code scanLimit} actor-owned list
-     * operations. The caller can yield and let other maintenance classes make progress before
-     * asking again.
-     */
-    public Entry victim(int scanLimit) {
+    /** Selects one production eviction outcome; scan exhaustion is distinct from an empty policy. */
+    public Selection selectVictim(int scanLimit) {
         if (scanLimit <= 0) {
             lastVictimScanCount = 0;
-            return null;
+            return Selection.scanExhausted();
         }
         switch (eviction) {
             case S3_FIFO:
@@ -180,7 +190,7 @@ public final class MaintenancePolicy {
                 return tinyLfuVictim();
             default:
                 lastVictimScanCount = lru.tail == null ? 0 : 1;
-                return lru.tail;
+                return lru.tail == null ? Selection.none() : Selection.entry(lru.tail);
         }
     }
 
@@ -212,19 +222,19 @@ public final class MaintenancePolicy {
     long usedBytes() { return weightedSize; }
     long evictions() { return evictions; }
     long sketchBytes() { return sketch == null ? 0L : sketch.bytes(); }
-    long ghostHeapBytes() { return ghost == null ? 0L : (long) ghost.size() * (Long.BYTES + Integer.BYTES); }
+    long ghostHeapBytes() { return ghost == null ? 0L : (long) ghost.size() * Long.BYTES * 2L; }
     long ghostHits() { return ghostHits; }
 
-    /** Actor-owned sampled read statistics feed Caffeine's window/main hill climber. */
-    public void recordHits(long count) {
-        if (sketch == null || count <= 0L) return;
-        hitsInSample = saturatedAdd(hitsInSample, count);
+    /** A successfully consumed access event, not a delayed global cache-stat delta. */
+    public void recordAccessHit() {
+        if (sketch == null) return;
+        hitsInSample = saturatedAdd(hitsInSample, 1L);
         climb();
     }
 
-    public void recordMisses(long count) {
-        if (sketch == null || count <= 0L) return;
-        missesInSample = saturatedAdd(missesInSample, count);
+    /** An actor-applied ADD is one policy miss. */
+    void recordWriteMiss() {
+        missesInSample = saturatedAdd(missesInSample, 1L);
         climb();
     }
 
@@ -234,13 +244,13 @@ public final class MaintenancePolicy {
 
     boolean containsEntry(Entry entry) { return entry.policyState() != Entry.POLICY_NONE; }
 
-    private Entry s3Victim(int scanLimit) {
+    private Selection s3Victim(int scanLimit) {
         lastVictimScanCount = 0;
         while (lastVictimScanCount < scanLimit) {
-            if (small.tail != null && (smallWeight > smallMaximum || main.tail == null)) {
+            if (small.tail != null && (smallWeight >= smallMaximum || main.tail == null)) {
                 Entry candidate = small.tail;
                 lastVictimScanCount++;
-                if (candidate.policyAccessCount() >= 1) {
+                if (candidate.policyAccessCount() > 1) {
                     unlink(small, candidate);
                     smallWeight -= candidate.policyWeight;
                     candidate.policyAccessCount(0);
@@ -248,13 +258,13 @@ public final class MaintenancePolicy {
                     mainWeight += candidate.policyWeight;
                     continue;
                 }
-                return candidate;
+                return Selection.entry(candidate);
             }
             Entry candidate = main.tail;
             if (candidate == null) {
                 candidate = small.tail;
                 if (candidate != null) lastVictimScanCount++;
-                return candidate;
+                return candidate == null ? Selection.none() : Selection.entry(candidate);
             }
             lastVictimScanCount++;
             if (candidate.policyAccessCount() > 0) {
@@ -262,29 +272,45 @@ public final class MaintenancePolicy {
                 main.moveToHead(candidate);
                 continue;
             }
-            return candidate;
+            return Selection.entry(candidate);
         }
-        return null;
+        return Selection.scanExhausted();
     }
 
-    private Entry tinyLfuVictim() {
+    private Selection tinyLfuVictim() {
         demoteProtected();
-        Entry candidate = window.tail;
-        if (candidate != null && windowWeight > windowMaximum) {
-            Entry victim = probation.tail;
-            if (victim == null || probationWeight + protectedWeight < mainMaximum()) {
-                promoteWindow(candidate);
-            } else if (sketch.frequency(candidate.keyHash64()) > sketch.frequency(victim.keyHash64())) {
-                promoteWindow(candidate);
-                return victim;
-            } else {
-                return candidate;
-            }
+        drainWindow();
+        Entry candidate = tinyCandidate;
+        if (candidate != null && candidate.policyState() != Entry.POLICY_TINY_PROBATION) {
+            tinyCandidate = null;
+            candidate = null;
         }
-        Entry fallback = probation.tail;
-        if (fallback != null) return fallback;
-        if (window.tail != null) return window.tail;
-        return protectedQueue.tail;
+        Entry victim = probation.tail;
+        if (candidate != null && victim == candidate) {
+            advanceTinyCandidate(candidate);
+            return Selection.entry(candidate);
+        }
+        if (candidate != null && victim != null) {
+            advanceTinyCandidate(candidate);
+            return Selection.entry(admit(candidate, victim) ? victim : candidate);
+        }
+        if (victim != null) return Selection.entry(victim);
+        if (candidate != null) {
+            advanceTinyCandidate(candidate);
+            return Selection.entry(candidate);
+        }
+        if (protectedQueue.tail != null) return Selection.entry(protectedQueue.tail);
+        return Selection.none();
+    }
+
+    private boolean admit(Entry candidate, Entry victim) {
+        int candidateFrequency = sketch.frequency(candidate.keyHash64());
+        int victimFrequency = sketch.frequency(victim.keyHash64());
+        if (candidateFrequency > victimFrequency) return true;
+        if (candidateFrequency < HASHDOS_ADMISSION_THRESHOLD) return false;
+        // Caffeine's 1/128 HashDoS escape hatch, made deterministic because the actor owns the
+        // sequence and policy results must not depend on a producer thread's RNG state.
+        return ((candidate.keyHash64() + ++admissionSequence) & 127L) == 0L;
     }
 
     private void promoteWindow(Entry candidate) {
@@ -292,6 +318,14 @@ public final class MaintenancePolicy {
         windowWeight -= candidate.policyWeight;
         link(probation, candidate, Entry.POLICY_TINY_PROBATION);
         probationWeight += candidate.policyWeight;
+        if (tinyCandidate == null) tinyCandidate = candidate;
+    }
+
+    private void drainWindow() {
+        while (windowWeight > windowMaximum && window.tail != null) {
+            Entry candidate = window.tail;
+            promoteWindow(candidate);
+        }
     }
 
     private void demoteProtected() {
@@ -302,6 +336,11 @@ public final class MaintenancePolicy {
             link(probation, candidate, Entry.POLICY_TINY_PROBATION);
             probationWeight += candidate.policyWeight;
         }
+    }
+
+    /** Candidate traversal is oldest-to-newest, opposite to the intrusive deque's head links. */
+    private void advanceTinyCandidate(Entry entry) {
+        if (entry == tinyCandidate) tinyCandidate = entry.policyPrev;
     }
 
     /** Caffeine-compatible step sizing: 6.25% initial, min 2, 5% restart, 0.98 decay. */
@@ -364,8 +403,25 @@ public final class MaintenancePolicy {
 
     private void addGhost(Entry entry) {
         long fingerprint = entry.keyHash64();
-        ghost.putAndMoveToFirst(fingerprint, 1);
-        while (ghost.size() > ghostLimit) ghost.removeLastInt();
+        long previous = ghost.putAndMoveToFirst(fingerprint, entry.policyWeight);
+        ghostWeight += entry.policyWeight - previous;
+        while (ghostWeight > ghostMaximum && !ghost.isEmpty()) ghostWeight -= ghost.removeLastLong();
+    }
+
+    public static final class Selection {
+        public enum Kind { ENTRY, SCAN_EXHAUSTED, NONE }
+
+        public final Kind kind;
+        public final Entry entry;
+
+        private Selection(Kind kind, Entry entry) {
+            this.kind = kind;
+            this.entry = entry;
+        }
+
+        private static Selection entry(Entry entry) { return new Selection(Kind.ENTRY, entry); }
+        private static Selection scanExhausted() { return new Selection(Kind.SCAN_EXHAUSTED, null); }
+        private static Selection none() { return new Selection(Kind.NONE, null); }
     }
 
     private static long weightOf(Entry entry) {

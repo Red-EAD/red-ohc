@@ -1,6 +1,8 @@
 package com.red.ohc.maintenance;
 
+import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.red.ohc.runtime.ReaderSlot;
@@ -22,6 +24,9 @@ public final class RetirementQueue {
 
     private final NativeMemory.Memory memory;
     private final Stripe[] stripes;
+    private final long capacityRecords;
+    /** Only assigns a producer's first stripe; steady-state Reservations retain that assignment. */
+    private final AtomicInteger nextPreferredStripe = new AtomicInteger();
     /** Actor-owned compact set of stripes with sealed records that still await QSBR reclaim. */
     private final Stripe[] activeStripes;
     /**
@@ -37,6 +42,8 @@ public final class RetirementQueue {
     private int retiredEntries;
     /** Published by the actor for deadline-driven QSBR reclaim scheduling. */
     private volatile boolean reclaimPending;
+    /** Actor-published diagnostic snapshot; stats readers never traverse the actor-owned set. */
+    private volatile long oldestRetireEpoch;
 
     public RetirementQueue(NativeMemory.Memory memory, int stripeCount, int recordsPerStripe) {
         if (Integer.bitCount(stripeCount) != 1) throw new IllegalArgumentException("stripeCount must be a power of two");
@@ -49,6 +56,7 @@ public final class RetirementQueue {
             stripes[index] = new Stripe(index, memory.allocate((long) recordsPerStripe * RECORD_BYTES), recordsPerStripe);
         }
         this.activeStripes = new Stripe[stripeCount];
+        this.capacityRecords = Math.multiplyExact((long) stripeCount, recordsPerStripe);
     }
 
     public boolean reserve(Reservation reservation, int records) {
@@ -59,7 +67,7 @@ public final class RetirementQueue {
         // every already-full stripe from the thread-id origin on each replacement.
         int start = reservation.preferredStripe >= 0
                 ? reservation.preferredStripe
-                : ((int) Thread.currentThread().getId()) & (stripes.length - 1);
+                : nextPreferredStripe.getAndIncrement() & (stripes.length - 1);
         for (int offset = 0; offset < stripes.length; offset++) {
             Stripe stripe = stripes[(start + offset) & (stripes.length - 1)];
             if (stripe.reserve(reservation, records)) return true;
@@ -104,6 +112,7 @@ public final class RetirementQueue {
             sealCursor = (sealCursor + 1) & (stripes.length - 1);
             scanned++;
         }
+        publishOldestRetireEpoch();
         return sealed;
     }
 
@@ -123,6 +132,7 @@ public final class RetirementQueue {
             }
         }
         reclaimPending = activeStripeCount != 0;
+        publishOldestRetireEpoch();
         return reclaimed;
     }
 
@@ -135,7 +145,7 @@ public final class RetirementQueue {
     /** Actor-only continuation after a bounded seal pass leaves work behind. */
     public void requestSeal() { readyHint.lazySet(true); }
 
-    /** Lock-free observation for flush completion; it does not scan native stripes. */
+    /** Lock-free approximate observation; physical capacity is enforced independently by every stripe. */
     public boolean hasReadyHint() { return readyHint.get(); }
 
     /** A volatile reader-side hint; false means a quiescent reader need not signal the actor. */
@@ -146,17 +156,31 @@ public final class RetirementQueue {
     public long retiredBytes() { return retiredBytes; }
     public int retiredEntries() { return retiredEntries; }
 
-    public long oldestEpoch() {
+    public long oldestEpoch() { return oldestRetireEpoch; }
+
+    /** Actor-only traversal of the compact active set, published for lock-free diagnostics. */
+    private void publishOldestRetireEpoch() {
         long oldest = Long.MAX_VALUE;
         for (int index = 0; index < activeStripeCount; index++) {
             Stripe stripe = activeStripes[index];
             long epoch = stripe.headEpoch();
             if (epoch != 0L && epoch < oldest) oldest = epoch;
         }
-        return oldest == Long.MAX_VALUE ? 0L : oldest;
+        oldestRetireEpoch = oldest == Long.MAX_VALUE ? 0L : oldest;
     }
 
     public long allocatedBytes() { return (long) stripes.length * stripes[0].capacity * RECORD_BYTES; }
+    public long queuedRecords() {
+        long total = 0L;
+        for (Stripe stripe : stripes) {
+            long outstanding = stripe.producer.get() - stripe.consumer;
+            if (outstanding > 0L) total = total > Long.MAX_VALUE - outstanding
+                    ? Long.MAX_VALUE : total + outstanding;
+        }
+        return total;
+    }
+    public long capacityRecords() { return capacityRecords; }
+    public boolean exceedsHighWatermark() { return queuedRecords() >= capacityRecords - capacityRecords / 8L; }
 
     /** Called only after the close gate has stopped writers and all readers are quiescent. */
     public void freeAll() {
@@ -167,6 +191,7 @@ public final class RetirementQueue {
         retiredBytes = 0L;
         retiredEntries = 0;
         reclaimPending = false;
+        oldestRetireEpoch = 0L;
         readyHint.set(false);
     }
 
@@ -243,7 +268,7 @@ public final class RetirementQueue {
         final int capacity;
         final int mask;
         final AtomicLong producer = new AtomicLong();
-        long consumer;
+        volatile long consumer;
         long seal;
         int activeIndex = -1;
 
@@ -349,7 +374,9 @@ public final class RetirementQueue {
         private long address(long index) { return address + ((index & mask) * RECORD_BYTES); }
 
         private static boolean allQuiescentAfter(ReaderRegistry readers, long retireEpoch) {
-            for (ReaderSlot reader : readers.snapshot()) {
+            for (WeakReference<ReaderSlot> reference : readers.snapshot()) {
+                ReaderSlot reader = reference.get();
+                if (reader == null) continue;
                 long activeEpoch = reader.epoch;
                 if (activeEpoch != 0L && activeEpoch <= retireEpoch) return false;
             }

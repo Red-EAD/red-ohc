@@ -49,7 +49,6 @@ public final class CHMArchitectureTest {
     public void expectedEntriesSizingLeavesHeadroomBeforeTheChmThreshold() {
         assertEquals(ChmSizing.plannedEntries(1_000_000L), 1_125_000L);
         assertEquals(ChmSizing.tableLengthFor(1_000_000L, 1L, 1L), 2_097_152);
-        assertEquals(ChmSizing.maintenanceQueueCapacity(1_000_000L, 1L, 1L), 32_768);
     }
 
     @Test

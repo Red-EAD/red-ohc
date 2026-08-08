@@ -3,6 +3,7 @@ package com.red.ohc.runtime;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertSame;
 
+import java.lang.ref.WeakReference;
 import org.testng.annotations.Test;
 
 public final class ReaderRegistryTest {
@@ -13,8 +14,8 @@ public final class ReaderRegistryTest {
 
         registry.register(slot);
 
-        ReaderSlot[] snapshot = registry.snapshot();
+        WeakReference<ReaderSlot>[] snapshot = registry.snapshot();
         assertEquals(snapshot.length, 1);
-        assertSame(snapshot[0], slot);
+        assertSame(snapshot[0].get(), slot);
     }
 }

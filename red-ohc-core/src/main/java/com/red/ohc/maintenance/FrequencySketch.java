@@ -4,6 +4,7 @@ package com.red.ohc.maintenance;
 public final class FrequencySketch {
     private static final int DEFAULT_TABLE_SIZE = 1 << 14;
     private static final long RESET_MASK = 0x7777777777777777L;
+    private static final long ONE_MASK = 0x1111111111111111L;
     private static final int[] SEEDS = {0x9e3779b9, 0x85ebca6b, 0xc2b2ae35, 0x27d4eb2d};
 
     private final long[] table;
@@ -55,11 +56,13 @@ public final class FrequencySketch {
     long sampleSize() { return sampleSize; }
 
     private void reset() {
+        long oddCounters = 0L;
         for (int i = 0; i < table.length; i++) {
             long current = table[i];
+            oddCounters += Long.bitCount(current & ONE_MASK);
             table[i] = (current >>> 1) & RESET_MASK;
         }
-        size >>>= 1;
+        size = (size - (oddCounters >>> 2)) >>> 1;
     }
 
     private static long mix64(long value) {

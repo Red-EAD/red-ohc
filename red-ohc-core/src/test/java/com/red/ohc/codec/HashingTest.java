@@ -52,7 +52,7 @@ public final class HashingTest {
             @Override public int serializedSize(byte[] value) { return value.length; }
         };
         byte[] bytes = "encoded".getBytes(StandardCharsets.US_ASCII);
-        ThreadContext context = new ThreadContext();
+        ThreadContext context = new ThreadContext(null, null);
 
         int length = KeyEncoder.encode(serializer, bytes, context);
 

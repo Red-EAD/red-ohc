@@ -25,7 +25,7 @@ public class ReaderGuardTest {
                 new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
                 new ReaderRegistry());
         ReaderGuard guard = new ReaderGuard(loop, () -> false);
-        ThreadContext context = new ThreadContext();
+        ThreadContext context = new ThreadContext(null, null);
         try {
             assertTrue(guard.enter(context));
             assertTrue(context.slot.epoch != 0L);
@@ -44,7 +44,7 @@ public class ReaderGuardTest {
                 new ReaderRegistry());
         AtomicInteger closeChecks = new AtomicInteger();
         ReaderGuard guard = new ReaderGuard(loop, () -> closeChecks.getAndIncrement() != 0);
-        ThreadContext context = new ThreadContext();
+        ThreadContext context = new ThreadContext(null, null);
         try {
             assertFalse(guard.enter(context),
                     "close after epoch publication must reject the reader instead of letting it race shutdown free");

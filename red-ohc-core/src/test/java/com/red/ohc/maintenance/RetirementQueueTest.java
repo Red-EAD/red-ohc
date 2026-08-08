@@ -4,6 +4,9 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
+import java.lang.reflect.Field;
+import java.util.concurrent.atomic.AtomicLong;
+
 import org.testng.annotations.Test;
 
 import com.red.ohc.AllocatorType;
@@ -14,6 +17,14 @@ import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
 public class RetirementQueueTest {
+    @Test
+    public void queuedDepthDoesNotUseAGlobalAtomicReservationLedger() {
+        for (Field field : RetirementQueue.class.getDeclaredFields()) {
+            assertFalse(field.getType() == AtomicLong.class && field.getName().equals("queuedRecords"),
+                    "every replacement must not contend on a cache-global retirement depth counter");
+        }
+    }
+
     @Test
     public void sealedEntryWaitsForItsReaderEpochBeforeReturningToTheArena() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -158,6 +169,26 @@ public class RetirementQueueTest {
             assertEquals(queue.reclaim(new ReaderRegistry(), 3), 3,
                     "draining the first active stripe must not skip the next active stripe");
             assertEquals(queue.activeStripeCount(), 0);
+        } finally {
+            queue.freeAll();
+            queue.close();
+            memory.closeArenas();
+        }
+    }
+
+    @Test
+    public void queuedReservationsExposeCapacityAndTheSevenEighthsBackpressureWatermark() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        RetirementQueue queue = new RetirementQueue(memory, 1, 8);
+        RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
+        try {
+            assertEquals(queue.capacityRecords(), 8L);
+            assertTrue(queue.reserve(reservation, 7));
+            assertEquals(queue.queuedRecords(), 7L);
+            assertTrue(queue.exceedsHighWatermark());
+            assertFalse(queue.reserve(new RetirementQueue.Reservation(), 2),
+                    "a producer must reject before it can overwrite an unretired FIFO record");
+            queue.cancel(reservation);
         } finally {
             queue.freeAll();
             queue.close();
