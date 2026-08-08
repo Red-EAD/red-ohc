@@ -7,6 +7,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
@@ -145,8 +146,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         if (context == null) return false;
         try {
             context.lookupKey.setPrecomputed(key.bytes, key.length(), key.hash64());
-            return putSerialized(context, context.lookupKey, key.bytes, key.length(), value, value.length,
-                                 DEFAULT_TTL);
+            boolean accepted = putSerialized(context, context.lookupKey, key.bytes, key.length(), value, value.length,
+                                             DEFAULT_TTL);
+            finishWrite(context, accepted);
+            return accepted;
         } finally {
             exitWriter(context);
         }
@@ -492,51 +495,72 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     public Map<K, V> getAll(Collection<? extends K> keys) {
         Objects.requireNonNull(keys, "keys");
         if (closing || keys.isEmpty()) return new HashMap<>();
-        int expected = Math.max(1, keys.size());
-        Map<K, V> result = new HashMap<>(expected);
-        Map<K, byte[]> payloads = new HashMap<>(expected);
-        ObjectOpenHashSet<K> unique = new ObjectOpenHashSet<>(expected);
+        int expected = keys.size();
+        Map<K, V> result = new HashMap<>(resultCapacity(expected));
+        ObjectOpenHashSet<K> unique = keys instanceof Set<?> ? null : new ObjectOpenHashSet<>(expected);
+        Object[] hitKeys = new Object[BULK_BATCH_SIZE];
+        byte[][] hitPayloads = new byte[BULK_BATCH_SIZE][];
+        int hitCount = 0;
+        int batchCount = 0;
         ThreadContext context = contexts.get();
         boolean guarded = false;
-        int inEpoch = 0;
         try {
             for (K key : keys) {
                 Objects.requireNonNull(key, "key");
-                if (!unique.add(key)) continue;
-                if (inEpoch == 512) {
-                    exit(context);
-                    guarded = false;
-                    inEpoch = 0;
-                    if (closing) break;
-                }
+                if (unique != null && !unique.add(key)) continue;
                 if (!guarded) {
                     if (!enter(context)) break;
+                    context.beginBulkRead();
                     guarded = true;
                 }
                 KeyEncoder.encode(keySerializer, key, context);
                 Entry entry = data.get(context.lookupKey);
                 long value = valueIfLive(entry);
                 if (value == 0L) {
-                    miss(context);
+                    context.bulkMiss();
                 } else {
-                    hit(context, entry);
+                    context.bulkHit(entry);
                     int length = ValueBlock.length(value);
                     byte[] payload = new byte[length];
                     NativeMemory.copy(ValueBlock.payloadAddress(value), payload, 0, length);
-                    payloads.put(key, payload);
+                    hitKeys[hitCount] = key;
+                    hitPayloads[hitCount++] = payload;
                 }
-                inEpoch++;
+                if (++batchCount == BULK_BATCH_SIZE) {
+                    context.finishBulkRead();
+                    exit(context);
+                    guarded = false;
+                    deserializeBatch(hitKeys, hitPayloads, hitCount, result);
+                    hitCount = 0;
+                    batchCount = 0;
+                    if (closing) break;
+                }
             }
         } finally {
-            if (guarded) exit(context);
+            if (guarded) {
+                context.finishBulkRead();
+                exit(context);
+            }
         }
-        // The native payload has been copied into an independent array. Keeping arbitrary user
-        // deserialization outside QSBR prevents one slow serializer from delaying reclamation for
-        // this whole reader batch.
-        for (Map.Entry<K, byte[]> payload : payloads.entrySet()) {
-            result.put(payload.getKey(), valueSerializer.deserialize(ByteBuffer.wrap(payload.getValue())));
-        }
+        deserializeBatch(hitKeys, hitPayloads, hitCount, result);
         return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void deserializeBatch(Object[] hitKeys, byte[][] hitPayloads, int hitCount, Map<K, V> result) {
+        for (int index = 0; index < hitCount; index++) {
+            K key = (K) hitKeys[index];
+            byte[] payload = hitPayloads[index];
+            result.put(key, valueSerializer.deserialize(ByteBuffer.wrap(payload)));
+            hitKeys[index] = null;
+            hitPayloads[index] = null;
+        }
+    }
+
+    private static int resultCapacity(int expectedEntries) {
+        if (expectedEntries < 3) return expectedEntries + 1;
+        long requested = ((long) expectedEntries * 4L + 2L) / 3L + 1L;
+        return (int) Math.min(1L << 30, requested);
     }
 
     @Override

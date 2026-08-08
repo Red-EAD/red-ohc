@@ -24,6 +24,8 @@ public final class ThreadContext {
     private final Budget.Stripe budgetStripe;
     private long readSequence;
     private MaintenanceEventLoop maintenance;
+    private boolean bulkReadActive;
+    private boolean bulkReadChanged;
     /** Last actor idle generation this writer has already signalled. */
     private long maintenanceWakeGeneration = Long.MIN_VALUE;
     boolean registered;
@@ -73,6 +75,37 @@ public final class ThreadContext {
     public long hit() { slot.localHits++; return ++readSequence; }
     public long miss() { slot.localMisses++; return ++readSequence; }
     public void dropped() { slot.localAccessDropped++; }
+
+    public void beginBulkRead() {
+        bulkReadActive = true;
+        bulkReadChanged = false;
+    }
+
+    public void bulkHit(Entry entry) {
+        slot.localHits++;
+        readSequence++;
+        if (!slot.access.offer(entry, entry.generation())) slot.localAccessDropped++;
+        bulkReadChanged = true;
+    }
+
+    public void bulkMiss() {
+        slot.localMisses++;
+        readSequence++;
+        bulkReadChanged = true;
+    }
+
+    /** Publishes one batch of read counters and one worker hint instead of one per key. */
+    public void finishBulkRead() {
+        if (!bulkReadActive) return;
+        if (bulkReadChanged) {
+            publish();
+            slot.accessPending = true;
+            MaintenanceEventLoop loop = maintenance;
+            if (loop != null) loop.signalAccess(slot);
+        }
+        bulkReadActive = false;
+        bulkReadChanged = false;
+    }
 
     /** Delivers every hit to the policy stream; only an empty-to-nonempty transition wakes it. */
     public void access(Entry entry) {
