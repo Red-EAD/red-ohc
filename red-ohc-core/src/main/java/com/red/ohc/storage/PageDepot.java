@@ -39,7 +39,22 @@ final class PageDepot {
     }
 
     void clear() {
-        for (ConcurrentLinkedQueue<WriterArena.Page> queue : pages) queue.clear();
-        idlePages.set(0);
+        trimIdlePages();
+    }
+
+    long trimIdlePages() {
+        long freed = 0L;
+        for (ConcurrentLinkedQueue<WriterArena.Page> queue : pages) {
+            WriterArena.Page page;
+            while ((page = queue.poll()) != null) {
+                idlePages.decrementAndGet();
+                // Go through Memory so the page-table entry and reusable page id are retired
+                // together with the native bytes. A direct free would leave stale handles
+                // addressable by a later remoteFree.
+                memory.freeEntryPage(page);
+                freed += SizeClasses.PAGE_BYTES;
+            }
+        }
+        return freed;
     }
 }

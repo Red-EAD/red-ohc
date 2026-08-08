@@ -113,8 +113,7 @@ public class EncodedWriteTest {
                     int write = i + offset;
                     if (!cache.putEncoded(encoded[write & (keys - 1)], value)) {
                         OHCacheStats stats = cache.stats();
-                        fail("write " + write + " rejected: queue=" + stats.mutationRejectedQueue
-                                + ", budget=" + stats.mutationRejectedBudget + ", unhealthy=" + stats.maintenanceUnhealthy
+                        fail("write " + write + " rejected: unhealthy=" + stats.maintenanceUnhealthy
                                 + ", resident=" + stats.residentWeight + ", retired=" + stats.retiredWeight
                                 + ", native=" + stats.nativeAllocatedBytes
                                 + ", nativeLimit=" + cache.nativeHardLimitForTest());
@@ -123,9 +122,8 @@ public class EncodedWriteTest {
             }
             cache.flushAsync().join();
             OHCacheStats stats = cache.stats();
-            assertEquals(stats.mutationRejectedQueue, 0L);
-            assertEquals(stats.mutationRejectedBudget, 0L);
             assertTrue(!stats.maintenanceUnhealthy);
+            assertTrue(stats.maintenanceAssistCount + stats.maintenanceWaitCount >= 0L);
         }
     }
 

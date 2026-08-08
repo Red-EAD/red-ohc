@@ -151,6 +151,11 @@ public final class NativeMemory {
             }
         }
 
+        /** Releases fully empty depot pages during writer-side native pressure. */
+        public long trimIdlePages() {
+            return pageDepot.trimIdlePages();
+        }
+
         WriterArena.Page acquireEntryPage(int sizeClass) {
             WriterArena.Page reused = pageDepot.acquire(sizeClass);
             if (reused != null) return reused;

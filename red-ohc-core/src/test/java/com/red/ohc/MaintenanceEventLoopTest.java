@@ -119,8 +119,8 @@ public class MaintenanceEventLoopTest {
                 loop.afterWrite();
             }
             assertEquals(loop.queueDepth(), 4L);
-            assertEquals(loop.snapshot().rejectedQueue, 0L,
-                    "a visible mutation must not need a producer-side repair transport");
+            assertEquals(loop.snapshot().unhealthy, false,
+                    "a visible mutation must not make maintenance unhealthy");
 
             loop.start();
             loop.flush().join();
@@ -386,6 +386,32 @@ public class MaintenanceEventLoopTest {
             long deadline = System.nanoTime() + 1_000_000_000L;
             while (!loop.isParked() && System.nanoTime() < deadline) Thread.yield();
             assertTrue(loop.isParked(), "maintenance loop did not park while idle");
+        } finally {
+            loop.stop();
+            loop.join(1_000L);
+            memory.closeArenas();
+        }
+    }
+
+    @Test(timeOut = 2_000L)
+    public void terminalFailureKeepsActorAliveUntilExplicitStop() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
+        loop.start();
+        try {
+            loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
+            long deadline = System.nanoTime() + 1_000_000_000L;
+            while (!loop.snapshot().unhealthy && System.nanoTime() < deadline) Thread.yield();
+            assertTrue(loop.snapshot().unhealthy);
+            assertTrue(loop.isAlive(), "fatal maintenance must not free native state before close");
+            try {
+                loop.flush().join();
+                throw new AssertionError("flush should preserve the terminal maintenance failure");
+            } catch (java.util.concurrent.CompletionException expected) {
+                assertTrue(expected.getCause() instanceof com.red.ohc.CacheMaintenanceException);
+            }
         } finally {
             loop.stop();
             loop.join(1_000L);

@@ -6,9 +6,6 @@ public final class OHCacheStats {
     public final long readMisses;
     public final long readAccessDropped;
     public final long mutationAccepted;
-    public final long mutationRejectedQueue;
-    public final long mutationRejectedBudget;
-    public final long mutationRejectedRetirement;
     public final long mutationApplied;
     public final long maintenanceQueueDepth;
     public final long maintenanceQueueCapacity;
@@ -34,10 +31,14 @@ public final class OHCacheStats {
     public final long retirementQueueCapacity;
     public final long wakeSignals;
     public final long mergedWakeSignals;
+    public final long maintenanceAssistCount;
+    public final long maintenanceAssistWork;
+    public final long maintenanceWaitCount;
+    public final long maintenanceWaitNanos;
+    public final long maintenanceProgressVersion;
 
     public OHCacheStats(long readHits, long readMisses, long readAccessDropped,
-                        long mutationAccepted, long mutationRejectedQueue, long mutationRejectedBudget,
-                        long mutationRejectedRetirement,
+                        long mutationAccepted,
                         long mutationApplied, long maintenanceQueueDepth, long maintenanceQueueCapacity,
                         long maintenanceLoopNanos, boolean maintenanceUnhealthy,
                         long logicalExpired, long physicalExpired, long ttlLagMillis, long ttlBacklog,
@@ -46,14 +47,13 @@ public final class OHCacheStats {
                         long nativeAllocatedBytes, long timerHeapBytes, long sketchHeapBytes,
                         long ghostHeapBytes, long retirementQueueNativeBytes,
                         long retirementQueueDepth, long retirementQueueCapacity,
-                        long wakeSignals, long mergedWakeSignals) {
+                        long wakeSignals, long mergedWakeSignals, long maintenanceAssistCount,
+                        long maintenanceAssistWork, long maintenanceWaitCount, long maintenanceWaitNanos,
+                        long maintenanceProgressVersion) {
         this.readHits = readHits;
         this.readMisses = readMisses;
         this.readAccessDropped = readAccessDropped;
         this.mutationAccepted = mutationAccepted;
-        this.mutationRejectedQueue = mutationRejectedQueue;
-        this.mutationRejectedBudget = mutationRejectedBudget;
-        this.mutationRejectedRetirement = mutationRejectedRetirement;
         this.mutationApplied = mutationApplied;
         this.maintenanceQueueDepth = maintenanceQueueDepth;
         this.maintenanceQueueCapacity = maintenanceQueueCapacity;
@@ -79,5 +79,10 @@ public final class OHCacheStats {
         this.retirementQueueCapacity = retirementQueueCapacity;
         this.wakeSignals = wakeSignals;
         this.mergedWakeSignals = mergedWakeSignals;
+        this.maintenanceAssistCount = maintenanceAssistCount;
+        this.maintenanceAssistWork = maintenanceAssistWork;
+        this.maintenanceWaitCount = maintenanceWaitCount;
+        this.maintenanceWaitNanos = maintenanceWaitNanos;
+        this.maintenanceProgressVersion = maintenanceProgressVersion;
     }
 }

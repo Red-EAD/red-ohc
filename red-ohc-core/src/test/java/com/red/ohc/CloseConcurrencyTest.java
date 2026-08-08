@@ -98,8 +98,12 @@ public class CloseConcurrencyTest {
             assertFalse(close.isDone(), "close must not release native arenas while an admitted writer is active");
 
             releaseSerialize.countDown();
-            assertFalse(write.get(2L, TimeUnit.SECONDS),
-                    "an admitted writer may be rejected after CLOSING, but only after it leaves the native-write gate");
+            try {
+                write.get(2L, TimeUnit.SECONDS);
+                fail("an admitted writer racing with CLOSING must fail explicitly");
+            } catch (java.util.concurrent.ExecutionException expected) {
+                assertTrue(expected.getCause() instanceof IllegalStateException);
+            }
             close.get(2L, TimeUnit.SECONDS);
             assertEquals(cache.totalAllocatedBytes(), 0L);
         } finally {
