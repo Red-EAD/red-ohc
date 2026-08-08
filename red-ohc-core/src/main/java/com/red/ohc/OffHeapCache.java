@@ -4,6 +4,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -34,6 +35,7 @@ import com.red.ohc.storage.WriterArena;
 /** CHM authority with native payloads and one asynchronous maintenance worker. */
 public final class OffHeapCache<K, V> implements OHCache<K, V> {
     private static final long DEFAULT_TTL = Long.MIN_VALUE;
+    private static final int BULK_BATCH_SIZE = 512;
     private static final int OPEN = 0;
     private static final int CLOSING = 1;
     private static final int CLOSED = 2;
@@ -112,13 +114,27 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         ThreadContext context = enterWriter();
         if (context == null) return false;
         try {
-            int keyLength = KeyEncoder.encode(keySerializer, key, context);
-            int valueLength = encode(valueSerializer, value, context.valueBytes, context, false);
-            return putSerialized(context, context.lookupKey, context.keyBytes, keyLength,
-                                 context.valueBytes, valueLength, expireAtMillis);
+            boolean accepted = putOne(context, key, value, expireAtMillis);
+            finishWrite(context, accepted);
+            return accepted;
         } finally {
             exitWriter(context);
         }
+    }
+
+    private boolean putOne(ThreadContext context, K key, V value, long expireAtMillis) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(value, "value");
+        int keyLength = KeyEncoder.encode(keySerializer, key, context);
+        int valueLength = encode(valueSerializer, value, context.valueBytes, context, false);
+        return putSerialized(context, context.lookupKey, context.keyBytes, keyLength,
+                             context.valueBytes, valueLength, expireAtMillis);
+    }
+
+    private void finishWrite(ThreadContext context, boolean accepted) {
+        if (!accepted) return;
+        worker.recordAccepted();
+        worker.afterWrite(context);
     }
 
     /** Encoded benchmark path: neither serializer is touched and the precomputed int hash is reused. */
@@ -172,11 +188,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 winner = data.putIfAbsent(candidate, candidate);
             } finally {
                 exit(context);
-            }
+        }
             if (winner == null) {
-                worker.recordAccepted();
                 worker.publishMutation(candidate);
-                worker.afterWrite(context);
                 return true;
             }
             worker.cancelMutation(candidate);
@@ -248,8 +262,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             locked = false;
             if (mutationReserved) worker.publishMutation(entry);
             worker.retireValue(context, old, oldAllocation);
-            worker.afterWrite(context);
-            worker.recordAccepted();
             return 1;
         } catch (NativeMemory.AllocationLimitException rejected) {
             if (locked) entry.finishWriter();
@@ -449,10 +461,29 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     @Override
     public int putAll(Map<? extends K, ? extends V> entries) {
         Objects.requireNonNull(entries, "entries");
-        if (closing || entries.isEmpty()) return 0;
+        if (isClosing() || entries.isEmpty()) return 0;
         int accepted = 0;
-        for (Map.Entry<? extends K, ? extends V> entry : entries.entrySet()) {
-            if (put(entry.getKey(), entry.getValue())) accepted++;
+        Iterator<? extends Map.Entry<? extends K, ? extends V>> iterator = entries.entrySet().iterator();
+        while (iterator.hasNext() && !isClosing()) {
+            ThreadContext context = enterWriter();
+            if (context == null) break;
+            int acceptedBatch = 0;
+            try {
+                for (int count = 0; count < BULK_BATCH_SIZE && iterator.hasNext(); count++) {
+                    Map.Entry<? extends K, ? extends V> entry = iterator.next();
+                    K key = Objects.requireNonNull(entry.getKey(), "key");
+                    V value = Objects.requireNonNull(entry.getValue(), "value");
+                    if (isClosing()) break;
+                    if (putOne(context, key, value, DEFAULT_TTL)) acceptedBatch++;
+                }
+            } finally {
+                if (acceptedBatch != 0) {
+                    accepted += acceptedBatch;
+                    worker.recordAccepted(acceptedBatch);
+                    worker.afterWrite(context);
+                }
+                exitWriter(context);
+            }
         }
         return accepted;
     }

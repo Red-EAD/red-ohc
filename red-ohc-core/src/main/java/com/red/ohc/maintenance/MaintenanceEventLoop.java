@@ -198,6 +198,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public void recordMiss() { misses.incrementAndGet(); }
     public void recordDropped() { accessDropped.incrementAndGet(); }
     public void recordAccepted() { accepted.increment(); }
+    public void recordAccepted(int count) { if (count > 0) accepted.add(count); }
     public void recordBudgetRejected() { rejectedBudget.incrementAndGet(); }
     public void recordRetirementRejected() { rejectedRetirement.incrementAndGet(); }
     public void markUnhealthy() { unhealthy.set(true); }
