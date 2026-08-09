@@ -39,9 +39,12 @@ public final class EncodedKey {
     return Arrays.copyOf(bytes, bytes.length);
   }
 
-  /** Returns the immutable backing bytes for cache-internal use. */
-  public byte[] backingBytes() {
-    return bytes;
+  /** Copies the encoded key into caller-owned storage without exposing the backing array. */
+  public void copyTo(byte[] target, int targetOffset) {
+    if (targetOffset < 0 || target.length - targetOffset < bytes.length) {
+      throw new IndexOutOfBoundsException();
+    }
+    System.arraycopy(bytes, 0, target, targetOffset, bytes.length);
   }
 
   public int hash() {

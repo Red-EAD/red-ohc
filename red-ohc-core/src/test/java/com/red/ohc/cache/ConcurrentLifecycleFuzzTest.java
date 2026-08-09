@@ -118,6 +118,80 @@ public final class ConcurrentLifecycleFuzzTest {
     }
   }
 
+  @Test(dataProvider = "allocators", timeOut = 30_000L)
+  public void fullCpuMixedReadAndConditionalWriteFuzzConverges(AllocatorType allocator)
+      throws Exception {
+    OffHeapCache<Integer, Integer> cache =
+        OHCacheBuilder.<Integer, Integer>newBuilder()
+            .capacity(1L << 20)
+            .expectedEntries(KEYS)
+            .keySerializer(KEY)
+            .valueSerializer(VALUE)
+            .allocator(allocator)
+            .eviction(Eviction.S3_FIFO)
+            .buildTyped();
+    int threads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+    int operationsPerThread = 1_000;
+    ExecutorService callers = Executors.newFixedThreadPool(threads);
+    CountDownLatch start = new CountDownLatch(1);
+    try {
+      Future<?>[] tasks = new Future<?>[threads];
+      for (int thread = 0; thread < threads; thread++) {
+        final int worker = thread;
+        tasks[thread] =
+            callers.submit(
+                () -> {
+                  await(start);
+                  SplittableRandom random = new SplittableRandom(0x6eedL + worker);
+                  for (int operation = 0; operation < operationsPerThread; operation++) {
+                    int key = random.nextInt(KEYS);
+                    switch (random.nextInt(8)) {
+                      case 0:
+                        putBestEffort(cache, key, random.nextInt(), 0L);
+                        break;
+                      case 1:
+                        putBestEffort(
+                            cache, key, random.nextInt(), System.currentTimeMillis() + 64L);
+                        break;
+                      case 2:
+                        cache.putIfAbsentAsync(key, random.nextInt(), 0L).join();
+                        break;
+                      case 3:
+                        cache.replaceAsync(key, random.nextInt(), random.nextInt(), 0L).join();
+                        break;
+                      case 4:
+                        cache.remove(key);
+                        break;
+                      case 5:
+                        cache.get(key);
+                        break;
+                      case 6:
+                        cache.containsKey(key);
+                        break;
+                      default:
+                        cache.getDirect(key, value -> value.getLong(0));
+                        break;
+                    }
+                  }
+                });
+      }
+      start.countDown();
+      for (Future<?> task : tasks) {
+        task.get(20L, TimeUnit.SECONDS);
+      }
+
+      awaitQuiescence(cache);
+      OHCacheStats stats = cache.stats();
+      assertFalse(stats.maintenanceUnhealthy);
+      assertEquals(stats.maintenanceQueueDepth, 0L);
+      assertEquals(stats.retirementQueueDepth, 0L);
+    } finally {
+      callers.shutdownNow();
+      cache.close();
+      assertEquals(cache.totalAllocatedBytes(), 0L);
+    }
+  }
+
   private static void putBestEffort(
       OffHeapCache<Integer, Integer> cache, int key, int value, long expireAtMillis) {
     while (cache.mutationBacklogExceeds()) {

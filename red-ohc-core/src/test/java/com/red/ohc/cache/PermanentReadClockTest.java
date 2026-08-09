@@ -1,6 +1,7 @@
 package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
@@ -96,6 +97,45 @@ public final class PermanentReadClockTest {
       now.set(64);
       cache.flushAsync().join();
       assertTrue(!cache.getDirect(key, value -> value.getLong(0)));
+    }
+  }
+
+  @Test
+  public void ttlLivenessUsesTheCurrentTickerWithoutAFlush() {
+    AtomicInteger now = new AtomicInteger();
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return 0L;
+          }
+
+          @Override
+          public long currentTimeMillis() {
+            return now.get();
+          }
+        };
+    byte[] readKey = {1, 2, 3, 4};
+    byte[] absentKey = {5, 6, 7, 8};
+    byte[] replaceKey = {9, 10, 11, 12};
+    try (OffHeapCache<byte[], byte[]> cache =
+        OHCacheBuilder.<byte[], byte[]>newBuilder()
+            .capacity(1 << 20)
+            .ticker(ticker)
+            .keySerializer(BYTES)
+            .valueSerializer(BYTES)
+            .buildTyped()) {
+      assertTrue(cache.put(readKey, new byte[16], 64L));
+      assertTrue(cache.put(absentKey, new byte[] {1}, 64L));
+      assertTrue(cache.put(replaceKey, new byte[] {2}, 64L));
+
+      now.set(64);
+
+      assertEquals(cache.get(readKey), null);
+      assertFalse(cache.containsKey(readKey));
+      assertFalse(cache.getDirect(readKey, value -> value.getByte(0)));
+      assertTrue(cache.putIfAbsentAsync(absentKey, new byte[] {3}, 0L).join());
+      assertFalse(cache.replaceAsync(replaceKey, new byte[] {2}, new byte[] {4}, 0L).join());
     }
   }
 }

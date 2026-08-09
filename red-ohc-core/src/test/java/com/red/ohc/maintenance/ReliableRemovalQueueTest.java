@@ -28,6 +28,19 @@ public final class ReliableRemovalQueueTest {
   }
 
   @Test
+  public void uncommittedHeadIsNotImmediateWork() {
+    ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
+    ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
+
+    assertTrue(queue.reserve(reservation));
+    assertEquals(queue.size(), 1L);
+    assertFalse(queue.hasCommittedHead());
+
+    queue.commit(reservation, new Entry(0L, 0, 5, 0L));
+    assertTrue(queue.hasCommittedHead());
+  }
+
+  @Test
   public void anUncommittedHeadPreventsLaterTicketsFromBeingConsumedOutOfOrder() {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation first = new ReliableRemovalQueue.Reservation();

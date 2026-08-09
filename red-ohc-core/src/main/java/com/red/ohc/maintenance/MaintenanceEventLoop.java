@@ -72,6 +72,7 @@ public final class MaintenanceEventLoop
   private final AtomicBoolean allocationPressureRequested = new AtomicBoolean();
   private final MpscArrayQueue<Entry>[] repairQueues;
   private final int repairShardMask;
+  private final long repairCapacity;
   private int repairShardCursor;
   private final AtomicLong[] repairDebts;
 
@@ -221,6 +222,7 @@ public final class MaintenanceEventLoop
     }
     this.repairQueues = repairQueues;
     this.repairShardMask = shardCount - 1;
+    this.repairCapacity = (long) shardCount * repairQueueCapacity;
     this.repairDebts = new AtomicLong[shardCount];
     for (int i = 0; i < shardCount; i++) {
       this.repairDebts[i] = new AtomicLong();
@@ -293,7 +295,7 @@ public final class MaintenanceEventLoop
   public boolean mutationBacklogExceeds() {
     // A full advisory queue is expected under burst load and must not add writer backpressure.
     // Only unrecoverable repair debt is a write-admission high watermark.
-    return repairDebt() >= queueCapacity * 2L;
+    return repairDebt() >= repairCapacity;
   }
 
   /**
@@ -311,7 +313,7 @@ public final class MaintenanceEventLoop
   }
 
   private boolean mutationAdmissionBlocked() {
-    return repairDebt() >= queueCapacity * 2L;
+    return repairDebt() >= repairCapacity;
   }
 
   public long retiredBytes() {
@@ -669,12 +671,14 @@ public final class MaintenanceEventLoop
             retirements.cancel(context.retirement);
           }
           reliableRemovals.cancel(context.reliableRemoval);
+          signal();
           throw failure;
         }
         if (context.retirement.active()) {
           retirements.cancel(context.retirement);
         }
         reliableRemovals.cancel(context.reliableRemoval);
+        signal();
       }
       requestMaintenance();
       if (!assistMaintenance()) {
@@ -688,9 +692,11 @@ public final class MaintenanceEventLoop
     try {
       entry.completePendingClaim();
       reliableRemovals.commit(context.reliableRemoval, entry);
+      signal();
     } catch (Throwable failure) {
       if (context.reliableRemoval.active()) {
         reliableRemovals.cancel(context.reliableRemoval);
+        signal();
       }
       throw failure;
     }
@@ -704,6 +710,7 @@ public final class MaintenanceEventLoop
     }
     if (context.reliableRemoval.active()) {
       reliableRemovals.cancel(context.reliableRemoval);
+      signal();
     }
   }
 
@@ -775,6 +782,12 @@ public final class MaintenanceEventLoop
   public void run() {
     wakeGate.requireProcessing();
     while (!stopping || hasWork()) {
+      if (stopping && terminalFailure.get() != null) {
+        // A terminal failure has invalidated maintenance state. Once close has stopped the
+        // actor, retrying a pending reservation can spin forever; teardown owns the final
+        // native cleanup and does not require the maintenance transport to make progress.
+        break;
+      }
       // A terminal maintenance failure makes the cache unavailable, but the actor remains
       // alive until close() owns the final native teardown. Park without retrying the
       // corrupted maintenance state while preserving in-flight reader safety.
@@ -842,7 +855,7 @@ public final class MaintenanceEventLoop
     if (mutationsPending) {
       policy.beginWriteBatch();
     }
-    if (reliableRemovals.size() != 0L) {
+    if (reliableRemovals.hasCommittedHead()) {
       work += drainReliableRemovals(4096);
     }
     if (!queue.isEmpty()) {
@@ -912,7 +925,7 @@ public final class MaintenanceEventLoop
   }
 
   private boolean hasWork() {
-    return hasSourceWork() || retirements.hasPendingReclaim();
+    return hasSourceWork() || reliableRemovals.size() != 0L || retirements.hasPendingReclaim();
   }
 
   private boolean hasSourceWork() {
@@ -920,7 +933,7 @@ public final class MaintenanceEventLoop
   }
 
   private boolean hasImmediateSourceWork() {
-    return reliableRemovals.size() != 0L
+    return reliableRemovals.hasCommittedHead()
         || !queue.isEmpty()
         || repairNeeded.get()
         || allocationPressureRequested.get()
@@ -1044,7 +1057,7 @@ public final class MaintenanceEventLoop
 
   private int drainReliableRemovals(int limit) {
     int work = 0;
-    while (work < limit && reliableRemovals.size() != 0L) {
+    while (work < limit && reliableRemovals.hasCommittedHead()) {
       Entry entry = reliableRemovals.poll();
       if (entry != null) {
         processEntry(entry);

@@ -205,7 +205,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalStateException("cache is closed");
     }
     try {
-      byte[] encodedKey = key.backingBytes();
+      context.ensureKey(key.length());
+      key.copyTo(context.keyBytes, 0);
+      byte[] encodedKey = context.keyBytes;
       context.lookupKey.setPrecomputed(encodedKey, key.length(), key.hash64());
       boolean accepted =
           putSerialized(
@@ -1018,7 +1020,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               && taggedValue == expectedValueAddress
               && value != 0L
               && Entry.hasTtl(taggedValue)
-              && ValueBlock.expired(value, worker.nowMillis())
+              && ValueBlock.expired(value, ticker.currentTimeMillis())
               && removeCurrent(entry);
       if (removed) {
         long valueAllocation = ValueBlock.allocationLength(ValueBlock.length(value));
@@ -1131,7 +1133,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         boolean match =
             mappingIsCurrent(entry)
                 && old != 0L
-                && (!Entry.hasTtl(oldTagged) || !ValueBlock.expired(old, worker.nowMillis()))
+                && (!Entry.hasTtl(oldTagged)
+                    || !ValueBlock.expired(old, ticker.currentTimeMillis()))
                 && ValueBlock.length(old) == expected.length
                 && NativeMemory.equals(
                     ValueBlock.payloadAddress(old), expected, 0, expected.length);
@@ -1581,7 +1584,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (!Entry.hasTtl(taggedValue)) {
       return value;
     }
-    return ValueBlock.expired(value, worker.nowMillis()) ? 0L : value;
+    return ValueBlock.expired(value, ticker.currentTimeMillis()) ? 0L : value;
   }
 
   private long defaultExpiry(long hash) {

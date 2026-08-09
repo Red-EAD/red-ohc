@@ -100,6 +100,11 @@ public final class ReliableRemovalQueue {
     return producer.get() - consumer;
   }
 
+  /** Returns whether the consumer can observe a committed value at the current head. */
+  boolean hasCommittedHead() {
+    return head() != null;
+  }
+
   private void publish(Reservation reservation, Entry entry) {
     if (!reservation.active()) {
       throw new IllegalStateException("missing reservation");

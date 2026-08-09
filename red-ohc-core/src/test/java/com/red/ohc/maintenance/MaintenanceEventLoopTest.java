@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -339,6 +340,35 @@ public class MaintenanceEventLoopTest {
     }
   }
 
+  @Test
+  public void repairAdmissionWatermarkMatchesTheReachableRepairCapacity() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    try {
+      Field capacityField = MaintenanceEventLoop.class.getDeclaredField("repairCapacity");
+      capacityField.setAccessible(true);
+      long capacity = capacityField.getLong(loop);
+      Field debtField = MaintenanceEventLoop.class.getDeclaredField("repairDebts");
+      debtField.setAccessible(true);
+      AtomicLong[] debts = (AtomicLong[]) debtField.get(loop);
+
+      debts[0].set(Math.max(0L, capacity - 1L));
+      assertTrue(!loop.mutationBacklogExceeds());
+      debts[0].set(capacity);
+      assertTrue(loop.mutationBacklogExceeds());
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
   @Test(timeOut = 2_000L)
   public void repairDebtConvergesWhenReliableRemovalConsumesTheDroppedHint() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -462,6 +492,70 @@ public class MaintenanceEventLoopTest {
           0,
           "canceling a pre-publication removal must release its pending claim");
     } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void uncommittedReliableRemovalDoesNotKeepWorkerSpinning() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    ThreadContext context = new ThreadContext(null, null);
+    Entry entry = new Entry(0L, 0, 124, 0L);
+    try {
+      loop.prepareReliableRemoval(context, entry);
+      loop.start();
+      waitUntilParked(loop);
+    } finally {
+      loop.cancelReliableRemoval(context, entry);
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void cancelingARemovalReservationSignalsAparkedWorker() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    ThreadContext context = new ThreadContext(null, null);
+    Entry entry = new Entry(0L, 0, 125, 0L);
+    try {
+      loop.start();
+      waitUntilParked(loop);
+      long wakeSignals = loop.snapshot().wakeSignals;
+      loop.prepareReliableRemoval(context, entry);
+      loop.cancelReliableRemoval(context, entry);
+
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+      while (loop.snapshot().wakeSignals == wakeSignals && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
+      assertTrue(
+          loop.snapshot().wakeSignals > wakeSignals,
+          "canceling a parked removal reservation must signal the maintenance worker");
+    } finally {
+      if (context.reliableRemoval.active()) {
+        loop.cancelReliableRemoval(context, entry);
+      }
+      loop.stop();
+      loop.join(1_000L);
       memory.closeArenas();
     }
   }
@@ -792,6 +886,38 @@ public class MaintenanceEventLoopTest {
     } finally {
       loop.stop();
       loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void terminalFailureWithPendingReservationStopsAndFreesTheActor() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    ThreadContext context = new ThreadContext(null, null);
+    Entry entry = new Entry(0L, 0, 126, 0L);
+    try {
+      loop.prepareReliableRemoval(context, entry);
+      loop.start();
+      loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
+      loop.stop();
+      loop.join(1_000L);
+
+      assertTrue(!loop.isAlive(), "terminal failure during close must not retry pending work");
+      assertEquals(memory.allocated(), 0L);
+    } finally {
+      if (loop.isAlive()) {
+        loop.stop();
+        loop.join(1_000L);
+      }
       memory.closeArenas();
     }
   }
