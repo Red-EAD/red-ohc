@@ -1,0 +1,165 @@
+package com.red.ohc.cache;
+
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.expectThrows;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.testng.annotations.Test;
+
+import com.red.ohc.api.CacheSerializer;
+import com.red.ohc.runtime.ThreadContext;
+
+public class WriteAdmissionTest {
+  private static final CacheSerializer<String> STRING =
+      new CacheSerializer<String>() {
+        @Override
+        public void serialize(String value, ByteBuffer buffer) {
+          buffer.put(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public String deserialize(ByteBuffer buffer) {
+          byte[] bytes = new byte[buffer.remaining()];
+          buffer.get(bytes);
+          return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public int serializedSize(String value) {
+          return value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        }
+      };
+
+  @Test
+  public void closedPutThrowsInsteadOfReturningResourceRejection() {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    cache.close();
+    expectThrows(IllegalStateException.class, () -> cache.put("key", "value"));
+  }
+
+  @Test
+  public void oversizePutThrowsInsteadOfReturningFalse() {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .maxEntrySize(16)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped()) {
+      expectThrows(
+          IllegalArgumentException.class, () -> cache.put("this-key-is-too-large", "value"));
+    }
+  }
+
+  @Test(timeOut = 30_000L)
+  public void writerAssistEventuallyAdmitsReplacementAfterReaderQuiesces() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(8L << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.ExecutorService readers =
+        java.util.concurrent.Executors.newSingleThreadExecutor();
+    java.util.concurrent.Future<Boolean> direct = null;
+    try {
+      assertTrue(cache.put("key", "initial"));
+      cache.flushAsync().join();
+      direct =
+          readers.submit(
+              () ->
+                  cache.getDirect(
+                      "key",
+                      view -> {
+                        entered.countDown();
+                        try {
+                          release.await();
+                        } catch (InterruptedException interrupted) {
+                          Thread.currentThread().interrupt();
+                          throw new AssertionError(interrupted);
+                        }
+                        view.getByte(0);
+                      }));
+      assertTrue(entered.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+
+      java.util.concurrent.Future<Boolean> writer =
+          readers.submit(
+              () -> {
+                boolean accepted = true;
+                for (int i = 0; i < 2_000; i++) {
+                  accepted &= cache.put("key", "value-" + i);
+                }
+                return accepted;
+              });
+      Thread.sleep(100L);
+      release.countDown();
+      assertTrue(writer.get(8L, java.util.concurrent.TimeUnit.SECONDS));
+      assertTrue(direct.get(2L, java.util.concurrent.TimeUnit.SECONDS));
+    } finally {
+      release.countDown();
+      if (direct != null) {
+        direct.cancel(true);
+      }
+      readers.shutdownNow();
+      cache.close();
+    }
+  }
+
+  @Test
+  public void failedWriterLeaseActivationClearsCloseMarker() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    ThreadContext context = null;
+    try {
+      Field contextsField = OffHeapCache.class.getDeclaredField("contexts");
+      contextsField.setAccessible(true);
+      @SuppressWarnings("unchecked")
+      ThreadLocal<ThreadContext> contexts = (ThreadLocal<ThreadContext>) contextsField.get(cache);
+      context = contexts.get();
+
+      Field leaseField = ThreadContext.class.getDeclaredField("budgetLease");
+      leaseField.setAccessible(true);
+      Object lease = leaseField.get(context);
+      Field stateField = lease.getClass().getDeclaredField("state");
+      stateField.setAccessible(true);
+      AtomicInteger state = (AtomicInteger) stateField.get(lease);
+      state.set(1); // Budget.Lease.ACTIVE
+
+      Method enterWriter = OffHeapCache.class.getDeclaredMethod("enterWriter");
+      enterWriter.setAccessible(true);
+      try {
+        enterWriter.invoke(cache);
+        throw new AssertionError("lease activation should fail while reclaiming");
+      } catch (InvocationTargetException expected) {
+        assertTrue(expected.getCause() instanceof IllegalStateException);
+      } finally {
+        state.set(0); // Budget.Lease.IDLE
+      }
+      assertFalse(
+          context.slot.writerActive, "failed lease activation must not block close forever");
+    } finally {
+      // Keep cleanup independent of the intentionally injected activation failure.
+      if (context != null) {
+        context.slot.writerActive = false;
+      }
+      cache.close();
+    }
+  }
+}

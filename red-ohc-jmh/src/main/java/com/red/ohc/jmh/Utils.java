@@ -17,45 +17,38 @@ package com.red.ohc.jmh;
 
 import java.nio.ByteBuffer;
 
-import com.red.ohc.CacheSerializer;
+import com.red.ohc.api.CacheSerializer;
 
-public final class Utils
-{
-    public static final CacheSerializer<byte[]> byteArraySerializer = new CacheSerializer<byte[]>()
-    {
-        public void serialize(byte[] bytes, ByteBuffer buf)
-        {
-            buf.put(bytes);
+public final class Utils {
+  public static final CacheSerializer<byte[]> byteArraySerializer =
+      new CacheSerializer<byte[]>() {
+        public void serialize(byte[] bytes, ByteBuffer buf) {
+          buf.put(bytes);
         }
 
-        public byte[] deserialize(ByteBuffer buf)
-        {
-            byte[] arr = new byte[buf.remaining()];
-            buf.get(arr);
-            return arr;
+        public byte[] deserialize(ByteBuffer buf) {
+          byte[] arr = new byte[buf.remaining()];
+          buf.get(arr);
+          return arr;
         }
 
-        public int serializedSize(byte[] bytes)
-        {
-            return bytes.length;
+        public int serializedSize(byte[] bytes) {
+          return bytes.length;
         }
-    };
+      };
 
-    public static final CacheSerializer<Integer> intSerializer = new CacheSerializer<Integer>()
-    {
-        public void serialize(Integer integer, ByteBuffer buf)
-        {
-            buf.putInt(integer);
+  public static final CacheSerializer<Integer> intSerializer =
+      new CacheSerializer<Integer>() {
+        public void serialize(Integer integer, ByteBuffer buf) {
+          buf.putInt(integer);
         }
 
-        public Integer deserialize(ByteBuffer buf)
-        {
-            return buf.getInt();
+        public Integer deserialize(ByteBuffer buf) {
+          return buf.getInt();
         }
 
-        public int serializedSize(Integer integer)
-        {
-            return 4;
+        public int serializedSize(Integer integer) {
+          return 4;
         }
-    };
+      };
 }

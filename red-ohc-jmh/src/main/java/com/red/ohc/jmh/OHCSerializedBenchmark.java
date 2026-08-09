@@ -2,11 +2,6 @@ package com.red.ohc.jmh;
 
 import java.util.concurrent.TimeUnit;
 
-import com.red.ohc.AllocatorType;
-import com.red.ohc.Eviction;
-import com.red.ohc.OHCacheBuilder;
-import com.red.ohc.OHCacheStats;
-import com.red.ohc.OffHeapCache;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -23,28 +18,47 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
+import com.red.ohc.api.AllocatorType;
+import com.red.ohc.api.Eviction;
+import com.red.ohc.api.OHCacheStats;
+import com.red.ohc.cache.OHCacheBuilder;
+import com.red.ohc.cache.OffHeapCache;
+
 /** OHC generic API benchmark: raw byte[] codec plus off-heap cache access. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Warmup(iterations = 5, time = 3)
 @Measurement(iterations = 5, time = 3)
-@Fork(value = 3, jvmArgsAppend = {"-Xms1g", "-Xmx1g"})
+@Fork(
+    value = 3,
+    jvmArgsAppend = {"-Xms1g", "-Xmx1g"})
 @State(Scope.Benchmark)
 public class OHCSerializedBenchmark {
-    @Param({"JNA"}) public AllocatorType allocator;
-    @Param({"16", "64"}) public int keyBytes;
-    @Param({"256", "1024"}) public int valueBytes;
-    @Param({"READ_100", "READ_95_WRITE_5"}) public String workload;
-    @Param({"UNIFORM", "ZIPF_099"}) public String distribution;
+  @Param({"JNA"})
+  public AllocatorType allocator;
 
-    private SerializedBenchmarkSupport.Dataset dataset;
-    private OffHeapCache<byte[], byte[]> cache;
+  @Param({"16", "64"})
+  public int keyBytes;
 
-    @Setup(Level.Trial)
-    public void setup() {
-        dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
-        long capacity = (long) SerializedBenchmarkSupport.WORKING_SET * (keyBytes + valueBytes) * 2L;
-        cache = (OffHeapCache<byte[], byte[]>) OHCacheBuilder.<byte[], byte[]>newBuilder()
+  @Param({"256", "1024"})
+  public int valueBytes;
+
+  @Param({"READ_100", "READ_95_WRITE_5"})
+  public String workload;
+
+  @Param({"UNIFORM", "ZIPF_099"})
+  public String distribution;
+
+  private SerializedBenchmarkSupport.Dataset dataset;
+  private OffHeapCache<byte[], byte[]> cache;
+
+  @Setup(Level.Trial)
+  public void setup() {
+    dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
+    long capacity = (long) SerializedBenchmarkSupport.WORKING_SET * (keyBytes + valueBytes) * 2L;
+    cache =
+        (OffHeapCache<byte[], byte[]>)
+            OHCacheBuilder.<byte[], byte[]>newBuilder()
                 .capacity(capacity)
                 .expectedEntries(SerializedBenchmarkSupport.WORKING_SET)
                 .keySerializer(Utils.byteArraySerializer)
@@ -52,54 +66,59 @@ public class OHCSerializedBenchmark {
                 .eviction(Eviction.S3_FIFO)
                 .allocator(allocator)
                 .build();
-        for (int i = 0; i < SerializedBenchmarkSupport.WORKING_SET; i++) {
-            if (!cache.put(dataset.keys[i], dataset.values[i])) throw new IllegalStateException("OHC preload rejected");
-            if ((i & 1023) == 1023) cache.flushAsync().join();
-        }
+    for (int i = 0; i < SerializedBenchmarkSupport.WORKING_SET; i++) {
+      if (!cache.put(dataset.keys[i], dataset.values[i])) {
+        throw new IllegalStateException("OHC preload rejected");
+      }
+      if ((i & 1023) == 1023) {
         cache.flushAsync().join();
-        assertHealthy();
+      }
     }
+    cache.flushAsync().join();
+    assertHealthy();
+  }
 
-    @TearDown(Level.Trial)
-    public void tearDown() {
-        cache.flushAsync().join();
-        try {
-            assertHealthy();
-        } finally {
-            cache.close();
-        }
+  @TearDown(Level.Trial)
+  public void tearDown() {
+    cache.flushAsync().join();
+    try {
+      assertHealthy();
+    } finally {
+      cache.close();
     }
+  }
 
-    @Benchmark @Threads(1)
-    public void oneThread(ThreadState state, Blackhole blackhole) {
-        access(state, blackhole);
-    }
+  @Benchmark
+  @Threads(1)
+  public void oneThread(ThreadState state, Blackhole blackhole) {
+    access(state, blackhole);
+  }
 
-    @Benchmark @Threads(Threads.MAX)
-    public void cpuThreads(ThreadState state, Blackhole blackhole) {
-        access(state, blackhole);
-    }
+  @Benchmark
+  @Threads(Threads.MAX)
+  public void cpuThreads(ThreadState state, Blackhole blackhole) {
+    access(state, blackhole);
+  }
 
-    private void access(ThreadState state, Blackhole blackhole) {
-        int index = dataset.accessSequence[state.cursor++ & (dataset.accessSequence.length - 1)];
-        if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
-            blackhole.consume(cache.put(dataset.keys[index], dataset.values[index]));
-        } else {
-            blackhole.consume(SerializedBenchmarkSupport.firstLong(cache.get(dataset.keys[index])));
-        }
+  private void access(ThreadState state, Blackhole blackhole) {
+    int index = dataset.accessSequence[state.cursor++ & (dataset.accessSequence.length - 1)];
+    if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
+      blackhole.consume(cache.put(dataset.keys[index], dataset.values[index]));
+    } else {
+      blackhole.consume(SerializedBenchmarkSupport.firstLong(cache.get(dataset.keys[index])));
     }
+  }
 
-    private void assertHealthy() {
-        OHCacheStats stats = cache.stats();
-        if (stats.maintenanceUnhealthy || stats.mutationRejectedQueue != 0L || stats.mutationRejectedBudget != 0L
-                || stats.maintenanceQueueDepth != 0L) {
-            throw new IllegalStateException("invalid OHC serialized measurement");
-        }
+  private void assertHealthy() {
+    OHCacheStats stats = cache.stats();
+    if (stats.maintenanceUnhealthy || stats.maintenanceQueueDepth != 0L) {
+      throw new IllegalStateException("invalid OHC serialized measurement");
     }
+  }
 
-    @State(Scope.Thread)
-    public static class ThreadState {
-        private int cursor;
-        private int operations;
-    }
+  @State(Scope.Thread)
+  public static class ThreadState {
+    private int cursor;
+    private int operations;
+  }
 }

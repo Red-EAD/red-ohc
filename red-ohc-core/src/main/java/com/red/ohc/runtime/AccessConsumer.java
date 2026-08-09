@@ -4,5 +4,5 @@ import com.red.ohc.index.Entry;
 
 @FunctionalInterface
 public interface AccessConsumer {
-    void accept(Entry entry, long generation);
+  void accept(Entry entry, long generation);
 }

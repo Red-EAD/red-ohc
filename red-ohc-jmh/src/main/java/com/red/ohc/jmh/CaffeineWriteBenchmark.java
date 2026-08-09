@@ -4,8 +4,6 @@ import java.util.concurrent.TimeUnit;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.red.ohc.EncodedKey;
-import com.red.ohc.OHCWriteAdmissionBenchmark;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -22,54 +20,81 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
+import com.red.ohc.api.EncodedKey;
+
 /** Caffeine-only admission benchmark. It intentionally starts no OHC worker threads. */
 @BenchmarkMode(Mode.SingleShotTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @Warmup(iterations = 10)
 @Measurement(iterations = 10)
-@Fork(value = 3, jvmArgsAppend = {"-Xms2g", "-Xmx2g"})
+@Fork(
+    value = 3,
+    jvmArgsAppend = {"-Xms2g", "-Xmx2g"})
 @State(Scope.Benchmark)
 public class CaffeineWriteBenchmark {
-    private static final int KEY_COUNT = 1 << 15;
-    private static final int KEY_MASK = KEY_COUNT - 1;
-    private static final int BATCH_SIZE = 1 << 8;
-    @Param({"16", "64"}) public int keyBytes;
-    @Param({"256", "1024"}) public int valueBytes;
-    private EncodedKey[] keys;
-    private byte[][] values;
-    private Cache<EncodedKey, byte[]> cache;
+  private static final int KEY_COUNT = 1 << 15;
+  private static final int KEY_MASK = KEY_COUNT - 1;
+  private static final int BATCH_SIZE = 1 << 8;
+
+  @Param({"16", "64"})
+  public int keyBytes;
+
+  @Param({"256", "1024"})
+  public int valueBytes;
+
+  private EncodedKey[] keys;
+  private byte[][] values;
+  private Cache<EncodedKey, byte[]> cache;
+
+  @Setup(Level.Trial)
+  public void setup() {
+    keys = new EncodedKey[KEY_COUNT];
+    values = new byte[KEY_COUNT][];
+    long payloadCapacity = (long) KEY_COUNT * (keyBytes + valueBytes) * 2L;
+    cache =
+        Caffeine.<EncodedKey, byte[]>newBuilder()
+            .maximumWeight(payloadCapacity)
+            .weigher((EncodedKey key, byte[] value) -> key.length() + value.length)
+            .build();
+    for (int i = 0; i < KEY_COUNT; i++) {
+      keys[i] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, i));
+      values[i] = OHCWriteAdmissionBenchmark.bytes(valueBytes, i * 31 + 7);
+      cache.put(keys[i], values[i]);
+    }
+  }
+
+  @Benchmark
+  @Threads(1)
+  @OperationsPerInvocation(BATCH_SIZE)
+  public void oneThread(Cursor cursor) {
+    write(cursor);
+  }
+
+  @Benchmark
+  @Threads(Threads.MAX)
+  @OperationsPerInvocation(BATCH_SIZE)
+  public void cpuThreads(Cursor cursor) {
+    write(cursor);
+  }
+
+  private void write(Cursor cursor) {
+    for (int i = 0; i < BATCH_SIZE; i++) {
+      int index = cursor.next();
+      cache.put(keys[index], values[index]);
+    }
+  }
+
+  @State(Scope.Thread)
+  public static class Cursor {
+    private int cursor;
 
     @Setup(Level.Trial)
-    public void setup() {
-        keys = new EncodedKey[KEY_COUNT];
-        values = new byte[KEY_COUNT][];
-        long payloadCapacity = (long) KEY_COUNT * (keyBytes + valueBytes) * 2L;
-        cache = Caffeine.<EncodedKey, byte[]>newBuilder().maximumWeight(payloadCapacity)
-                .weigher((EncodedKey key, byte[] value) -> key.length() + value.length).build();
-        for (int i = 0; i < KEY_COUNT; i++) {
-            keys[i] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, i));
-            values[i] = OHCWriteAdmissionBenchmark.bytes(valueBytes, i * 31 + 7);
-            cache.put(keys[i], values[i]);
-        }
+    public void setup(ThreadParams params) {
+      cursor = params.getThreadIndex() * BATCH_SIZE;
     }
 
-    @Benchmark @Threads(1) @OperationsPerInvocation(BATCH_SIZE)
-    public void oneThread(Cursor cursor) { write(cursor); }
-
-    @Benchmark @Threads(Threads.MAX) @OperationsPerInvocation(BATCH_SIZE)
-    public void cpuThreads(Cursor cursor) { write(cursor); }
-
-    private void write(Cursor cursor) {
-        for (int i = 0; i < BATCH_SIZE; i++) {
-            int index = cursor.next();
-            cache.put(keys[index], values[index]);
-        }
+    int next() {
+      return cursor++ & KEY_MASK;
     }
-
-    @State(Scope.Thread)
-    public static class Cursor {
-        private int cursor;
-        @Setup(Level.Trial) public void setup(ThreadParams params) { cursor = params.getThreadIndex() * BATCH_SIZE; }
-        int next() { return cursor++ & KEY_MASK; }
-    }
+  }
 }
