@@ -49,6 +49,7 @@ public final class MaintenancePolicy {
     /** First Window entry moved to probation and not yet processed by main admission. */
     private Entry tinyCandidate;
     private long admissionSequence;
+    private final Selection selection = new Selection();
     /** Actor-visible work consumed while finding the latest victim. */
     private int lastVictimScanCount;
 
@@ -77,8 +78,9 @@ public final class MaintenancePolicy {
         weightedSize += entry.policyWeight;
         switch (eviction) {
             case S3_FIFO:
-                if (ghost.containsKey(entry.keyHash64())) {
-                    ghostWeight -= ghost.remove(entry.keyHash64());
+                long hash = entry.keyHash64();
+                if (ghost.containsKey(hash)) {
+                    ghostWeight -= ghost.remove(hash);
                     ghostHits++;
                     link(main, entry, Entry.POLICY_S3_MAIN);
                     mainWeight += entry.policyWeight;
@@ -139,6 +141,15 @@ public final class MaintenancePolicy {
     }
 
     public void remove(Entry entry, boolean eviction) {
+        remove(entry, eviction, 0L, false);
+    }
+
+    /** Removes an entry, reusing a hash already loaded by the eviction selector when provided. */
+    void remove(Entry entry, boolean eviction, long keyHash64) {
+        remove(entry, eviction, keyHash64, true);
+    }
+
+    private void remove(Entry entry, boolean eviction, long keyHash64, boolean hashProvided) {
         int state = entry.policyState();
         if (state == Entry.POLICY_NONE) return;
         switch (state) {
@@ -148,7 +159,7 @@ public final class MaintenancePolicy {
             case Entry.POLICY_S3_SMALL:
                 unlink(small, entry);
                 smallWeight -= entry.policyWeight;
-                if (eviction) addGhost(entry);
+                if (eviction) addGhost(entry, hashProvided ? keyHash64 : entry.keyHash64());
                 break;
             case Entry.POLICY_S3_MAIN:
                 unlink(main, entry);
@@ -178,9 +189,10 @@ public final class MaintenancePolicy {
 
     /** Selects one production eviction outcome; scan exhaustion is distinct from an empty policy. */
     public Selection selectVictim(int scanLimit) {
+        selection.reset();
         if (scanLimit <= 0) {
             lastVictimScanCount = 0;
-            return Selection.scanExhausted();
+            return selection.scanExhausted();
         }
         switch (eviction) {
             case S3_FIFO:
@@ -190,7 +202,7 @@ public final class MaintenancePolicy {
                 return tinyLfuVictim();
             default:
                 lastVictimScanCount = lru.tail == null ? 0 : 1;
-                return lru.tail == null ? Selection.none() : Selection.entry(lru.tail);
+                return lru.tail == null ? selection.none() : selection.entry(lru.tail);
         }
     }
 
@@ -258,13 +270,13 @@ public final class MaintenancePolicy {
                     mainWeight += candidate.policyWeight;
                     continue;
                 }
-                return Selection.entry(candidate);
+                return selection.entry(candidate);
             }
             Entry candidate = main.tail;
             if (candidate == null) {
                 candidate = small.tail;
                 if (candidate != null) lastVictimScanCount++;
-                return candidate == null ? Selection.none() : Selection.entry(candidate);
+                return candidate == null ? selection.none() : selection.entry(candidate);
             }
             lastVictimScanCount++;
             if (candidate.policyAccessCount() > 0) {
@@ -272,9 +284,9 @@ public final class MaintenancePolicy {
                 main.moveToHead(candidate);
                 continue;
             }
-            return Selection.entry(candidate);
+            return selection.entry(candidate);
         }
-        return Selection.scanExhausted();
+        return selection.scanExhausted();
     }
 
     private Selection tinyLfuVictim() {
@@ -288,29 +300,31 @@ public final class MaintenancePolicy {
         Entry victim = probation.tail;
         if (candidate != null && victim == candidate) {
             advanceTinyCandidate(candidate);
-            return Selection.entry(candidate);
+            return selection.entry(candidate);
         }
         if (candidate != null && victim != null) {
             advanceTinyCandidate(candidate);
-            return Selection.entry(admit(candidate, victim) ? victim : candidate);
+                return selection.entry(admit(candidate, victim) ? victim : candidate);
         }
-        if (victim != null) return Selection.entry(victim);
+        if (victim != null) return selection.entry(victim);
         if (candidate != null) {
             advanceTinyCandidate(candidate);
-            return Selection.entry(candidate);
+            return selection.entry(candidate);
         }
-        if (protectedQueue.tail != null) return Selection.entry(protectedQueue.tail);
-        return Selection.none();
+        if (protectedQueue.tail != null) return selection.entry(protectedQueue.tail);
+        return selection.none();
     }
 
     private boolean admit(Entry candidate, Entry victim) {
-        int candidateFrequency = sketch.frequency(candidate.keyHash64());
-        int victimFrequency = sketch.frequency(victim.keyHash64());
+        long candidateHash = candidate.keyHash64();
+        long victimHash = victim.keyHash64();
+        int candidateFrequency = sketch.frequency(candidateHash);
+        int victimFrequency = sketch.frequency(victimHash);
         if (candidateFrequency > victimFrequency) return true;
         if (candidateFrequency < HASHDOS_ADMISSION_THRESHOLD) return false;
         // Caffeine's 1/128 HashDoS escape hatch, made deterministic because the actor owns the
         // sequence and policy results must not depend on a producer thread's RNG state.
-        return ((candidate.keyHash64() + ++admissionSequence) & 127L) == 0L;
+        return ((candidateHash + ++admissionSequence) & 127L) == 0L;
     }
 
     private void promoteWindow(Entry candidate) {
@@ -401,8 +415,7 @@ public final class MaintenancePolicy {
         entry.policyWeight = updated;
     }
 
-    private void addGhost(Entry entry) {
-        long fingerprint = entry.keyHash64();
+    private void addGhost(Entry entry, long fingerprint) {
         long previous = ghost.putAndMoveToFirst(fingerprint, entry.policyWeight);
         ghostWeight += entry.policyWeight - previous;
         while (ghostWeight > ghostMaximum && !ghost.isEmpty()) ghostWeight -= ghost.removeLastLong();
@@ -411,17 +424,14 @@ public final class MaintenancePolicy {
     public static final class Selection {
         public enum Kind { ENTRY, SCAN_EXHAUSTED, NONE }
 
-        public final Kind kind;
-        public final Entry entry;
+        public Kind kind;
+        public Entry entry;
 
-        private Selection(Kind kind, Entry entry) {
-            this.kind = kind;
-            this.entry = entry;
-        }
-
-        private static Selection entry(Entry entry) { return new Selection(Kind.ENTRY, entry); }
-        private static Selection scanExhausted() { return new Selection(Kind.SCAN_EXHAUSTED, null); }
-        private static Selection none() { return new Selection(Kind.NONE, null); }
+        private Selection() { this.kind = Kind.NONE; }
+        private void reset() { kind = Kind.NONE; entry = null; }
+        private Selection entry(Entry value) { kind = Kind.ENTRY; entry = value; return this; }
+        private Selection scanExhausted() { kind = Kind.SCAN_EXHAUSTED; entry = null; return this; }
+        private Selection none() { kind = Kind.NONE; entry = null; return this; }
     }
 
     private static long weightOf(Entry entry) {

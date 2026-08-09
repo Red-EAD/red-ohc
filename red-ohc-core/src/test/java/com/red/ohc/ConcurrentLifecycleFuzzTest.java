@@ -84,7 +84,11 @@ public final class ConcurrentLifecycleFuzzTest {
             assertFalse(stats.maintenanceUnhealthy);
             assertEquals(stats.maintenanceQueueDepth, 0L);
             assertEquals(stats.retirementQueueDepth, 0L);
-            assertTrue(stats.liveWeight <= cache.capacity());
+            assertTrue(stats.liveWeight <= cache.capacity(),
+                    "liveWeight=" + stats.liveWeight + ", capacity=" + cache.capacity()
+                            + ", evictions=" + stats.evictionCount + ", scans=" + stats.evictionScanCount
+                            + ", size=" + cache.size() + ", queue=" + stats.maintenanceQueueDepth
+                            + ", retirement=" + stats.retirementQueueDepth);
         } finally {
             callers.shutdownNow();
             cache.close();

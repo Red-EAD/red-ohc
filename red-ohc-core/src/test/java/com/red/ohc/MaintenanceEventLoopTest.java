@@ -12,11 +12,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
+import com.red.ohc.maintenance.RetirementQueue;
 import com.red.ohc.maintenance.TimerWheel;
 import com.red.ohc.runtime.AccessConsumer;
 import com.red.ohc.runtime.ReaderSlot;
@@ -26,7 +28,7 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.runtime.ThreadContext;
 
-import org.jctools.queues.MpscUnboundedXaddArrayQueue;
+import org.jctools.queues.MpscArrayQueue;
 
 public class MaintenanceEventLoopTest {
     @Test
@@ -37,7 +39,7 @@ public class MaintenanceEventLoopTest {
     }
 
     @Test
-    public void mutationTransportUsesTheUnboundedChunkedQueueAndNoRepairSideChannel() throws Exception {
+    public void mutationTransportUsesABoundedQueueAndRepairSideChannel() throws Exception {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
                 new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
@@ -45,12 +47,13 @@ public class MaintenanceEventLoopTest {
         try {
             Field queue = MaintenanceEventLoop.class.getDeclaredField("queue");
             queue.setAccessible(true);
-            assertTrue(queue.get(loop) instanceof MpscUnboundedXaddArrayQueue,
-                    "dirty credits, rather than a bounded queue plus repair chain, must be the sole mutation backlog limit");
+            assertTrue(queue.get(loop) instanceof MpscArrayQueue,
+                    "mutation hints must use a bounded non-blocking queue");
+            boolean hasRepair = false;
             for (Field field : MaintenanceEventLoop.class.getDeclaredFields()) {
-                assertFalse(field.getName().contains("repair"),
-                        "the unbounded mutation transport must not retain a producer-side repair side channel");
+                hasRepair |= field.getName().contains("repair");
             }
+            assertTrue(hasRepair, "a full advisory queue must leave a repair signal");
         } finally {
             memory.closeArenas();
         }
@@ -84,6 +87,22 @@ public class MaintenanceEventLoopTest {
     }
 
     @Test(timeOut = 2_000L)
+    public void awaitMaintenanceProgressReturnsWhenTheObservedPassAlreadyCompleted() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
+        try {
+            long started = System.nanoTime();
+            loop.awaitMaintenanceProgress();
+            assertTrue(System.nanoTime() - started < TimeUnit.MILLISECONDS.toNanos(500L),
+                    "a caller must return to retry admission after a completed maintenance pass");
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    @Test(timeOut = 2_000L)
     public void idleWorkerDoesNotReadAClockWithoutTimerOrRetirementWork() throws Exception {
         CountingTicker ticker = new CountingTicker();
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -105,7 +124,7 @@ public class MaintenanceEventLoopTest {
     }
 
     @Test(timeOut = 2_000L)
-    public void unboundedTransportAcceptsVisibleHintsWithoutRepair() throws Exception {
+    public void boundedTransportAcceptsVisibleHintsWithoutMakingTheCacheUnhealthy() throws Exception {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
                 new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
@@ -159,26 +178,31 @@ public class MaintenanceEventLoopTest {
     }
 
     @Test
-    public void dirtyCreditsBoundPendingMaintenanceAndReturnAfterDrain() throws Exception {
+    public void boundedHintQueueFallsBackToRepairInsteadOfRejectingPublication() throws Exception {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
+        ConcurrentHashMap<Entry, Entry> data = index();
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(data, memory,
                 new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
                 new ReaderRegistry());
         try {
             int limit = (int) loop.queueCapacity();
             for (int i = 0; i < limit; i++) {
                 Entry entry = new Entry(0L, 0, i + 1, 0L);
+                data.put(entry, entry);
                 assertTrue(loop.reserveMutation(entry, Entry.PENDING_ADD));
                 loop.publishMutation(entry);
                 loop.afterWrite();
             }
             Entry rejected = new Entry(0L, 0, limit + 1, 0L);
-            assertFalse(loop.reserveMutation(rejected, Entry.PENDING_ADD), "dirty credits must reject before publication");
+            data.put(rejected, rejected);
+            assertTrue(loop.reserveMutation(rejected, Entry.PENDING_ADD),
+                    "an advisory queue being full must not reject a visible mutation");
+            loop.publishMutation(rejected);
+            assertTrue(rejected.pendingFlags != 0, "the full queue must leave a repairable pending marker");
 
             loop.start();
             loop.flush().join();
-            assertTrue(loop.reserveMutation(rejected, Entry.PENDING_ADD), "draining returns the unique event credit");
-            loop.cancelMutation(rejected);
+            assertEquals(rejected.pendingFlags, 0, "repair must eventually apply the dropped hint");
         } finally {
             loop.stop();
             loop.join(1_000L);
@@ -186,18 +210,83 @@ public class MaintenanceEventLoopTest {
         }
     }
 
+    @Test(timeOut = 2_000L)
+    public void repairDebtConvergesWhenReliableRemovalConsumesTheDroppedHint() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        ConcurrentHashMap<Entry, Entry> data = index();
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(data, memory,
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
+        ThreadContext context = new ThreadContext(null, null);
+        try {
+            int limit = (int) loop.queueCapacity();
+            for (int i = 0; i < limit; i++) {
+                Entry entry = new Entry(0L, 0, i + 1, 0L);
+                data.put(entry, entry);
+                loop.reserveMutation(entry, Entry.PENDING_ADD);
+                loop.publishMutation(entry);
+            }
+            Entry removed = new Entry(0L, 0, limit + 1, 0L);
+            data.put(removed, removed);
+            loop.reserveMutation(removed, Entry.PENDING_ADD);
+            loop.publishMutation(removed);
+            assertTrue(removed.isRepairMarked());
+
+            assertTrue(removed.claimWriter());
+            loop.prepareReliableRemoval(context, removed);
+            removed.markRetired();
+            assertTrue(data.remove(removed, removed));
+            removed.finishWriter();
+            loop.retireValue(context, 0L, 0L);
+            loop.retireValue(context, 0L, 0L);
+            loop.publishRemoval(context, removed);
+
+            loop.start();
+            loop.flush().join();
+            assertEquals(loop.queueDepth(), 0L,
+                    "repair debt must be released when reliable removal consumes the marker");
+        } finally {
+            loop.stop();
+            loop.join(1_000L);
+            memory.closeArenas();
+        }
+    }
+
+    @Test(timeOut = 2_000L)
+    public void failedReliableRemovalPreparationReleasesAdmissionAndReservation() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
+        ThreadContext context = new ThreadContext(null, null);
+        try {
+            try {
+                loop.prepareReliableRemoval(context, null);
+                throw new AssertionError("invalid removal preparation must fail");
+            } catch (NullPointerException expected) {
+                // The failed attempt must not strand the admission lock or its native reservation.
+            }
+
+            Entry entry = new Entry(0L, 0, 123, 0L);
+            loop.prepareReliableRemoval(context, entry);
+            loop.cancelReliableRemoval(context, entry);
+            assertEquals(entry.pendingFlags, 0,
+                    "canceling a pre-publication removal must release its pending claim");
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
     @Test
-    public void dirtyCreditLimitTracksCpuCountRatherThanAllocatorStripeCount() {
+    public void maintenanceHintCapacityIsBoundedAndPowerOfTwo() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory,
                 new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
                 new ReaderRegistry());
         try {
-            int cpuPowerOfTwo = 1;
-            int processors = Runtime.getRuntime().availableProcessors();
-            while (cpuPowerOfTwo < processors) cpuPowerOfTwo <<= 1;
-            assertEquals(loop.queueCapacity(), 128L * cpuPowerOfTwo,
-                    "the fixed chunk transport must be bounded only by the CPU-scaled dirty credit budget");
+            assertTrue(loop.queueCapacity() >= 1_024L);
+            assertEquals(Integer.bitCount((int) loop.queueCapacity()), 1,
+                    "the bounded hint queue capacity must be a power of two");
         } finally {
             memory.closeArenas();
         }
@@ -375,6 +464,39 @@ public class MaintenanceEventLoopTest {
         }
     }
 
+    @Test
+    public void evictionRetryDeadlineSuppressesARepeatedScanOnAnUnrelatedMaintenanceWake() throws Exception {
+        FrozenTicker ticker = new FrozenTicker();
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        com.red.ohc.storage.WriterArena arena = memory.newWriterArena();
+        long key = arena.allocate(8L);
+        long value = arena.allocate(ValueBlock.allocationLength(1));
+        NativeMemory.putLong(key, 121L);
+        ValueBlock.initialize(value, 0L, 1);
+        Entry entry = new Entry(key, 0, 121, value);
+        ConcurrentHashMap<Entry, Entry> data = index();
+        data.put(entry, entry);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(data, memory,
+                new Budget(1 << 20), ticker, 1L, Eviction.LRU, new ReaderRegistry());
+        try {
+            invokeApplyEntry(loop, entry);
+            Field retry = MaintenanceEventLoop.class.getDeclaredField("evictionRetryNanos");
+            retry.setAccessible(true);
+            retry.setLong(loop, 1_000L);
+
+            invokeMaintenancePass(loop);
+            assertEquals(loop.snapshot().evictionScans, 0L,
+                    "an unrelated wake must not bypass the eviction retry deadline");
+
+            retry.setLong(loop, 0L);
+            invokeMaintenancePass(loop);
+            assertTrue(loop.snapshot().evictionScans > 0L,
+                    "eviction must resume once its retry deadline is due");
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
     @Test(timeOut = 2_000L)
     public void idleLoopParksInsteadOfBusySpinning() throws Exception {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -481,6 +603,126 @@ public class MaintenanceEventLoopTest {
         }
     }
 
+    @Test(timeOut = 5_000L)
+    public void fullRetirementRingMakesWriterReservationProgressAfterReaderQuiesces() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        Budget budget = new Budget(16L << 20);
+        ReaderRegistry readers = new ReaderRegistry();
+        ReaderSlot activeReader = new ReaderSlot();
+        activeReader.epoch = 1L;
+        readers.register(activeReader);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory, budget,
+                Ticker.DEFAULT, 16L << 20, Eviction.LRU, readers);
+        RetirementQueue retirements = retirementQueue(loop);
+        RetirementQueue.Reservation[] reservations = new RetirementQueue.Reservation[(int) retirements.capacityRecords()];
+        try {
+            for (int index = 0; index < reservations.length; index++) {
+                RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
+                assertTrue(retirements.reserve(reservation, 1), "retirement ring must be fillable");
+                retirements.append(reservation, 0L, 0L);
+                reservations[index] = reservation;
+            }
+            loop.start();
+            waitUntilParked(loop);
+            ThreadContext context = new ThreadContext(null, null);
+            activeReader.epoch = 0L;
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
+            while (!loop.prepareRetirement(context, 1)) {
+                if (System.nanoTime() >= deadline) throw new TimeoutException("retirement reservation stalled");
+                loop.requestMaintenance();
+                loop.awaitMaintenanceProgress();
+            }
+            loop.retireValue(context, 0L, 0L);
+            assertFalse(context.retirement.active(), "the one-record reservation must be published");
+        } finally {
+            activeReader.epoch = 0L;
+            loop.stop();
+            loop.join(1_000L);
+            memory.closeArenas();
+        }
+    }
+
+    @Test(timeOut = 5_000L)
+    public void workerDoesNotParkWithMoreThanOneReclaimBatchStillPending() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        Budget budget = new Budget(16L << 20);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory, budget,
+                Ticker.DEFAULT, 16L << 20, Eviction.LRU, new ReaderRegistry());
+        RetirementQueue retirements = retirementQueue(loop);
+        long allocation = ValueBlock.allocationLength(1);
+        int recordCount = 2_048;
+        try {
+            for (int index = 0; index < recordCount; index++) {
+                RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
+                assertTrue(retirements.reserve(reservation, 1));
+                assertTrue(budget.reserve(budget.stripeForCurrentThread(),
+                        com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+                long address = memory.newWriterArena().allocate(allocation);
+                ValueBlock.initialize(address, 0L, 1);
+                retirements.append(reservation, address, allocation);
+            }
+            loop.afterWrite();
+            loop.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
+            while (loop.retirementQueueDepth() != 0L && System.nanoTime() < deadline) {
+                Thread.sleep(1L);
+            }
+            assertEquals(loop.retirementQueueDepth(), 0L,
+                    "the worker must continue bounded seal/reclaim passes instead of parking with records pending: "
+                            + loop.snapshot().retiredEntries + "/" + loop.snapshot().retirementQueueDepth
+                            + ", parked=" + loop.isParked());
+        } finally {
+            loop.stop();
+            loop.join(1_000L);
+            memory.closeArenas();
+        }
+    }
+
+    @Test(timeOut = 5_000L)
+    public void retirementPublicationSignalsParkedWorkerEvenAfterThreadGenerationWasSignaled() throws Exception {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        Budget budget = new Budget(1 << 20);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(index(), memory, budget,
+                Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry());
+        ThreadContext context = new ThreadContext(null, null);
+        try {
+            loop.start();
+            waitUntilParked(loop);
+            Field generation = MaintenanceEventLoop.class.getDeclaredField("idleGeneration");
+            generation.setAccessible(true);
+            long idleGeneration = generation.getLong(loop);
+            loop.afterWrite(context);
+            waitUntilParked(loop);
+            idleGeneration = generation.getLong(loop);
+            assertFalse(context.needsMaintenanceWake(idleGeneration));
+
+            long allocation = ValueBlock.allocationLength(1);
+            assertTrue(budget.reserve(budget.stripeForCurrentThread(),
+                    com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+            long value = memory.newWriterArena().allocate(allocation);
+            ValueBlock.initialize(value, 0L, 1);
+            assertTrue(loop.prepareRetirement(context, 1));
+            loop.retireValue(context, value, allocation);
+            loop.afterWrite(context);
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
+            while (loop.retirementQueueDepth() != 0L && System.nanoTime() < deadline) Thread.sleep(1L);
+            assertEquals(loop.retirementQueueDepth(), 0L,
+                    "a retirement append must not rely on a second producer signal in the same idle generation");
+        } finally {
+            loop.stop();
+            loop.join(1_000L);
+            memory.closeArenas();
+        }
+    }
+
+    private static RetirementQueue retirementQueue(MaintenanceEventLoop loop) throws Exception {
+        Field field = MaintenanceEventLoop.class.getDeclaredField("retirements");
+        field.setAccessible(true);
+        return (RetirementQueue) field.get(loop);
+    }
+
     private static void retireOne(MaintenanceEventLoop loop, NativeMemory.Memory memory, Budget budget,
                                   ThreadContext context) {
         long allocation = ValueBlock.allocationLength(1);
@@ -527,6 +769,12 @@ public class MaintenanceEventLoopTest {
         Method method = MaintenanceEventLoop.class.getDeclaredMethod("applyEntry", Entry.class);
         method.setAccessible(true);
         method.invoke(loop, entry);
+    }
+
+    private static void invokeMaintenancePass(MaintenanceEventLoop loop) throws Exception {
+        Method method = MaintenanceEventLoop.class.getDeclaredMethod("maintenancePass", boolean.class);
+        method.setAccessible(true);
+        method.invoke(loop, false);
     }
 
     private static final class FrozenTicker implements Ticker {

@@ -4,6 +4,7 @@ import java.nio.ByteBuffer;
 
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
+import com.red.ohc.maintenance.ReliableRemovalQueue;
 import com.red.ohc.maintenance.RetirementQueue;
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.Budget;
@@ -20,12 +21,15 @@ public final class ThreadContext {
     public final DirectValueView valueView = new DirectValueView();
     /** Reusable native-retirement reservation; it is active only across one writer critical section. */
     public final RetirementQueue.Reservation retirement = new RetirementQueue.Reservation();
+    public final ReliableRemovalQueue.Reservation reliableRemoval = new ReliableRemovalQueue.Reservation();
     private final WriterArena writerArena;
     private final Budget.Stripe budgetStripe;
     private long readSequence;
+    private long accessSequence;
     private MaintenanceEventLoop maintenance;
     private boolean bulkReadActive;
     private boolean bulkReadChanged;
+    private boolean retirementPublished;
     /** Last actor idle generation this writer has already signalled. */
     private long maintenanceWakeGeneration = Long.MIN_VALUE;
     boolean registered;
@@ -84,7 +88,8 @@ public final class ThreadContext {
     public void bulkHit(Entry entry) {
         slot.localHits++;
         readSequence++;
-        if (!slot.access.offer(entry, entry.generation())) slot.localAccessDropped++;
+        if ((++accessSequence & 15L) == 0L
+                && !slot.access.offer(entry, entry.generation())) slot.localAccessDropped++;
         bulkReadChanged = true;
     }
 
@@ -109,6 +114,7 @@ public final class ThreadContext {
 
     /** Delivers every hit to the policy stream; only an empty-to-nonempty transition wakes it. */
     public void access(Entry entry) {
+        if ((++accessSequence & 15L) != 0L) return;
         boolean wasEmpty = slot.access.isEmpty();
         if (!slot.access.offer(entry, entry.generation())) {
             dropped();
@@ -134,6 +140,16 @@ public final class ThreadContext {
 
     public void bindMaintenance(MaintenanceEventLoop maintenance) {
         this.maintenance = maintenance;
+    }
+
+    public void markRetirementPublished() {
+        retirementPublished = true;
+    }
+
+    public boolean consumeRetirementPublished() {
+        boolean published = retirementPublished;
+        retirementPublished = false;
+        return published;
     }
 
     public void publish() {

@@ -81,6 +81,28 @@ public class RetirementQueueTest {
     }
 
     @Test
+    public void cancelPrefixLeavesTheRemainingBatchReservationUsable() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        RetirementQueue queue = new RetirementQueue(memory, 1, 8);
+        RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
+        try {
+            assertTrue(queue.reserve(reservation, 4));
+            queue.append(reservation, 0L, 0L);
+            queue.cancelPrefix(reservation, 1);
+            assertTrue(reservation.active(), "a prefix cancel must not discard the rest of the batch");
+            queue.cancel(reservation);
+            assertEquals(queue.seal(4, 1L), 4);
+            assertEquals(queue.reclaim(new ReaderRegistry(), 4), 4);
+            assertTrue(queue.reserve(reservation, 8), "all tombstones must return the ring capacity");
+            queue.cancel(reservation);
+        } finally {
+            queue.freeAll();
+            queue.close();
+            memory.closeArenas();
+        }
+    }
+
+    @Test
     public void oneBusyProducerStripeCanUseAnotherFixedStripeBeforeRejecting() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         RetirementQueue queue = new RetirementQueue(memory, 2, 2);

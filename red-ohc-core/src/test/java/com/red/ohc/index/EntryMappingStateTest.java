@@ -58,4 +58,49 @@ public final class EntryMappingStateTest {
         entry.completePendingClaim();
         assertEquals(entry.takePending(), Entry.PENDING_ADD | Entry.PENDING_UPDATE);
     }
+
+    @Test
+    public void completedPendingPublicationAdvancesTheMutationVersion() {
+        Entry entry = new Entry(0L, 1, 7, 0L);
+
+        assertEquals(entry.mutationVersion(), 0L);
+        assertTrue(entry.beginPending(Entry.PENDING_ADD));
+        entry.completePendingClaim();
+        assertEquals(entry.mutationVersion(), 1L);
+        assertEquals(entry.appliedVersion(), 0L,
+                "the maintenance worker must publish the applied version");
+        assertTrue(entry.markAppliedVersion(1L));
+        assertEquals(entry.appliedVersion(), 1L);
+    }
+
+    @Test
+    public void appliedVersionDoesNotAdvanceAfterAConcurrentMutation() {
+        Entry entry = new Entry(0L, 1, 7, 0L);
+
+        assertTrue(entry.beginPending(Entry.PENDING_ADD));
+        entry.completePendingClaim();
+        assertTrue(entry.markAppliedVersion(1L));
+
+        assertFalse(entry.beginPending(Entry.PENDING_UPDATE));
+        entry.completePendingClaim();
+        assertFalse(entry.markAppliedVersion(1L));
+        assertEquals(entry.appliedVersion(), 1L);
+    }
+
+    @Test
+    public void maintenanceVersionSurvivesPolicyMetadataUpdates() {
+        Entry entry = new Entry(0L, 1, 7, 0L);
+
+        assertTrue(entry.beginPending(Entry.PENDING_ADD));
+        entry.completePendingClaim();
+        assertTrue(entry.markAppliedVersion(1L));
+
+        entry.policyState(Entry.POLICY_TINY_PROTECTED);
+        entry.policyAccessCount(3);
+
+        assertEquals(entry.mutationVersion(), 1L);
+        assertEquals(entry.appliedVersion(), 1L);
+        assertEquals(entry.policyState(), Entry.POLICY_TINY_PROTECTED);
+        assertEquals(entry.policyAccessCount(), 3);
+    }
 }

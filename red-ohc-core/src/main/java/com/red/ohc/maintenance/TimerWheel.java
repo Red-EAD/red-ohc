@@ -1,8 +1,5 @@
 package com.red.ohc.maintenance;
 
-import java.util.Comparator;
-import java.util.PriorityQueue;
-
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.ValueBlock;
 
@@ -30,7 +27,8 @@ public final class TimerWheel {
     private long level1Occupied;
     private long level2Occupied;
     private int level3Occupied;
-    private final PriorityQueue<Entry> overflow = new PriorityQueue<>(Comparator.comparingLong(entry -> entry.timerDeadlineTick));
+    private Entry[] overflow = new Entry[16];
+    private int overflowSize;
     private long tick;
     private long scheduled;
     /** A bucket that exceeded the caller's expiry budget. It is resumed before advancing time. */
@@ -42,7 +40,8 @@ public final class TimerWheel {
 
     long bytes() {
         return (long) (L0_SIZE + L1_SIZE + L2_SIZE + L3_SIZE) * Long.BYTES
-                + (long) level0Occupied.length * Long.BYTES + Long.BYTES * 2L + Integer.BYTES;
+                + (long) level0Occupied.length * Long.BYTES + Long.BYTES * 2L + Integer.BYTES
+                + (long) overflow.length * Long.BYTES + Integer.BYTES;
     }
 
     long scheduled() { return scheduled; }
@@ -64,8 +63,8 @@ public final class TimerWheel {
 
     void remove(Entry entry) {
         if (!entry.timerScheduled()) return;
-        if (entry.timerLevel == 4) {
-            overflow.remove(entry);
+        if (entry.timerInOverflowHeap()) {
+            heapRemove(entry);
             entry.timerScheduled(false);
             if (scheduled > 0L) scheduled--;
             return;
@@ -156,10 +155,10 @@ public final class TimerWheel {
     }
 
     private void promoteOverflow() {
-        while (!overflow.isEmpty()) {
-            Entry entry = overflow.peek();
+        while (overflowSize != 0) {
+            Entry entry = overflow[0];
             if (entry.timerDeadlineTick - tick >= L3_SPAN) return;
-            overflow.poll();
+            heapPoll();
             entry.timerScheduled(false);
             if (scheduled > 0L) scheduled--;
             link(entry, entry.timerDeadlineTick);
@@ -183,7 +182,7 @@ public final class TimerWheel {
             entry.timerPrev = null;
             entry.timerNext = null;
             entry.timerScheduled(true);
-            overflow.offer(entry);
+            heapOffer(entry);
         }
     }
 
@@ -249,7 +248,7 @@ public final class TimerWheel {
         next = Math.min(next, nextCascade(level1Occupied, tick >>> 10, 10, L1_SIZE));
         next = Math.min(next, nextCascade(level2Occupied, tick >>> 16, 16, L2_SIZE));
         next = Math.min(next, nextCascade(level3Occupied & 0xffffffffL, tick >>> 22, 22, L3_SIZE));
-        Entry entry = overflow.peek();
+        Entry entry = overflowSize == 0 ? null : overflow[0];
         if (entry != null) {
             long promote = entry.timerDeadlineTick - L3_SPAN + 1L;
             next = Math.min(next, Math.max(tick + 1L, promote));
@@ -304,6 +303,82 @@ public final class TimerWheel {
         entry.timerPrev = null;
         entry.timerNext = null;
         entry.timerSlot = 0;
+    }
+
+    private void heapOffer(Entry entry) {
+        if (overflowSize == overflow.length) {
+            Entry[] expanded = new Entry[overflow.length << 1];
+            System.arraycopy(overflow, 0, expanded, 0, overflow.length);
+            overflow = expanded;
+        }
+        int index = overflowSize++;
+        overflow[index] = entry;
+            entry.timerHeapIndex(index);
+        siftUp(index);
+    }
+
+    private void heapPoll() {
+        Entry removed = overflow[0];
+        int last = --overflowSize;
+        overflow[0] = overflow[last];
+        overflow[last] = null;
+        removed.timerHeapIndex(-1);
+        if (last != 0) {
+            overflow[0].timerHeapIndex(0);
+            siftDown(0);
+        }
+    }
+
+    private void heapRemove(Entry entry) {
+        int index = entry.timerHeapIndex();
+        if (index < 0 || index >= overflowSize || overflow[index] != entry) return;
+        int last = --overflowSize;
+        overflow[index] = overflow[last];
+        overflow[last] = null;
+        entry.timerHeapIndex(-1);
+        if (index != last) {
+            overflow[index].timerHeapIndex(index);
+            if (index != 0 && before(overflow[index], overflow[(index - 1) >>> 1])) siftUp(index);
+            else siftDown(index);
+        }
+    }
+
+    private void siftUp(int index) {
+        Entry value = overflow[index];
+        while (index != 0) {
+            int parent = (index - 1) >>> 1;
+            Entry previous = overflow[parent];
+            if (!before(value, previous)) break;
+            overflow[index] = previous;
+            previous.timerHeapIndex(index);
+            index = parent;
+        }
+        overflow[index] = value;
+        value.timerHeapIndex(index);
+    }
+
+    private void siftDown(int index) {
+        Entry value = overflow[index];
+        int half = overflowSize >>> 1;
+        while (index < half) {
+            int child = (index << 1) + 1;
+            Entry candidate = overflow[child];
+            int right = child + 1;
+            if (right < overflowSize && before(overflow[right], candidate)) {
+                child = right;
+                candidate = overflow[right];
+            }
+            if (!before(candidate, value)) break;
+            overflow[index] = candidate;
+            candidate.timerHeapIndex(index);
+            index = child;
+        }
+        overflow[index] = value;
+        value.timerHeapIndex(index);
+    }
+
+    private static boolean before(Entry left, Entry right) {
+        return left.timerDeadlineTick < right.timerDeadlineTick;
     }
 
     @FunctionalInterface

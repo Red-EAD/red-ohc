@@ -33,6 +33,22 @@ public class OffHeapCacheTest {
         }
     };
 
+    @Test(timeOut = 2_000L)
+    public void writerRegistrationBindsMaintenanceForLaterReads() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+            assertTrue(cache.put("registered", "value"));
+            for (int index = 0; index < 1_024; index++) {
+                assertEquals(cache.get("registered"), "value");
+            }
+            cache.flushAsync().join();
+            assertEquals(cache.stats().readHits, 1_024L,
+                    "a thread registered by put must still publish later get statistics");
+        }
+    }
     @Test
     public void builderConstructsTheOffHeapEntryPoint() {
         try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()

@@ -49,15 +49,17 @@ public class TimerWheelTest {
     @Test
     public void expiryBudgetContinuesTheCurrentBucketBeforeTheNextWheelRound() {
         TimerWheel wheel = new TimerWheel(0L);
-        for (int index = 0; index < 1_001; index++) {
+        for (int index = 0; index < 2_049; index++) {
             wheel.add(new Entry(0L, 0, index + 10, 0L), 64L);
         }
 
-        assertEquals(wheel.advance(64L, 1_000, (ignored, generation, address) -> { }), 1_000);
-        assertEquals(wheel.scheduled(), 1L, "the over-budget entry must remain in the current bucket");
+        assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> { }), 1_024);
+        assertEquals(wheel.scheduled(), 1_025L, "the over-budget entries must remain in the current bucket");
 
-        assertEquals(wheel.advance(64L, 1_000, (ignored, generation, address) -> { }), 1);
-        assertEquals(wheel.scheduled(), 0L, "the deferred entry must not wait for a full wheel round");
+        assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> { }), 1_024);
+        assertEquals(wheel.scheduled(), 1L, "the deferred entries must not wait for a full wheel round");
+        assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> { }), 1);
+        assertEquals(wheel.scheduled(), 0L, "the final deferred entry must not wait for a full wheel round");
     }
 
     @Test

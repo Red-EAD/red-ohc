@@ -39,4 +39,30 @@ public final class ThreadContextReadCounterTest {
         assertEquals(drained, 256);
         assertTrue(ring.isEmpty());
     }
+
+    @Test
+    public void businessAccessSamplingPublishesOneEventPerSixteenHits() {
+        ThreadContext context = new ThreadContext(null, null);
+        Entry entry = new Entry(0L, 0, 2, 0L);
+
+        for (int index = 0; index < 32; index++) context.access(entry);
+
+        int delivered = 0;
+        while (context.slot.access.poll((ignored, generation) -> { })) delivered++;
+        assertEquals(delivered, 2);
+    }
+
+    @Test
+    public void bulkAccessSamplingPublishesOneEventPerSixteenHits() {
+        ThreadContext context = new ThreadContext(null, null);
+        Entry entry = new Entry(0L, 0, 3, 0L);
+
+        context.beginBulkRead();
+        for (int index = 0; index < 32; index++) context.bulkHit(entry);
+        context.finishBulkRead();
+
+        int delivered = 0;
+        while (context.slot.access.poll((ignored, generation) -> { })) delivered++;
+        assertEquals(delivered, 2);
+    }
 }

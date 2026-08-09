@@ -82,7 +82,11 @@ public final class RetirementQueue {
         // Publish only after the native sequence release. If the actor clears the hint before
         // this store, the store remains visible for its next pass; if it clears afterwards, its
         // scan observes this already-published sequence. Either interleaving preserves progress.
-        if (!readyHint.get()) readyHint.lazySet(true);
+        // This is the publication that makes an already-reserved retirement visible to the
+        // event-loop's park decision. Use a volatile set: a lazy store can remain invisible to
+        // the worker after it consumed the previous coalesced hint and is the only producer
+        // notification for a retirement-only burst.
+        if (!readyHint.get()) readyHint.set(true);
         reservation.written++;
         if (reservation.written == reservation.count) reservation.clear();
     }
@@ -91,6 +95,18 @@ public final class RetirementQueue {
     public void cancel(Reservation reservation) {
         if (!reservation.active()) return;
         while (reservation.written < reservation.count) append(reservation, 0L, 0L);
+    }
+
+    /** Publishes tombstones for the next records of a still-active batch reservation. */
+    public void cancelPrefix(Reservation reservation, int records) {
+        if (records < 0 || !reservation.active() || records > reservation.count - reservation.written) {
+            throw new IllegalArgumentException("invalid retirement cancellation prefix: " + records);
+        }
+        for (int index = 0; index < records; index++) append(reservation, 0L, 0L);
+    }
+
+    public int remaining(Reservation reservation) {
+        return reservation.active() ? reservation.count - reservation.written : 0;
     }
 
     /** Seals at most {@code limit} producer-published records with the supplied actor epoch. */
@@ -112,8 +128,20 @@ public final class RetirementQueue {
             sealCursor = (sealCursor + 1) & (stripes.length - 1);
             scanned++;
         }
+        // A stripe can contain more published records than this bounded pass consumed. Keep
+        // the actor required even when the pass stopped after exhausting one stripe rather than
+        // exactly at the global limit; otherwise consuming the coalesced hint would strand the
+        // remaining stripes until a new producer happens to publish another record.
+        if (hasReadyRecord()) readyHint.lazySet(true);
         publishOldestRetireEpoch();
         return sealed;
+    }
+
+    private boolean hasReadyRecord() {
+        for (Stripe stripe : stripes) {
+            if (stripe.hasReadyRecord()) return true;
+        }
+        return false;
     }
 
     /** Reclaims at most {@code limit} sealed records whose readers are quiescent or newer. */
@@ -143,7 +171,7 @@ public final class RetirementQueue {
     public boolean consumeReadyHint() { return readyHint.getAndSet(false); }
 
     /** Actor-only continuation after a bounded seal pass leaves work behind. */
-    public void requestSeal() { readyHint.lazySet(true); }
+    public void requestSeal() { readyHint.set(true); }
 
     /** Lock-free approximate observation; physical capacity is enforced independently by every stripe. */
     public boolean hasReadyHint() { return readyHint.get(); }
@@ -181,6 +209,7 @@ public final class RetirementQueue {
     }
     public long capacityRecords() { return capacityRecords; }
     public boolean exceedsHighWatermark() { return queuedRecords() >= capacityRecords - capacityRecords / 8L; }
+
 
     /** Called only after the close gate has stopped writers and all readers are quiescent. */
     public void freeAll() {

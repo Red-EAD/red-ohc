@@ -18,6 +18,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
 
 import org.testng.annotations.Test;
 
@@ -53,6 +54,74 @@ public class BulkCacheTest {
             assertEquals(getEventually(cache, "key-0"), null);
             assertEquals(getEventually(cache, "key-7"), null);
             assertEquals(getEventually(cache, "key-63"), null);
+        }
+    }
+
+    @Test(timeOut = 15_000L)
+    public void repeatedPutAllReplacementsContinueAfterRetirementPressure() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20)
+                .expectedEntries(64)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+            Map<String, String> values = new LinkedHashMap<>();
+            for (int index = 0; index < 64; index++) values.put("replace-" + index, "value-" + index);
+            assertEquals(cache.putAll(values), values.size());
+            cache.flushAsync().join();
+
+            for (int round = 0; round < 400; round++) {
+                assertEquals(cache.putAll(values), values.size());
+            }
+            assertEquals(cache.get("replace-63"), "value-63");
+        }
+    }
+
+    @Test
+    public void removeAllPreservesPerKeyVisibilityAcrossBatchBoundaries() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 23)
+                .expectedEntries(2_048)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+            Map<String, String> values = new LinkedHashMap<>();
+            for (int index = 0; index < 1_025; index++) {
+                values.put("remove-batch-" + index, "value-" + index);
+            }
+            assertEquals(cache.putAll(values), values.size());
+            List<String> keys = new ArrayList<>(values.keySet());
+            assertEquals(cache.removeAll(keys), keys.size());
+            for (String key : keys) assertEquals(cache.get(key), null,
+                    "removeAll must be immediately visible for " + key);
+        }
+    }
+
+    @Test
+    public void removeAllKeepsPrefixAndReleasesWriterAfterSerializerFailure() {
+        CacheSerializer<String> failingKeySerializer = new CacheSerializer<String>() {
+            @Override public void serialize(String value, ByteBuffer buffer) {
+                if ("boom".equals(value)) throw new IllegalStateException("serializer failure");
+                STRING.serialize(value, buffer);
+            }
+            @Override public String deserialize(ByteBuffer buffer) { return STRING.deserialize(buffer); }
+            @Override public int serializedSize(String value) { return STRING.serializedSize(value); }
+        };
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(failingKeySerializer)
+                .valueSerializer(STRING)
+                .build()) {
+            assertTrue(cache.put("before", "value"));
+            try {
+                cache.removeAll(Arrays.asList("before", "boom", "after"));
+                throw new AssertionError("removeAll must propagate serializer failure");
+            } catch (IllegalStateException expected) {
+                // The completed prefix remains deleted.
+            }
+            assertEquals(cache.get("before"), null);
+            assertTrue(cache.put("after-failure", "writer-released"));
+            assertEquals(cache.get("after-failure"), "writer-released");
         }
     }
 
