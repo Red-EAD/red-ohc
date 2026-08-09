@@ -35,9 +35,8 @@ public final class PermanentReadClockTest {
                 .build()) {
             assertTrue(cache.put(key, new byte[16]));
             cache.flushAsync().join();
-            EncodedKey encoded = EncodedKey.copyOf(key);
             readerClockCalls.set(0);
-            assertTrue(cache.withDirectValue(encoded, value -> value.getLong(0)));
+            assertTrue(cache.getDirect(key, value -> value.getLong(0)));
             assertEquals(readerClockCalls.get(), 0);
         }
     }
@@ -59,7 +58,8 @@ public final class PermanentReadClockTest {
             assertTrue(cache.put(key, new byte[16], 64L));
             cache.flushAsync().join();
             now.set(64);
-            assertTrue(!cache.withDirectValue(EncodedKey.copyOf(key), value -> value.getLong(0)));
+            cache.flushAsync().join();
+            assertTrue(!cache.getDirect(key, value -> value.getLong(0)));
         }
     }
 }

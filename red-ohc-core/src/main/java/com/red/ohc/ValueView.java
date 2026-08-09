@@ -1,6 +1,6 @@
 package com.red.ohc;
 
-/** Valid only while passed to a {@link DirectValueConsumer}. */
+/** Valid only while passed to a direct-read callback. */
 public interface ValueView {
     int length();
     byte getByte(int offset);

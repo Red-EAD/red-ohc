@@ -26,6 +26,10 @@ public final class ReaderGuard {
             context.markRegistered();
             worker.registerReader(context.slot);
         }
+        if (context.readerDepth() != 0) {
+            context.enterReader();
+            return true;
+        }
         while (!closing.getAsBoolean()) {
             long observed = worker.epoch();
             context.slot.epoch = observed;
@@ -37,7 +41,10 @@ public final class ReaderGuard {
                 worker.readerQuiescent();
                 return false;
             }
-            if (observed == worker.epoch()) return true;
+            if (observed == worker.epoch()) {
+                context.enterReader();
+                return true;
+            }
             context.slot.epoch = 0L;
             LockSupport.parkNanos(this, 1_000L);
         }
@@ -46,6 +53,7 @@ public final class ReaderGuard {
     }
 
     public void exit(ThreadContext context) {
+        if (!context.exitReader()) return;
         context.slot.epoch = 0L;
         worker.readerQuiescent();
     }

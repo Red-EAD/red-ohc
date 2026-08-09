@@ -14,7 +14,7 @@ public final class Entry {
     public static final int PENDING_ADD = 1;
     public static final int PENDING_UPDATE = 1 << 1;
     public static final int PENDING_REMOVE = 1 << 2;
-    /** Returned to the maintenance actor when a writer owns the pending publication claim. */
+    /** Returned to the maintenance actor when a reliable removal owns the pending claim. */
     public static final int PENDING_BUSY = -1;
     public static final int POLICY_NONE = 0;
     public static final int POLICY_LRU = 1;
@@ -29,11 +29,16 @@ public final class Entry {
     private static final int PENDING_REPAIR = 1 << 5;
     private static final int PENDING_CLAIM_SHIFT = 6;
     private static final int PENDING_CLAIM_MASK = PENDING_MASK << PENDING_CLAIM_SHIFT;
+    private static final int PENDING_ROLLOVER = 1 << 9;
+    private static final int PENDING_ROLLOVER_CLAIMED = 1 << 10;
+    private static final int TIMER_UNSCHEDULED = -1;
+    private static final int TIMER_HEAP_BASE = -2;
+    private static final int TIMER_SLOT_BITS = 10;
+    private static final int TIMER_SLOT_MASK = (1 << TIMER_SLOT_BITS) - 1;
     private static final int POLICY_STATE_SHIFT = 0;
     private static final int POLICY_ACCESS_SHIFT = 3;
-    private static final int MUTATION_VERSION_SHIFT = 5;
-    private static final int APPLIED_VERSION_SHIFT = 18;
-    private static final int VERSION_MASK = (1 << 13) - 1;
+    private static final long MUTATION_VERSION_SHIFT = 32L;
+    private static final long VERSION_MASK = 0xffffffffL;
     public static final long WRITER_LOCK = 1L << 63;
     private static final long STATE_SHIFT = 61L;
     private static final long STATE_MASK = 3L << STATE_SHIFT;
@@ -48,6 +53,8 @@ public final class Entry {
             AtomicIntegerFieldUpdater.newUpdater(Entry.class, "pendingFlags");
     private static final AtomicIntegerFieldUpdater<Entry> POLICY =
             AtomicIntegerFieldUpdater.newUpdater(Entry.class, "policyMeta");
+    private static final AtomicLongFieldUpdater<Entry> MAINTENANCE =
+            AtomicLongFieldUpdater.newUpdater(Entry.class, "maintenanceMeta");
 
     public final long nativeKeyAddress;
     /** High 32 bits are serialized key length; low 32 bits are the CHM hash. */
@@ -59,13 +66,14 @@ public final class Entry {
     public Entry policyNext;
     public Entry timerPrev;
     public Entry timerNext;
-    public short timerSlot;
-    public int timerLevel;
+    /** Packed timer location: wheel level/slot, or a negative overflow-heap index. */
+    public int timerLocation = TIMER_UNSCHEDULED;
     public long timerDeadlineTick;
     /** Actor-owned fields: readers and writers never mutate policy/timer links or counters. */
-    public boolean timerScheduled;
     /** Actor-owned intrusive policy metadata. */
     private volatile int policyMeta;
+    /** High 32 bits are the latest published mutation; low 32 bits are the applied version. */
+    public volatile long maintenanceMeta;
     public long policyWeight;
     public volatile int pendingFlags;
 
@@ -188,34 +196,44 @@ public final class Entry {
     }
 
     public boolean timerScheduled() {
-        return timerScheduled;
+        return timerLocation != TIMER_UNSCHEDULED;
     }
 
     public void timerScheduled(boolean scheduled) {
-        timerScheduled = scheduled;
+        if (!scheduled) timerLocation = TIMER_UNSCHEDULED;
     }
 
     /** A negative timer level encodes the worker-owned overflow heap index. */
-    public boolean timerInOverflowHeap() { return timerLevel < 0; }
+    public boolean timerInOverflowHeap() { return timerLocation <= TIMER_HEAP_BASE; }
 
     public int timerHeapIndex() {
-        return timerLevel < 0 ? -timerLevel - 1 : -1;
+        return timerInOverflowHeap() ? -timerLocation - 2 : -1;
     }
 
     public void timerHeapIndex(int index) {
-        if (index < 0) timerLevel = 4;
-        else timerLevel = -index - 1;
+        if (index < 0) timerLocation = TIMER_HEAP_BASE;
+        else timerLocation = -index - 2;
     }
 
-    /**
-     * Starts a writer-owned mutation publication. The claim remains held until the writer has
-     * published its CHM/value-pointer change and calls {@link #completePendingClaim()}; the actor
-     * therefore cannot consume a coalesced event between reservation and pointer publication.
-     *
-     * @return whether this is a new unique event that needs one dirty credit
-     */
+    public int timerLevel() {
+        return timerLocation >= 0 ? timerLocation >>> TIMER_SLOT_BITS : -1;
+    }
+
+    public void timerLevel(int level) {
+        timerLocation = (level << TIMER_SLOT_BITS) | (timerLocation & TIMER_SLOT_MASK);
+    }
+
+    public int timerSlot() {
+        return timerLocation & TIMER_SLOT_MASK;
+    }
+
+    public void timerSlot(int slot) {
+        timerLocation = (timerLocation & ~TIMER_SLOT_MASK) | (slot & TIMER_SLOT_MASK);
+    }
+
+    /** Starts the reliable remove claim held until CHM and retirement publication complete. */
     public boolean beginPending(int flags) {
-        if ((flags & ~PENDING_MASK) != 0 || flags == 0) {
+        if (flags != PENDING_REMOVE) {
             throw new IllegalArgumentException("invalid pending flags: " + flags);
         }
         int spins = 0;
@@ -229,17 +247,14 @@ public final class Entry {
                 }
                 continue;
             }
-            boolean needsCredit = (current & PENDING_MASK) == 0;
-            // Keep the claim payload in the same atomic word. This avoids a separate int field
-            // in the CHM node while preserving the claim-before-publication protocol.
             if (PENDING.compareAndSet(this, current,
                     current | PENDING_CLAIMED | (flags << PENDING_CLAIM_SHIFT))) {
-                return needsCredit;
+                return true;
             }
         }
     }
 
-    /** Releases a successful publication claim after the associated pointer or mapping is visible. */
+    /** Releases a successful reliable removal claim after its retirement records are visible. */
     public void completePendingClaim() {
         if ((pendingFlags & PENDING_CLAIMED) == 0) {
             throw new IllegalStateException("missing pending claim");
@@ -258,37 +273,143 @@ public final class Entry {
 
     /** Published after a writer has made its CHM/value mutation visible. */
     public long mutationVersion() {
-        return Integer.toUnsignedLong((policyMeta >>> MUTATION_VERSION_SHIFT) & VERSION_MASK);
+        return (maintenanceMeta >>> MUTATION_VERSION_SHIFT) & VERSION_MASK;
     }
 
     /** Published by the maintenance worker after applying the corresponding mutation. */
     public long appliedVersion() {
-        return Integer.toUnsignedLong((policyMeta >>> APPLIED_VERSION_SHIFT) & VERSION_MASK);
+        return maintenanceMeta & VERSION_MASK;
     }
 
     private void incrementMutationVersion() {
         for (;;) {
-            int current = policyMeta;
-            int version = ((current >>> MUTATION_VERSION_SHIFT) + 1) & VERSION_MASK;
-            int next = (current & ~(VERSION_MASK << MUTATION_VERSION_SHIFT))
-                    | (version << MUTATION_VERSION_SHIFT);
-            if (POLICY.compareAndSet(this, current, next)) return;
+            if ((pendingFlags & PENDING_ROLLOVER_CLAIMED) != 0) {
+                // This branch is reachable only once per 2^32 publications for an Entry. The
+                // maintenance owner has claimed the rollover fence and will clear it shortly.
+                LockSupport.parkNanos(this, 1_000L);
+                continue;
+            }
+            long current = maintenanceMeta;
+            long currentVersion = current >>> MUTATION_VERSION_SHIFT;
+            if (currentVersion == VERSION_MASK) {
+                // Do not wrap while the worker may still be applying the final version. The
+                // caller still publishes a coalesced event at VERSION_MASK; the worker resets
+                // both lanes only after that event is drained and no newer flags remain.
+                if (requestRollover()) return;
+                continue;
+            }
+            long version = currentVersion + 1L;
+            long next = (current & VERSION_MASK) | (version << MUTATION_VERSION_SHIFT);
+            if (MAINTENANCE.compareAndSet(this, current, next)) return;
         }
+    }
+
+    private boolean requestRollover() {
+        for (;;) {
+            int current = pendingFlags;
+            if ((current & PENDING_ROLLOVER_CLAIMED) != 0) {
+                LockSupport.parkNanos(this, 1_000L);
+                continue;
+            }
+            if ((current & PENDING_ROLLOVER) != 0) {
+                return false;
+            }
+            if (PENDING.compareAndSet(this, current, current | PENDING_ROLLOVER)) {
+                // The maintenance owner may have completed the fence after the metadata read
+                // above but before this CAS. Do not leave a stale rollover bit behind and make
+                // the following mutation look as if it were still waiting on the old version.
+                if (mutationVersion() != VERSION_MASK) {
+                    clearStaleRollover();
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+
+    private void clearStaleRollover() {
+        for (;;) {
+            int current = pendingFlags;
+            if ((current & PENDING_ROLLOVER) == 0) return;
+            if (PENDING.compareAndSet(this, current, current & ~PENDING_ROLLOVER)) return;
+        }
+    }
+
+    /** Clears a fully applied final version. Called by the single maintenance owner. */
+    public boolean tryRolloverMaintenanceVersion() {
+        if (isWriterLocked()) return false;
+        int currentFlags = pendingFlags;
+        if ((currentFlags & (PENDING_ROLLOVER | PENDING_MASK | PENDING_CLAIMED
+                | PENDING_QUEUED | PENDING_REPAIR))
+                != PENDING_ROLLOVER
+                || !PENDING.compareAndSet(this, PENDING_ROLLOVER,
+                        PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) return false;
+        long current = maintenanceMeta;
+        if ((current >>> MUTATION_VERSION_SHIFT) != VERSION_MASK
+                || (current & VERSION_MASK) != VERSION_MASK) {
+            PENDING.compareAndSet(this, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED, PENDING_ROLLOVER);
+            return false;
+        }
+        if (!MAINTENANCE.compareAndSet(this, current, 0L)) {
+            PENDING.compareAndSet(this, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED, PENDING_ROLLOVER);
+            return false;
+        }
+        if (!PENDING.compareAndSet(this, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED, 0)) {
+            throw new IllegalStateException("maintenance rollover fence was modified");
+        }
+        return true;
     }
 
     /** Marks a maintenance snapshot applied only when no newer writer publication exists. */
     public boolean markAppliedVersion(long version) {
-        int expected = (int) version & VERSION_MASK;
+        long expected = version & VERSION_MASK;
         for (;;) {
-            int current = policyMeta;
-            if (((current >>> MUTATION_VERSION_SHIFT) & VERSION_MASK) != expected) return false;
-            int next = (current & ~(VERSION_MASK << APPLIED_VERSION_SHIFT))
-                    | (expected << APPLIED_VERSION_SHIFT);
-            if (POLICY.compareAndSet(this, current, next)) return true;
+            long current = maintenanceMeta;
+            if ((current >>> MUTATION_VERSION_SHIFT) != expected) return false;
+            long next = (current & ~VERSION_MASK) | expected;
+            if (MAINTENANCE.compareAndSet(this, current, next)) return true;
         }
     }
 
-    /** Cancels a writer publication before its associated pointer or mapping becomes visible. */
+    /**
+     * Publishes an ADD/UPDATE maintenance hint after the authoritative CHM/value mutation is
+     * visible. It never claims the writer mutex and never waits on another producer.
+     *
+     * @return true for the producer that must submit this Entry to the transport queue
+     */
+    public boolean publishMutation(int flags) {
+        if ((flags & ~(PENDING_ADD | PENDING_UPDATE)) != 0 || flags == 0) {
+            throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
+        }
+        incrementMutationVersion();
+        for (;;) {
+            int current = pendingFlags;
+            int next = current | flags;
+            if ((current & PENDING_QUEUED) != 0) {
+                if (PENDING.compareAndSet(this, current, next)) return false;
+                continue;
+            }
+            if (PENDING.compareAndSet(this, current, next | PENDING_QUEUED)) return true;
+        }
+    }
+
+    /** Re-queues an already published mutation when a worker observed an older version. */
+    public boolean requeueMutation(int flags) {
+        if ((flags & ~(PENDING_ADD | PENDING_UPDATE)) != 0 || flags == 0) {
+            throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
+        }
+        for (;;) {
+            int current = pendingFlags;
+            int next = current | flags;
+            if ((current & PENDING_QUEUED) != 0) {
+                if (PENDING.compareAndSet(this, current, next)) return false;
+                continue;
+            }
+            if (PENDING.compareAndSet(this, current, next | PENDING_QUEUED)) return true;
+        }
+    }
+
+    /** Cancels a reliable removal claim before its associated mapping becomes invisible. */
     public boolean cancelPendingClaim() {
         for (;;) {
             int current = pendingFlags;
@@ -306,18 +427,6 @@ public final class Entry {
             if (PENDING.compareAndSet(this, current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
                 return true;
             }
-        }
-    }
-
-    /** Returns true for the one producer responsible for putting this Entry in the transport. */
-    public boolean publishPending() {
-        for (;;) {
-            int current = pendingFlags;
-            if ((current & PENDING_CLAIMED) != 0) {
-                throw new IllegalStateException("pending publication is still claimed");
-            }
-            if ((current & PENDING_MASK) == 0 || (current & PENDING_QUEUED) != 0) return false;
-            if (PENDING.compareAndSet(this, current, current | PENDING_QUEUED)) return true;
         }
     }
 

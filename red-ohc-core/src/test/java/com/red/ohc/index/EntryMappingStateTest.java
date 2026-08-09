@@ -25,38 +25,22 @@ public final class EntryMappingStateTest {
     }
 
     @Test(timeOut = 2_000L)
-    public void delayedPendingClaimCoalescesTheSecondSameEntryMutation() throws Exception {
+    public void reliableRemovalClaimBlocksAConcurrentRemovalUntilReleased() throws Exception {
         Entry entry = new Entry(0L, 1, 7, 0L);
-        assertTrue(entry.beginPending(Entry.PENDING_ADD));
+        assertTrue(entry.beginPending(Entry.PENDING_REMOVE));
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            Future<Boolean> second = executor.submit(() -> entry.beginPending(Entry.PENDING_UPDATE));
+            Future<Boolean> second = executor.submit(() -> {
+                entry.beginPending(Entry.PENDING_REMOVE);
+                entry.completePendingClaim();
+                return true;
+            });
             Thread.sleep(5L);
             entry.completePendingClaim();
-            assertFalse(second.get(1L, TimeUnit.SECONDS));
-            entry.completePendingClaim();
-            assertEquals(entry.takePending(), Entry.PENDING_ADD | Entry.PENDING_UPDATE);
+            assertTrue(second.get(1L, TimeUnit.SECONDS));
         } finally {
             executor.shutdownNow();
         }
-    }
-
-    @Test
-    public void coalescedMutationCannotBeConsumedBeforeItsWriterPublishes() {
-        Entry entry = new Entry(0L, 1, 7, 0L);
-
-        assertTrue(entry.beginPending(Entry.PENDING_ADD));
-        entry.completePendingClaim();
-        assertTrue(entry.publishPending());
-
-        // A later writer coalesces with the queued ADD. The actor may already have observed
-        // the transport item, but it must not clear the coalesced UPDATE until the writer has
-        // published the replacement pointer and released this claim.
-        assertFalse(entry.beginPending(Entry.PENDING_UPDATE));
-        assertEquals(entry.takePending(), Entry.PENDING_BUSY);
-
-        entry.completePendingClaim();
-        assertEquals(entry.takePending(), Entry.PENDING_ADD | Entry.PENDING_UPDATE);
     }
 
     @Test
@@ -64,7 +48,7 @@ public final class EntryMappingStateTest {
         Entry entry = new Entry(0L, 1, 7, 0L);
 
         assertEquals(entry.mutationVersion(), 0L);
-        assertTrue(entry.beginPending(Entry.PENDING_ADD));
+        assertTrue(entry.beginPending(Entry.PENDING_REMOVE));
         entry.completePendingClaim();
         assertEquals(entry.mutationVersion(), 1L);
         assertEquals(entry.appliedVersion(), 0L,
@@ -77,12 +61,10 @@ public final class EntryMappingStateTest {
     public void appliedVersionDoesNotAdvanceAfterAConcurrentMutation() {
         Entry entry = new Entry(0L, 1, 7, 0L);
 
-        assertTrue(entry.beginPending(Entry.PENDING_ADD));
-        entry.completePendingClaim();
+        assertTrue(entry.publishMutation(Entry.PENDING_ADD));
         assertTrue(entry.markAppliedVersion(1L));
 
-        assertFalse(entry.beginPending(Entry.PENDING_UPDATE));
-        entry.completePendingClaim();
+        entry.publishMutation(Entry.PENDING_UPDATE);
         assertFalse(entry.markAppliedVersion(1L));
         assertEquals(entry.appliedVersion(), 1L);
     }
@@ -91,8 +73,7 @@ public final class EntryMappingStateTest {
     public void maintenanceVersionSurvivesPolicyMetadataUpdates() {
         Entry entry = new Entry(0L, 1, 7, 0L);
 
-        assertTrue(entry.beginPending(Entry.PENDING_ADD));
-        entry.completePendingClaim();
+        entry.publishMutation(Entry.PENDING_ADD);
         assertTrue(entry.markAppliedVersion(1L));
 
         entry.policyState(Entry.POLICY_TINY_PROTECTED);
@@ -102,5 +83,52 @@ public final class EntryMappingStateTest {
         assertEquals(entry.appliedVersion(), 1L);
         assertEquals(entry.policyState(), Entry.POLICY_TINY_PROTECTED);
         assertEquals(entry.policyAccessCount(), 3);
+    }
+
+    @Test
+    public void advisoryMutationUsesPackedVersionsWithoutAWriterClaim() {
+        Entry entry = new Entry(0L, 1, 7, 0L);
+
+        assertTrue(entry.publishMutation(Entry.PENDING_ADD));
+        assertEquals(entry.mutationVersion(), 1L);
+        assertEquals(entry.appliedVersion(), 0L);
+        assertFalse(entry.isWriterLocked());
+
+        assertFalse(entry.publishMutation(Entry.PENDING_UPDATE));
+        assertEquals(entry.mutationVersion(), 2L);
+        assertEquals(entry.takePending(), Entry.PENDING_ADD | Entry.PENDING_UPDATE);
+        assertTrue(entry.markAppliedVersion(2L));
+        assertEquals(entry.appliedVersion(), 2L);
+    }
+
+    @Test
+    public void mutationVersionDoesNotWrapWhileMaintenanceIsBehind() {
+        Entry entry = new Entry(0L, 1, 7, 0L);
+        entry.maintenanceMeta = (0xffffffffL << 32) | 0xfffffffeL;
+
+        assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
+        assertEquals(entry.mutationVersion(), 0xffffffffL,
+                "the producer must fence the version lane instead of wrapping over an unapplied mutation");
+    }
+
+    @Test(timeOut = 2_000L)
+    public void laterMutationWaitsForTheRolloverFenceToDrain() throws Exception {
+        Entry entry = new Entry(0L, 1, 7, 0L);
+        entry.maintenanceMeta = (0xffffffffL << 32) | 0xffffffffL;
+        assertTrue(entry.publishMutation(Entry.PENDING_ADD));
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> later = executor.submit(() -> entry.publishMutation(Entry.PENDING_UPDATE));
+            Thread.sleep(10L);
+            assertFalse(later.isDone(), "a second mutation must not reuse the final version lane");
+
+            assertEquals(entry.takePending(), Entry.PENDING_ADD);
+            assertTrue(entry.tryRolloverMaintenanceVersion());
+            assertTrue(later.get(1L, TimeUnit.SECONDS));
+            assertEquals(entry.mutationVersion(), 1L);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 }

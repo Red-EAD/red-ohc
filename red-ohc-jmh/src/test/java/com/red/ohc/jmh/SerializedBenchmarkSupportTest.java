@@ -2,6 +2,7 @@ package com.red.ohc.jmh;
 
 import org.ehcache.Cache;
 import org.testng.Assert;
+import org.testng.SkipException;
 import org.testng.annotations.Test;
 
 public class SerializedBenchmarkSupportTest {
@@ -40,6 +41,9 @@ public class SerializedBenchmarkSupportTest {
 
     @Test
     public void chronicleMapInMemoryStoreRoundTripsTheRawByteCodecWithoutPersistence() {
+        if (Runtime.version().feature() >= 21) {
+            throw new SkipException("Chronicle Map 3.27ea1 uses inaccessible JDK internals on JDK 21+");
+        }
         SerializedBenchmarkSupport.ChronicleMapStore store =
                 SerializedBenchmarkSupport.newChronicleMap(64, 128, 1_024);
         try {

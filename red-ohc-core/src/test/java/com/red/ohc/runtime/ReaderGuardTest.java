@@ -53,4 +53,26 @@ public class ReaderGuardTest {
             memory.closeArenas();
         }
     }
+
+    @Test
+    public void nestedReadersReuseOneEpochAndExitOnlyAtTheOuterBoundary() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+        MaintenanceEventLoop loop = new MaintenanceEventLoop(new ConcurrentHashMap<>(), memory,
+                new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+                new ReaderRegistry());
+        ReaderGuard guard = new ReaderGuard(loop, () -> false);
+        ThreadContext context = new ThreadContext(null, null);
+        try {
+            assertTrue(guard.enter(context));
+            long epoch = context.slot.epoch;
+            assertTrue(guard.enter(context));
+            assertEquals(context.slot.epoch, epoch);
+            guard.exit(context);
+            assertEquals(context.slot.epoch, epoch);
+            guard.exit(context);
+            assertEquals(context.slot.epoch, 0L);
+        } finally {
+            memory.closeArenas();
+        }
+    }
 }

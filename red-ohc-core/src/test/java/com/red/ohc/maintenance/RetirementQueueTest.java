@@ -26,6 +26,22 @@ public class RetirementQueueTest {
     }
 
     @Test
+    public void constructorRollsBackPreviouslyAllocatedStripesWhenLaterStripeFails() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA, 100L);
+        try {
+            try {
+                new RetirementQueue(memory, 2, 2);
+                throw new AssertionError("the second stripe must exceed the native hard limit");
+            } catch (NativeMemory.AllocationLimitException expected) {
+                assertEquals(memory.allocated(), 0L,
+                        "a failed queue construction must release every stripe allocated before the failure");
+            }
+        } finally {
+            memory.closeArenas();
+        }
+    }
+
+    @Test
     public void sealedEntryWaitsForItsReaderEpochBeforeReturningToTheArena() {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         RetirementQueue queue = new RetirementQueue(memory, 1, 2);

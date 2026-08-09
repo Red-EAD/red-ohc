@@ -54,6 +54,8 @@ public final class NativeMemory {
         private final AtomicReferenceArray<AtomicReferenceArray<WriterArena.Page>> pageChunks =
                 new AtomicReferenceArray<>(PAGE_CHUNK_COUNT);
         private final PageDepot pageDepot;
+        private static final int MAX_POOLED_PAGES = 128;
+        private final AtomicInteger pooledPageCount = new AtomicInteger();
 
         public Memory(AllocatorType type) {
             this(type, Long.MAX_VALUE);
@@ -102,6 +104,7 @@ public final class NativeMemory {
 
         public long rawAllocationCount() { return rawAllocations.get(); }
         public long entryAllocationCount() { return entryAllocations.get(); }
+        public static int pooledPageLimit() { return MAX_POOLED_PAGES; }
 
         public long allocateEntryPage() {
             entryAllocations.incrementAndGet();
@@ -161,15 +164,37 @@ public final class NativeMemory {
         }
 
         WriterArena.Page acquireEntryPage(int sizeClass) {
+            WriterArena.Page page = tryAcquireEntryPage(sizeClass);
+            if (page == null) {
+                throw new AllocationLimitException(hardLimit, allocated.get(), SizeClasses.PAGE_BYTES);
+            }
+            return page;
+        }
+
+        WriterArena.Page tryAcquireEntryPage(int sizeClass) {
             WriterArena.Page reused = pageDepot.acquire(sizeClass);
             if (reused != null) return reused;
-            int pageKey = nextPageKey();
-            int pageId = pageKey & MAX_PAGE_ID;
-            long address = allocateEntryPage();
-            WriterArena.Page page = new WriterArena.Page(pageId, pageKey, address,
-                    sizeClass, SizeClasses.slotBytes(sizeClass));
-            registerPage(page);
-            return page;
+            for (;;) {
+                int current = pooledPageCount.get();
+                if (current >= MAX_POOLED_PAGES) return null;
+                if (pooledPageCount.compareAndSet(current, current + 1)) break;
+            }
+            int pageKey = 0;
+            long address = 0L;
+            try {
+                pageKey = nextPageKey();
+                int pageId = pageKey & MAX_PAGE_ID;
+                address = allocateEntryPage();
+                WriterArena.Page page = new WriterArena.Page(pageId, pageKey, address,
+                        sizeClass, SizeClasses.slotBytes(sizeClass));
+                registerPage(page);
+                return page;
+            } catch (Throwable failure) {
+                if (address != 0L) free(address, SizeClasses.PAGE_BYTES);
+                if (pageKey != 0) recyclePageId(pageKey & MAX_PAGE_ID);
+                pooledPageCount.decrementAndGet();
+                throw failure;
+            }
         }
 
         void returnUnusedPage(WriterArena.Page page) {
@@ -184,6 +209,7 @@ public final class NativeMemory {
             if (!page.freePhysical()) return;
             unregisterPage(page);
             free(page.address, SizeClasses.PAGE_BYTES);
+            pooledPageCount.decrementAndGet();
             recyclePageId(page.id);
         }
 

@@ -32,8 +32,6 @@ import com.red.ohc.storage.WriterArena;
  * ordinary index visibility. Business threads publish those changes directly to the CHM.
  */
 public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerConsumer, AccessConsumer {
-    private static final int MUTATION_CHUNK_SIZE = 1_024;
-    private static final int MUTATION_POOLED_CHUNKS = 4;
     private static final long EPOCH_ADVANCE_INTERVAL_NANOS = 1_000_000L;
     /**
      * After draining a producer burst, stay in REQUIRED and sleep briefly before returning to an
@@ -63,8 +61,10 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     private final AtomicBoolean repairNeeded = new AtomicBoolean();
     private final AtomicLong repairVersion = new AtomicLong();
     private final AtomicBoolean allocationPressureRequested = new AtomicBoolean();
-    private java.util.Iterator<Entry> repairIterator;
-    private final AtomicLong repairDebt = new AtomicLong();
+    private final MpscArrayQueue<Entry>[] repairQueues;
+    private final int repairShardMask;
+    private int repairShardCursor;
+    private final AtomicLong[] repairDebts;
     /** Actor-owned Entries whose transport item arrived while a writer owns the Entry mutex. */
     private final ArrayDeque<Entry> deferredMutations = new ArrayDeque<>();
     private long deferredMutationRetryNanos = Long.MAX_VALUE;
@@ -78,7 +78,9 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     private final WakeGate wakeGate = new WakeGate();
     /** Cold-path owner for actor state and writer assistance. */
     private final ReentrantLock ownerLock = new ReentrantLock();
-    private final Condition progress = ownerLock.newCondition();
+    /** Separate wait channel for writers blocked on resource progress; never held by the actor. */
+    private final ReentrantLock progressLock = new ReentrantLock();
+    private final Condition progressChanged = progressLock.newCondition();
     private final AtomicLong progressVersion = new AtomicLong();
     private final AtomicInteger waitingWriters = new AtomicInteger();
     private final AtomicLong assistCount = new AtomicLong();
@@ -158,6 +160,17 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         }
         this.queueCapacity = queueCapacity;
         this.queue = new MpscArrayQueue<>(queueCapacity);
+        int shardCount = 1;
+        int requestedShards = Math.min(16, Math.max(1, queueCapacity / 1_024));
+        while (shardCount < requestedShards) shardCount <<= 1;
+        @SuppressWarnings("unchecked")
+        MpscArrayQueue<Entry>[] repairQueues = new MpscArrayQueue[shardCount];
+        int repairQueueCapacity = Math.max(1_024, queueCapacity / shardCount);
+        for (int i = 0; i < shardCount; i++) repairQueues[i] = new MpscArrayQueue<>(repairQueueCapacity);
+        this.repairQueues = repairQueues;
+        this.repairShardMask = shardCount - 1;
+        this.repairDebts = new AtomicLong[shardCount];
+        for (int i = 0; i < shardCount; i++) this.repairDebts[i] = new AtomicLong();
         this.reliableRemovals = new ReliableRemovalQueue(queueCapacity);
         this.policy = new MaintenancePolicy(eviction, capacity);
         this.readers = readers;
@@ -191,12 +204,34 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     public boolean isParked() { return parked; }
     public long epoch() { return epoch; }
     public long nowMillis() { return nowMillis; }
+    /** Writer-side TTL operations use the actor's published clock, refreshed only on demand. */
+    public void refreshClock() {
+        nowMillis = ticker.currentTimeMillis();
+    }
     public Thread thread() { return thread; }
     /** Logical unique-entry backlog; the physical advisory queue is bounded and repairable. */
-    public long queueDepth() { return queue.size() + repairDebt.get(); }
+    public long queueDepth() { return queue.size() + repairDebt(); }
     public long queueCapacity() { return queueCapacity; }
     public boolean mutationBacklogExceeds() {
-        return queue.size() >= (queueCapacity * 7L + 7L) / 8L || repairDebt.get() >= queueCapacity * 2L;
+        // A full advisory queue is expected under burst load and must not add writer backpressure.
+        // Only unrecoverable repair debt is a write-admission high watermark.
+        return repairDebt() >= queueCapacity * 2L;
+    }
+
+    /**
+     * Re-enables bounded writer backpressure only after the advisory repair backlog reaches its
+     * high watermark. Ordinary hints never call this method.
+     */
+    public void awaitMutationAdmission() {
+        while (mutationAdmissionBlocked()) {
+            throwIfUnavailable();
+            requestMaintenance();
+            if (!assistMaintenance()) awaitMaintenanceProgress();
+        }
+    }
+
+    private boolean mutationAdmissionBlocked() {
+        return repairDebt() >= queueCapacity * 2L;
     }
     public long retiredBytes() { return retirements.retiredBytes(); }
     public int retiredEntries() { return retirements.retiredEntries(); }
@@ -247,12 +282,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
 
     /** Run one bounded pass on a writer when the asynchronous actor is behind. */
     public boolean assistMaintenance() {
-        try {
-            ownerLock.lockInterruptibly();
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new com.red.ohc.CacheWriteInterruptedException(interrupted);
-        }
+        if (!ownerLock.tryLock()) return false;
         try {
             throwIfUnavailable();
             assistCount.incrementAndGet();
@@ -277,34 +307,37 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         }
     }
 
-    /** Waits for a maintenance generation, assisting whenever ownership is available. */
+    /** Waits for a maintenance generation after the caller's single bounded assist. */
     public void awaitMaintenanceProgress() {
         long started = System.nanoTime();
         throwIfUnavailable();
+        if (!thread.isAlive()) return;
+        boolean interrupted = false;
         long observed = progressVersion.get();
-        if (assistMaintenance()) return;
+        progressLock.lock();
         try {
-            ownerLock.lockInterruptibly();
+            waitingWriters.incrementAndGet();
+            waitCount.incrementAndGet();
             try {
-                throwIfUnavailable();
-                // Progress may have completed between assistMaintenance() and acquiring the
-                // condition lock. In that case return immediately so the caller retries its
-                // resource admission instead of waiting for an unrelated future pass.
-                if (progressVersion.get() == observed) {
-                    waitingWriters.incrementAndGet();
-                    waitCount.incrementAndGet();
+                while (progressVersion.get() == observed
+                        && terminalFailure.get() == null && !closing && !stopping) {
                     try {
-                        progress.awaitNanos(1_000_000L);
-                    } finally {
-                        waitingWriters.decrementAndGet();
+                        progressChanged.await();
+                    } catch (InterruptedException error) {
+                        interrupted = true;
+                        break;
                     }
                 }
             } finally {
-                ownerLock.unlock();
+                waitingWriters.decrementAndGet();
             }
-        } catch (InterruptedException interrupted) {
+        } finally {
+            progressLock.unlock();
+        }
+        if (interrupted || Thread.interrupted()) {
             Thread.currentThread().interrupt();
-            throw new com.red.ohc.CacheWriteInterruptedException(interrupted);
+            throw new com.red.ohc.CacheWriteInterruptedException(
+                    new InterruptedException("maintenance progress wait interrupted"));
         }
         waitNanos.addAndGet(System.nanoTime() - started);
     }
@@ -325,41 +358,74 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         }
     }
 
-    /**
-     * Reserves the one dirty-event credit before callers publish a CHM or value-pointer change.
-     * Subsequent mutations of an already pending Entry coalesce without consuming another credit.
-     */
+    /** Reliable removal only: ADD/UPDATE are published after their data-plane mutation. */
     public boolean reserveMutation(Entry entry, int flags) {
+        if (flags != Entry.PENDING_REMOVE) {
+            throw new IllegalArgumentException("only removal mutations require a reservation");
+        }
         if (unhealthy.get()) return false;
         entry.beginPending(flags);
         return true;
     }
 
-    /** Publishes a reservation after the associated CHM/value mutation is visible. */
-    public void publishMutation(Entry entry) {
-        entry.completePendingClaim();
-        if (!entry.publishPending()) return;
+    /** Publishes an ADD/UPDATE hint after the associated CHM/value mutation is visible. */
+    public void publishMutation(Entry entry, int flags) {
+        publishMutation(entry, flags, true);
+    }
+
+    /** Publishes a hint and optionally defers its wake to a surrounding write batch. */
+    public void publishMutation(Entry entry, int flags, boolean wake) {
+        if ((flags & (Entry.PENDING_ADD | Entry.PENDING_UPDATE)) == 0
+                || (flags & ~ (Entry.PENDING_ADD | Entry.PENDING_UPDATE)) != 0) {
+            throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
+        }
+        if (!entry.publishMutation(flags)) return;
         try {
             if (!queue.offer(entry)) {
-                markMutationForRepair(entry);
+                markMutationForRepair(entry, wake);
             }
         } catch (OutOfMemoryError error) {
             // The mapping/value pointer is already visible. A maintenance transport failure is
             // advisory for this operation: keep the put result synchronous and fail closed for
             // subsequent writes while close() frees the authoritative CHM/native state.
-            markMutationForRepair(entry);
+            markMutationForRepair(entry, wake);
             recordTerminalFailure(error);
         }
     }
 
     private void markMutationForRepair(Entry entry) {
-        if (entry.queueOfferFailed()) repairDebt.incrementAndGet();
-        repairVersion.incrementAndGet();
-        repairNeeded.set(true);
-        signal();
+        markMutationForRepair(entry, true);
     }
 
-    /** Cancels a pre-publication reservation and returns its unique dirty credit. */
+    private void markMutationForRepair(Entry entry, boolean wake) {
+        int shard = entry.keyHash() & repairShardMask;
+        boolean firstRepair = entry.queueOfferFailed();
+        if (firstRepair) {
+            repairDebts[shard].incrementAndGet();
+        }
+        repairVersion.incrementAndGet();
+        repairNeeded.set(true);
+        if (wake) signal();
+        // A marker owns exactly one repair-queue item. Subsequent coalesced mutations only
+        // update the Entry flags; enqueueing duplicates would consume the bounded shard queue
+        // without adding repair debt and could make a writer wait for work that is already queued.
+        if (firstRepair) enqueueRepair(entry, shard);
+    }
+
+    private void enqueueRepair(Entry entry, int shard) {
+        MpscArrayQueue<Entry> repairQueue = repairQueues[shard];
+        while (!repairQueue.offer(entry)) {
+            requestMaintenance();
+            if (Thread.currentThread() == thread) {
+                Entry ready = repairQueue.poll();
+                if (ready != null) processEntry(ready);
+            } else if (!assistMaintenance()) {
+                awaitMaintenanceProgress();
+            }
+        }
+    }
+
+    /** Cancels a reliable removal reservation before CHM visibility changes. */
     public void cancelMutation(Entry entry) {
         entry.cancelPendingClaim();
     }
@@ -524,7 +590,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
 
     /** Must be called while ownerLock is held. */
     private int maintenancePass(boolean forceEpoch) {
-        sampleClockIfDue();
+        if (sampleClockIfDue()) budget.reclaimDeadLeases();
         int work = 0;
         if (forceEpoch) {
             // Pressure assist follows the fixed progress order: seal, advance epoch, reclaim.
@@ -694,29 +760,29 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
 
     /** Repairs coalesced mutations whose advisory queue offer lost a race with a full queue. */
     private int repairMutations(int limit) {
-        if (repairIterator == null) repairIterator = data.values().iterator();
         int work = 0;
         long observedVersion = repairVersion.get();
-        while (work < limit && repairIterator.hasNext()) {
-            Entry entry = repairIterator.next();
-            int flags = entry.pendingFlags & (Entry.PENDING_ADD | Entry.PENDING_UPDATE | Entry.PENDING_REMOVE);
-            if (!entry.isRepairMarked() || flags == 0 || entry.isPendingQueued()) continue;
+        while (work < limit) {
+            Entry entry = null;
+            for (int attempts = 0; attempts <= repairShardMask; attempts++) {
+                int shard = repairShardCursor++ & repairShardMask;
+                entry = repairQueues[shard].poll();
+                if (entry != null) break;
+            }
+            if (entry == null) break;
+            if (!entry.isRepairMarked()) continue;
             processEntry(entry);
             work++;
         }
-        if (!repairIterator.hasNext()) {
-            repairIterator = null;
-            if (observedVersion == repairVersion.get() && !hasRepairableEntries()) repairNeeded.set(false);
+        if (observedVersion == repairVersion.get() && repairDebt() == 0L && repairQueuesEmpty()) {
+            repairNeeded.set(false);
         }
         return work;
     }
 
-    private boolean hasRepairableEntries() {
-        for (Entry entry : data.values()) {
-            int flags = entry.pendingFlags & (Entry.PENDING_ADD | Entry.PENDING_UPDATE | Entry.PENDING_REMOVE);
-            if (entry.isRepairMarked() && !entry.isPendingQueued()) return true;
-        }
-        return false;
+    private boolean repairQueuesEmpty() {
+        for (MpscArrayQueue<Entry> queue : repairQueues) if (!queue.isEmpty()) return false;
+        return true;
     }
 
     private void processEntry(Entry entry) {
@@ -728,8 +794,20 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
             deferMutation(entry);
             return;
         }
-        if (entry.clearRepairMarker()) decrementRepairDebt();
-        if (flags == 0) return;
+        if (entry.clearRepairMarker()) decrementRepairDebt(entry);
+        if (flags == 0) {
+            entry.tryRolloverMaintenanceVersion();
+            return;
+        }
+        if (entry.isWriterLocked()) {
+            // ADD/UPDATE no longer hold a pending claim. A worker may therefore dequeue the
+            // advisory hint while the per-entry writer is between allocation and publication.
+            // Put the hint back into the bounded deferred path and let the retry deadline observe
+            // the fully published value.
+            if (entry.requeueMutation(flags)) deferredMutations.addLast(entry);
+            deferredMutationRetryNanos = ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
+            return;
+        }
         processEntry(entry, flags);
     }
 
@@ -743,6 +821,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
                 deferredMutations.addLast(entry);
                 continue;
             }
+            if (entry.clearRepairMarker()) decrementRepairDebt(entry);
             if (flags != 0) {
                 processEntry(entry, flags);
                 work++;
@@ -758,11 +837,18 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         deferredMutationRetryNanos = ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
     }
 
-    private void decrementRepairDebt() {
+    private void decrementRepairDebt(Entry entry) {
+        AtomicLong debt = repairDebts[entry.keyHash() & repairShardMask];
         for (;;) {
-            long current = repairDebt.get();
-            if (current == 0L || repairDebt.compareAndSet(current, current - 1L)) return;
+            long current = debt.get();
+            if (current == 0L || debt.compareAndSet(current, current - 1L)) return;
         }
+    }
+
+    private long repairDebt() {
+        long total = 0L;
+        for (AtomicLong debt : repairDebts) total += debt.get();
+        return total;
     }
 
     private void processEntry(Entry entry, int flags) {
@@ -772,21 +858,23 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
             policy.remove(entry, false);
             policyDirty = true;
             entry.markAppliedVersion(version);
+            entry.tryRolloverMaintenanceVersion();
             return;
         }
         if ((flags & (Entry.PENDING_ADD | Entry.PENDING_UPDATE)) != 0) {
-            applyEntry(entry, version);
+            applyEntry(entry, version, flags);
+            entry.tryRolloverMaintenanceVersion();
         }
     }
 
-    private void applyEntry(Entry entry, long version) {
+    private void applyEntry(Entry entry, long version, int flags) {
         long taggedAddress = entry.valueAddress;
         long address = Entry.rawValueAddress(taggedAddress);
         if (address == 0L || !isCurrent(entry)) {
             wheel.remove(entry);
             policy.remove(entry, false);
             policyDirty = true;
-            entry.markAppliedVersion(version);
+            if (!entry.markAppliedVersion(version)) republishMutation(entry, flags);
             return;
         }
         policy.add(entry);
@@ -797,12 +885,19 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
             wheel.remove(entry);
         }
         applied.incrementAndGet();
-        entry.markAppliedVersion(version);
+        if (!entry.markAppliedVersion(version)) {
+            republishMutation(entry, flags);
+        }
     }
 
     /** Compatibility for the actor-focused unit tests and local maintenance probes. */
     private void applyEntry(Entry entry) {
-        applyEntry(entry, entry.mutationVersion());
+        applyEntry(entry, entry.mutationVersion(), Entry.PENDING_UPDATE);
+    }
+
+    private void republishMutation(Entry entry, int flags) {
+        if (!entry.requeueMutation(flags)) return;
+        if (!queue.offer(entry)) markMutationForRepair(entry);
     }
 
     private int sealRetirements(int limit) {
@@ -858,22 +953,32 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     }
 
     private long nextParkDelayNanos() {
-        long delay = wheel.nextDelayNanos(nowMillis);
-        if (deferredMutationRetryNanos != Long.MAX_VALUE) {
-            long retryDelay = deferredMutationRetryNanos - ticker.nanos();
-            if (retryDelay <= 0L) delay = 1L;
-            else delay = Math.min(delay, retryDelay);
+        ownerLock.lock();
+        try {
+            long delay = wheel.nextDelayNanos(nowMillis);
+            if (deferredMutationRetryNanos != Long.MAX_VALUE) {
+                long retryDelay = deferredMutationRetryNanos - ticker.nanos();
+                if (retryDelay <= 0L) delay = 1L;
+                else delay = Math.min(delay, retryDelay);
+            }
+            if (policy.usedBytes() <= capacity || evictionRetryNanos == Long.MAX_VALUE) {
+                return delay;
+            }
+            long evictionDelay = evictionRetryNanos - ticker.nanos();
+            return evictionDelay <= 0L ? 1L : Math.min(delay, evictionDelay);
+        } finally {
+            ownerLock.unlock();
         }
-        if (policy.usedBytes() <= capacity || evictionRetryNanos == Long.MAX_VALUE) {
-            return delay;
-        }
-        long evictionDelay = evictionRetryNanos - ticker.nanos();
-        return evictionDelay <= 0L ? 1L : Math.min(delay, evictionDelay);
     }
 
     private boolean evictionWorkDue() {
-        if (policy.usedBytes() <= capacity) return false;
-        return evictionRetryNanos <= ticker.nanos();
+        ownerLock.lock();
+        try {
+            if (policy.usedBytes() <= capacity) return false;
+            return evictionRetryNanos <= ticker.nanos();
+        } finally {
+            ownerLock.unlock();
+        }
     }
 
     private void scheduleEvictionRetry() {
@@ -888,10 +993,10 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
         for (WeakReference<ReaderSlot> reference : readers.snapshot()) {
             ReaderSlot slot = reference.get();
             if (slot == null) continue;
-            if (!slot.accessPending && slot.access.isEmpty()) continue;
+            if (!slot.hasAccessPending() && slot.access.isEmpty()) continue;
             // Clear before reading the counters/ring. A producer racing after this point either
             // publishes data into this scan or leaves the hint set for the next pass.
-            slot.accessPending = false;
+            slot.clearAccessPending();
             long hitDelta = slot.publishedHits - slot.consumedHits;
             long missDelta = slot.publishedMisses - slot.consumedMisses;
             long droppedDelta = slot.publishedAccessDropped - slot.consumedAccessDropped;
@@ -912,7 +1017,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
                 // The original hint may cover more than one bounded batch. Keep the hint live
                 // until the ring is actually empty instead of relying on a future read to wake us.
                 if (!slot.access.isEmpty()) {
-                    slot.accessPending = true;
+                    slot.markAccessPending();
                     accessHint.set(true);
                 }
                 return work;
@@ -1061,7 +1166,7 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     }
 
     private void clearRepairWork(Entry entry) {
-        if (entry.clearRepairMarker()) decrementRepairDebt();
+        if (entry.clearRepairMarker()) decrementRepairDebt(entry);
     }
 
     private boolean isCurrent(Entry entry) {
@@ -1134,31 +1239,25 @@ public final class MaintenanceEventLoop implements Runnable, TimerWheel.TimerCon
     }
 
     private void signalProgress() {
-        ownerLock.lock();
+        progressLock.lock();
         try {
-            signalProgressLocked();
+            progressVersion.incrementAndGet();
+            progressChanged.signalAll();
         } finally {
-            ownerLock.unlock();
+            progressLock.unlock();
         }
     }
 
     private void signalProgressAll() {
-        ownerLock.lock();
-        try {
-            signalProgressAllLocked();
-        } finally {
-            ownerLock.unlock();
-        }
+        signalProgress();
     }
 
     private void signalProgressLocked() {
-        progressVersion.incrementAndGet();
-        if (waitingWriters.get() != 0) progress.signal();
+        signalProgress();
     }
 
     private void signalProgressAllLocked() {
-        progressVersion.incrementAndGet();
-        if (waitingWriters.get() != 0) progress.signalAll();
+        signalProgress();
     }
 
     private static int stripeCount() {

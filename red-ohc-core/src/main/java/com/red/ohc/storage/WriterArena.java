@@ -35,7 +35,8 @@ public final class WriterArena {
         for (;;) {
             Page page = currentPages.get(sizeClass);
             if (page == null) {
-                Page acquired = memory.acquireEntryPage(sizeClass);
+                Page acquired = memory.tryAcquireEntryPage(sizeClass);
+                if (acquired == null) return allocateDirect(entryBytes);
                 if (!currentPages.compareAndSet(sizeClass, null, acquired)) {
                     memory.returnUnusedPage(acquired);
                     continue;
@@ -63,7 +64,7 @@ public final class WriterArena {
             throw new IllegalStateException("unknown allocator slot handle " + handle);
         }
         page.freeSlot(block, handle);
-        if (page.isFullAndEmpty()) {
+        if (page.isEmptyAndQuiescent()) {
             currentPages.compareAndSet(sizeClass, page, null);
             if (page.beginRetirement()) memory.releaseEmptyPage(page);
         }
@@ -156,14 +157,14 @@ public final class WriterArena {
             if (remaining < 0) throw new IllegalStateException("allocator page live-slot underflow");
         }
 
-        boolean isFullAndEmpty() {
-            return nextSlot.get() >= slotCount && liveSlots.get() == 0;
+        boolean isEmptyAndQuiescent() {
+            return liveSlots.get() == 0 && inFlight.get() == 0;
         }
 
         /** Transitions only a stable, fully empty page out of a stripe. */
         boolean beginRetirement() {
             if (!state.compareAndSet(ACTIVE, RETIRING)) return false;
-            if (inFlight.get() == 0 && liveSlots.get() == 0 && nextSlot.get() >= slotCount) return true;
+            if (inFlight.get() == 0 && liveSlots.get() == 0) return true;
             state.compareAndSet(RETIRING, ACTIVE);
             return false;
         }

@@ -173,7 +173,7 @@ public class CloseConcurrencyTest {
         try {
             assertTrue(cache.put("key", "value"));
             cache.flushAsync().join();
-            Future<Boolean> direct = callers.submit(() -> cache.withDirectValue("key", value -> {
+            Future<Boolean> direct = callers.submit(() -> cache.getDirect("key", value -> {
                 directEntered.countDown();
                 await(releaseDirect);
                 value.getByte(0);

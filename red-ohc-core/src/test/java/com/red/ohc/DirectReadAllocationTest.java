@@ -18,7 +18,7 @@ public class DirectReadAllocationTest {
     };
 
     @Test
-    public void steadyEncodedDirectHitHasNoCacheSideThreadAllocation() {
+    public void steadyDirectHitHasNoCacheSideThreadAllocation() {
         com.sun.management.ThreadMXBean bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
         if (!bean.isThreadAllocatedMemorySupported()) return;
         if (!bean.isThreadAllocatedMemoryEnabled()) bean.setThreadAllocatedMemoryEnabled(true);
@@ -31,14 +31,13 @@ public class DirectReadAllocationTest {
                                                             .build()) {
             assertTrue(cache.put(key, value));
             cache.flushAsync().join();
-            EncodedKey encoded = EncodedKey.copyOf(key);
             DirectValueConsumer consumer = view -> { if (view.getLong(0) != 0L) throw new AssertionError(); };
-            for (int i = 0; i < 65_536; i++) cache.withDirectValue(encoded, consumer);
+            for (int i = 0; i < 65_536; i++) cache.getDirect(key, consumer);
 
             long threadId = Thread.currentThread().getId();
             long before = bean.getThreadAllocatedBytes(threadId);
             for (int i = 0; i < 65_536; i++) {
-                if (!cache.withDirectValue(encoded, consumer)) throw new AssertionError("direct hit unexpectedly missed");
+                if (!cache.getDirect(key, consumer)) throw new AssertionError("direct hit unexpectedly missed");
             }
             long after = bean.getThreadAllocatedBytes(threadId);
 

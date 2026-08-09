@@ -51,10 +51,25 @@ public final class RetirementQueue {
             throw new IllegalArgumentException("recordsPerStripe must be a power of two >= 2");
         }
         this.memory = memory;
-        this.stripes = new Stripe[stripeCount];
-        for (int index = 0; index < stripeCount; index++) {
-            stripes[index] = new Stripe(index, memory.allocate((long) recordsPerStripe * RECORD_BYTES), recordsPerStripe);
+        Stripe[] allocated = new Stripe[stripeCount];
+        long stripeBytes = (long) recordsPerStripe * RECORD_BYTES;
+        try {
+            for (int index = 0; index < stripeCount; index++) {
+                long address = memory.allocate(stripeBytes);
+                try {
+                    allocated[index] = new Stripe(index, address, recordsPerStripe);
+                } catch (Throwable failure) {
+                    memory.free(address, stripeBytes);
+                    throw failure;
+                }
+            }
+        } catch (Throwable failure) {
+            for (Stripe stripe : allocated) {
+                if (stripe != null) memory.free(stripe.address, stripeBytes);
+            }
+            throw failure;
         }
+        this.stripes = allocated;
         this.activeStripes = new Stripe[stripeCount];
         this.capacityRecords = Math.multiplyExact((long) stripeCount, recordsPerStripe);
     }

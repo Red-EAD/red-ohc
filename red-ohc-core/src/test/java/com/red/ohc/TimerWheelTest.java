@@ -34,6 +34,18 @@ public class TimerWheelTest {
     }
 
     @Test
+    public void overflowHeapIndexZeroRemainsRemovable() {
+        TimerWheel wheel = new TimerWheel(0L);
+        Entry entry = new Entry(0L, 0, 22, 0L);
+        wheel.add(entry, 10_000_000_000L);
+        assertTrue(entry.timerInOverflowHeap());
+
+        wheel.remove(entry);
+        assertEquals(wheel.scheduled(), 0L);
+        assertTrue(!entry.timerScheduled());
+    }
+
+    @Test
     public void ceilPlacementHandlesTickBoundariesWithoutWheelRoundDelay() {
         TimerWheel wheel = new TimerWheel(0L);
         wheel.add(new Entry(0L, 0, 3, 0L), 63L);
@@ -60,6 +72,19 @@ public class TimerWheelTest {
         assertEquals(wheel.scheduled(), 1L, "the deferred entries must not wait for a full wheel round");
         assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> { }), 1);
         assertEquals(wheel.scheduled(), 0L, "the final deferred entry must not wait for a full wheel round");
+    }
+
+    @Test
+    public void expiryBudgetUsesTheBinaryMaintenanceBatchSize() {
+        TimerWheel wheel = new TimerWheel(0L);
+        for (int index = 0; index < 1_025; index++) {
+            wheel.add(new Entry(0L, 0, index + 3_000, 0L), 64L);
+        }
+
+        assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> { }), 1_024);
+        assertEquals(wheel.scheduled(), 1L);
+        assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> { }), 1);
+        assertEquals(wheel.scheduled(), 0L);
     }
 
     @Test

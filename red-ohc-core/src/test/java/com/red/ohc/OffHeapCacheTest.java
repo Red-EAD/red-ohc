@@ -105,7 +105,7 @@ public class OffHeapCacheTest {
 
     private static boolean directEventually(OHCache<String, String> cache) {
         for (int i = 0; i < 100; i++) {
-            if (cache.withDirectValue("key", view -> assertEquals(view.length(), 5))) return true;
+            if (cache.getDirect("key", view -> assertEquals(view.length(), 5))) return true;
             Thread.yield();
         }
         return false;

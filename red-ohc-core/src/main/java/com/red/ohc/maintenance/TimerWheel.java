@@ -69,7 +69,7 @@ public final class TimerWheel {
             if (scheduled > 0L) scheduled--;
             return;
         }
-        unlink(entry.timerLevel, entry.timerSlot, entry);
+        unlink(entry.timerLevel(), entry.timerSlot(), entry);
         entry.timerScheduled(false);
         if (scheduled > 0L) scheduled--;
     }
@@ -177,8 +177,8 @@ public final class TimerWheel {
         } else if (distance < L3_SPAN) {
             link(3, (int) (target >>> 22) & (L3_SIZE - 1), entry);
         } else {
-            entry.timerLevel = 4;
-            entry.timerSlot = 0;
+            entry.timerHeapIndex(-1);
+            entry.timerSlot(0);
             entry.timerPrev = null;
             entry.timerNext = null;
             entry.timerScheduled(true);
@@ -189,8 +189,8 @@ public final class TimerWheel {
     private void link(int level, int slot, Entry entry) {
         Entry[] heads = heads(level);
         Entry head = heads[slot];
-        entry.timerLevel = level;
-        entry.timerSlot = (short) slot;
+        entry.timerLevel(level);
+        entry.timerSlot(slot);
         entry.timerPrev = null;
         entry.timerNext = head;
         if (head != null) head.timerPrev = entry;
@@ -302,7 +302,7 @@ public final class TimerWheel {
     private static void clearLinks(Entry entry) {
         entry.timerPrev = null;
         entry.timerNext = null;
-        entry.timerSlot = 0;
+        entry.timerSlot(0);
     }
 
     private void heapOffer(Entry entry) {

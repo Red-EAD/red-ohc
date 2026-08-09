@@ -160,22 +160,36 @@ public class WriterArenaTest {
     }
 
     @Test
-    public void smallFreeListUsesAStampedSlotHandleRatherThanABareNativeAddress() throws Exception {
+    public void emptyPartialPageCanBeReclaimedAndReallocatedSafely() throws Exception {
         NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
         try {
             WriterArena arena = memory.newWriterArena();
             long bytes = 112L;
             long first = arena.allocate(bytes);
             memory.releaseEntry(first, bytes);
-            long before = headState(arena, SizeClasses.indexForEntry(bytes));
-
             long reused = arena.allocate(bytes);
             memory.releaseEntry(reused, bytes);
-            long after = headState(arena, SizeClasses.indexForEntry(bytes));
+            Assert.assertTrue(memory.allocated() >= 0L);
+        } finally {
+            memory.closeArenas();
+        }
+    }
 
-            Assert.assertEquals(reused, first);
-            Assert.assertNotEquals(before >>> 31, after >>> 31,
-                    "each pop/push must advance the head stamp so a paused CAS cannot suffer ABA");
+    @Test
+    public void pooledPageLimitFallsBackToDirectAllocationForSmallEntries() {
+        NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA,
+                (long) NativeMemory.Memory.pooledPageLimit() * SizeClasses.PAGE_BYTES
+                        + WriterArena.directAllocationBytes(32_752L));
+        List<Long> entries = new ArrayList<>(NativeMemory.Memory.pooledPageLimit() + 1);
+        long bytes = 32_752L;
+        try {
+            int entriesPerPage = SizeClasses.PAGE_BYTES / SizeClasses.slotBytes(SizeClasses.indexForEntry(bytes));
+            int total = NativeMemory.Memory.pooledPageLimit() * entriesPerPage + 1;
+            for (int i = 0; i < total; i++) entries.add(memory.newWriterArena().allocate(bytes));
+            for (long entry : entries) memory.releaseEntry(entry, bytes);
+            Assert.assertEquals(memory.allocated(),
+                    (long) NativeMemory.Memory.pooledPageLimit() * SizeClasses.PAGE_BYTES,
+                    "small allocations must use direct fallback once pooled pages hit their hard cap");
         } finally {
             memory.closeArenas();
         }

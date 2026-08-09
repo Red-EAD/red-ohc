@@ -38,8 +38,7 @@ public class DirectValueEpochTest {
                                                             .build()) {
             assertTrue(cache.put(key, new byte[16]));
             cache.flushAsync().join();
-            EncodedKey encoded = EncodedKey.copyOf(key);
-            Future<Boolean> directRead = reader.submit(() -> waitForDirectHit(cache, encoded, entered, release));
+            Future<Boolean> directRead = reader.submit(() -> waitForDirectHit(cache, key, entered, release));
             try {
                 assertTrue(entered.await(2L, TimeUnit.SECONDS), "direct consumer did not start");
                 assertTrue(cache.removeAsync(key).get(2L, TimeUnit.SECONDS));
@@ -53,11 +52,11 @@ public class DirectValueEpochTest {
         }
     }
 
-    private static boolean waitForDirectHit(OHCache<byte[], byte[]> cache, EncodedKey key,
+    private static boolean waitForDirectHit(OHCache<byte[], byte[]> cache, byte[] key,
                                             CountDownLatch entered, CountDownLatch release) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
         while (System.nanoTime() < deadline) {
-            if (cache.withDirectValue(key, value -> {
+            if (cache.getDirect(key, value -> {
                 entered.countDown();
                 try {
                     if (!release.await(2L, TimeUnit.SECONDS)) throw new AssertionError("direct callback was not released");

@@ -18,6 +18,8 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.List;
 
 import org.testng.annotations.Test;
@@ -54,6 +56,150 @@ public class BulkCacheTest {
             assertEquals(getEventually(cache, "key-0"), null);
             assertEquals(getEventually(cache, "key-7"), null);
             assertEquals(getEventually(cache, "key-63"), null);
+        }
+    }
+
+    @Test
+    public void nestedDirectValueKeepsTheOuterViewUsable() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20).keySerializer(STRING).valueSerializer(STRING).build()) {
+            assertTrue(cache.put("outer", "outer-value"));
+            assertTrue(cache.put("inner", "inner-value"));
+            assertTrue(cache.getDirect("outer", outer -> {
+                assertTrue(cache.getDirect("inner", inner -> assertEquals(inner.length(), 11)));
+                assertEquals(outer.length(), 11);
+            }));
+        }
+    }
+
+    @Test
+    public void directAllReturnsUniqueLiveHitsInInputOrderWithoutDeserializing() {
+        AtomicInteger deserializations = new AtomicInteger();
+        CacheSerializer<String> observingValueSerializer = new CacheSerializer<String>() {
+            @Override public void serialize(String value, ByteBuffer buffer) { STRING.serialize(value, buffer); }
+            @Override public String deserialize(ByteBuffer buffer) {
+                deserializations.incrementAndGet();
+                return STRING.deserialize(buffer);
+            }
+            @Override public int serializedSize(String value) { return STRING.serializedSize(value); }
+        };
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20).keySerializer(STRING).valueSerializer(observingValueSerializer).build()) {
+            assertTrue(cache.put("key-1", "value-1"));
+            assertTrue(cache.put("key-2", "value-2"));
+            cache.flushAsync().join();
+
+            List<String> keys = new ArrayList<>();
+            List<String> values = new ArrayList<>();
+            int hits = cache.getDirectAll(Arrays.asList("key-1", "missing", "key-2", "key-1"),
+                    (key, value) -> {
+                        keys.add(key);
+                        byte[] bytes = new byte[value.length()];
+                        value.copyTo(bytes, 0);
+                        values.add(new String(bytes, StandardCharsets.UTF_8));
+                    });
+
+            assertEquals(hits, 2);
+            assertEquals(keys, Arrays.asList("key-1", "key-2"));
+            assertEquals(values, Arrays.asList("value-1", "value-2"));
+            assertEquals(deserializations.get(), 0);
+        }
+    }
+
+    @Test
+    public void directAllCrossesReaderBatchesAndReleasesTheReaderEpoch() throws Exception {
+        try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 23).expectedEntries(2_048)
+                .keySerializer(STRING).valueSerializer(STRING).build()) {
+            Map<String, String> values = new LinkedHashMap<>();
+            for (int index = 0; index < 1_025; index++) {
+                values.put("direct-batch-" + index, "value-" + index);
+            }
+            assertEquals(cache.putAll(values), values.size());
+            cache.flushAsync().join();
+
+            AtomicInteger callbacks = new AtomicInteger();
+            AtomicBoolean observedReaderEpoch = new AtomicBoolean();
+            com.red.ohc.runtime.ThreadContext context = threadContext(cache);
+            int hits = cache.getDirectAll(values.keySet(), (key, value) -> {
+                callbacks.incrementAndGet();
+                if (context.slot.epoch != 0L) observedReaderEpoch.set(true);
+                assertTrue(value.length() > 0);
+            });
+
+            assertEquals(hits, values.size());
+            assertEquals(callbacks.get(), values.size());
+            assertTrue(observedReaderEpoch.get());
+            assertEquals(context.readerDepth(), 0);
+            assertEquals(context.slot.epoch, 0L);
+        }
+    }
+
+    @Test
+    public void nestedDirectAllKeepsTheOuterViewUsable() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20).keySerializer(STRING).valueSerializer(STRING).build()) {
+            assertTrue(cache.put("outer", "outer-value"));
+            assertTrue(cache.put("inner", "inner-value"));
+            cache.flushAsync().join();
+
+            assertEquals(cache.getDirectAll(Arrays.asList("outer"), (key, outer) -> {
+                assertEquals(cache.getDirectAll(Arrays.asList("inner"), (innerKey, inner) -> {
+                    assertEquals(inner.length(), 11);
+                }), 1);
+                assertEquals(outer.length(), 11);
+            }), 1);
+        }
+    }
+
+    @Test
+    public void directAllReleasesReaderStateWhenConsumerThrows() throws Exception {
+        RuntimeException failure = new RuntimeException("consumer failure");
+        try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 20).keySerializer(STRING).valueSerializer(STRING).build()) {
+            assertTrue(cache.put("key", "value"));
+            cache.flushAsync().join();
+
+            com.red.ohc.runtime.ThreadContext context = threadContext(cache);
+            boolean propagated = false;
+            try {
+                cache.getDirectAll(Arrays.asList("key"), (key, value) -> {
+                    throw failure;
+                });
+            } catch (RuntimeException actual) {
+                assertTrue(actual == failure);
+                propagated = true;
+            }
+
+            assertTrue(propagated);
+            assertEquals(context.readerDepth(), 0);
+            assertEquals(context.slot.epoch, 0L);
+            assertTrue(cache.getDirect("key", value -> assertEquals(value.length(), 5)));
+        }
+    }
+
+    @Test
+    public void directAllValidatesInputsAndHandlesEmptyCollections() {
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20).keySerializer(STRING).valueSerializer(STRING).build()) {
+            boolean nullKeysRejected = false;
+            try {
+                cache.getDirectAll(null, (key, value) -> { });
+            } catch (NullPointerException expected) {
+                nullKeysRejected = true;
+            }
+            assertTrue(nullKeysRejected);
+
+            boolean nullConsumerRejected = false;
+            try {
+                cache.getDirectAll(Arrays.asList("key"), null);
+            } catch (NullPointerException expected) {
+                nullConsumerRejected = true;
+            }
+            assertTrue(nullConsumerRejected);
+            assertEquals(cache.getDirectAll(Arrays.asList(), (key, value) -> { }), 0);
         }
     }
 
@@ -94,6 +240,34 @@ public class BulkCacheTest {
             assertEquals(cache.removeAll(keys), keys.size());
             for (String key : keys) assertEquals(cache.get(key), null,
                     "removeAll must be immediately visible for " + key);
+        }
+    }
+
+    @Test
+    public void bulkMutationBoundarySizesPreserveCountsAndImmediateVisibility() {
+        int[] sizes = {0, 1, 511, 512, 513, 1_024, 1_025};
+        try (OHCache<String, String> cache = OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 24)
+                .expectedEntries(4_096)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+            for (int size : sizes) {
+                Map<String, String> values = new LinkedHashMap<>();
+                for (int index = 0; index < size; index++) {
+                    values.put("boundary-" + size + "-" + index, "value-" + index);
+                }
+                assertEquals(cache.putAll(values), size, "putAll count at boundary " + size);
+                for (Map.Entry<String, String> entry : values.entrySet()) {
+                    assertEquals(cache.get(entry.getKey()), entry.getValue(),
+                            "putAll visibility at boundary " + size);
+                }
+                assertEquals(cache.removeAll(new ArrayList<>(values.keySet())), size,
+                        "removeAll count at boundary " + size);
+                for (String key : values.keySet()) {
+                    assertEquals(cache.get(key), null, "removeAll visibility at boundary " + size);
+                }
+            }
         }
     }
 
@@ -199,6 +373,129 @@ public class BulkCacheTest {
             assertEquals(cache.get("before"), "kept");
             assertTrue(cache.put("after-failure", "writer-released"));
             assertEquals(cache.get("after-failure"), "writer-released");
+        }
+    }
+
+    @Test(timeOut = 15_000L)
+    public void putAllRemainsImmediatelyVisibleWhenMaintenanceIsPausedAndHintQueueIsFull() throws Exception {
+        OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 24)
+                .expectedEntries(1)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .buildTyped();
+        ReentrantLock ownerLock = ownerLock(cache);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            ownerLock.lock();
+            try {
+                locked.countDown();
+                await(release);
+            } finally {
+                ownerLock.unlock();
+            }
+        });
+        holder.start();
+        assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+        try {
+            Map<String, String> values = new LinkedHashMap<>();
+            for (int index = 0; index < 1_025; index++) {
+                values.put("paused-" + index, "value-" + index);
+            }
+            assertEquals(cache.putAll(values), values.size());
+            assertEquals(cache.get("paused-1024"), "value-1024",
+                    "CHM/value publication must not wait for advisory maintenance");
+        } finally {
+            release.countDown();
+            holder.join(2_000L);
+            cache.flushAsync().join();
+            cache.close();
+        }
+    }
+
+    @Test(timeOut = 15_000L)
+    public void singlePutRemainsImmediatelyVisibleWhenMaintenanceIsPausedAndHintQueueIsFull() throws Exception {
+        OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 24)
+                .expectedEntries(1)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .buildTyped();
+        ReentrantLock ownerLock = ownerLock(cache);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            ownerLock.lock();
+            try {
+                locked.countDown();
+                await(release);
+            } finally {
+                ownerLock.unlock();
+            }
+        });
+        holder.start();
+        assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+        try {
+            for (int index = 0; index < 1_024; index++) {
+                assertTrue(cache.put("single-paused-" + index, "value-" + index));
+            }
+            OHCacheStats paused = cache.stats();
+            assertTrue(paused.maintenanceQueueDepth >= paused.maintenanceQueueCapacity);
+            assertTrue(cache.put("single-paused-1024", "value-1024"));
+            assertEquals(cache.get("single-paused-1024"), "value-1024",
+                    "a full advisory queue must not delay synchronous CHM publication");
+        } finally {
+            release.countDown();
+            holder.join(2_000L);
+            cache.flushAsync().join();
+            cache.close();
+        }
+    }
+
+    @Test(timeOut = 15_000L)
+    public void replacementRetiresTheOldValueEvenWhenItsAdvisoryHintIsDropped() throws Exception {
+        OffHeapCache<String, String> cache = (OffHeapCache<String, String>) OHCacheBuilder
+                .<String, String>newBuilder()
+                .capacity(1 << 24)
+                .expectedEntries(1)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .buildTyped();
+        ReentrantLock ownerLock = ownerLock(cache);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            ownerLock.lock();
+            try {
+                locked.countDown();
+                await(release);
+            } finally {
+                ownerLock.unlock();
+            }
+        });
+        holder.start();
+        assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+        try {
+            Map<String, String> values = new LinkedHashMap<>();
+            for (int index = 0; index < 1_025; index++) {
+                values.put("replace-paused-" + index, "old-" + index);
+            }
+            assertEquals(cache.putAll(values), values.size());
+            OHCacheStats paused = cache.stats();
+            assertTrue(paused.maintenanceQueueDepth >= paused.maintenanceQueueCapacity,
+                    "the paused worker must leave the advisory queue at capacity");
+            assertTrue(cache.put("replace-paused-1024", "new-value"));
+            assertEquals(cache.get("replace-paused-1024"), "new-value");
+            assertTrue(cache.stats().retirementQueueDepth > 0L,
+                    "the old native value must be recorded even when the UPDATE hint is dropped");
+        } finally {
+            release.countDown();
+            holder.join(2_000L);
+            cache.flushAsync().join();
+            cache.close();
         }
     }
 
@@ -323,6 +620,24 @@ public class BulkCacheTest {
         Field field = OffHeapCache.class.getDeclaredField("contexts");
         field.setAccessible(true);
         return ((ThreadLocal<com.red.ohc.runtime.ThreadContext>) field.get(cache)).get();
+    }
+
+    private static ReentrantLock ownerLock(OffHeapCache<?, ?> cache) throws Exception {
+        Field workerField = OffHeapCache.class.getDeclaredField("worker");
+        workerField.setAccessible(true);
+        Object worker = workerField.get(cache);
+        Field ownerField = worker.getClass().getDeclaredField("ownerLock");
+        ownerField.setAccessible(true);
+        return (ReentrantLock) ownerField.get(worker);
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(interrupted);
+        }
     }
 
     private static Map<String, String> getAllEventually(OHCache<String, String> cache, java.util.Collection<String> keys) {

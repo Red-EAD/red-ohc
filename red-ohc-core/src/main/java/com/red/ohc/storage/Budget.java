@@ -1,12 +1,14 @@
 package com.red.ohc.storage;
 
+import java.lang.ref.WeakReference;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**
- * Exact native-resident admission budget with fixed CPU stripes. A normal writer consumes its
- * stripe-local credit; the globally contended balance is touched only when a stripe refills or
- * the single maintenance actor releases reclaimed resident memory.
+ * Exact native-resident admission budget. A normal writer consumes its thread-local lease; the
+ * globally contended balance is touched only when a lease refills or the maintenance actor
+ * releases reclaimed resident memory.
  */
 public final class Budget {
     private static final long MAX_REFILL_BYTES = 64L << 10;
@@ -14,35 +16,49 @@ public final class Budget {
     private final long capacity;
     /** Capacity that is neither resident nor temporarily assigned to a writer stripe. */
     private final AtomicLong available;
-    private final Stripe[] credits;
-    private final int stripeMask;
-    private final long refillBytes;
+    private final ConcurrentLinkedQueue<Lease> leases = new ConcurrentLinkedQueue<>();
 
     public Budget(long capacity) {
         if (capacity <= 0L) throw new IllegalArgumentException("capacity must be positive");
         this.capacity = capacity;
-        int count = 1;
-        int target = Math.max(1, Runtime.getRuntime().availableProcessors());
-        while (count < target && count < (1 << 30)) count <<= 1;
-        this.credits = new Stripe[count];
-        for (int index = 0; index < count; index++) credits[index] = new Stripe(this, index);
-        this.stripeMask = count - 1;
         this.available = new AtomicLong(capacity);
-        long fairShare = Math.max(1L, capacity / count);
-        this.refillBytes = Math.min(MAX_REFILL_BYTES, fairShare);
     }
 
-    /** Selects the fixed writer stripe once while a cache-local ThreadContext is created. */
-    public Stripe stripeForCurrentThread() {
-        return credits[((int) Thread.currentThread().getId()) & stripeMask];
+    /** Creates the cache-local lease used by a writer thread for small allocations. */
+    public Lease leaseForCurrentThread() {
+        Lease lease = new Lease(this, Thread.currentThread());
+        leases.add(lease);
+        return lease;
     }
 
-    /** Atomically admits actual native resident weight; no allocation can exceed {@link #capacity}. */
-    public boolean reserve(Stripe stripe, long bytes) {
+    public boolean reserve(Lease lease, long bytes) {
+        if (lease == null || lease.owner != this) throw new IllegalArgumentException("foreign budget lease");
         if (bytes <= 0L || bytes > capacity) return false;
-        if (stripe == null || stripe.owner != this) throw new IllegalArgumentException("foreign budget stripe");
-        if (consumeCredit(stripe, bytes)) return true;
-        return refillAndConsume(stripe, bytes);
+        long credit = lease.credit;
+        if (credit >= bytes) {
+            lease.credit = credit - bytes;
+            return true;
+        }
+        long needed = bytes - credit;
+        long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
+        for (;;) {
+            long free = available.get();
+            if (free < needed) {
+                reclaimDeadLeases();
+                free = available.get();
+                if (free < needed) return false;
+            }
+            long grant = Math.min(free, request);
+            if (!available.compareAndSet(free, free - grant)) continue;
+            lease.credit = credit + grant - bytes;
+            return true;
+        }
+    }
+
+    public void refund(Lease lease, long bytes) {
+        if (bytes <= 0L) return;
+        if (lease == null || lease.owner != this) throw new IllegalArgumentException("foreign budget lease");
+        lease.credit += bytes;
     }
 
     /** The actor is the normal caller, so returning reclaimed bytes never creates a producer hotspot. */
@@ -54,98 +70,98 @@ public final class Budget {
         throw new IllegalStateException("native budget overflow: " + updated + ">" + capacity);
     }
 
-    /** Returns a reservation whose allocated block was never published. */
-    public void refund(long bytes) {
-        release(bytes);
-    }
-
     /** A stats-only snapshot; producers are not stopped, so a concurrently sampled value is approximate. */
     public long reserved() {
         long free = available.get();
-        for (Stripe stripe : credits) free += stripe.credit;
+        for (Lease lease : leases) free += lease.credit;
         long resident = capacity - free;
         return resident <= 0L ? 0L : Math.min(capacity, resident);
     }
 
     public long capacity() { return capacity; }
-    public int stripeCount() { return credits.length; }
-
-    /** Returns unused fixed-stripe credits during shutdown; no writer may be active then. */
+    /** Returns unused writer leases during shutdown; no writer may be active then. */
     public void returnUnusedCredits() {
-        for (Stripe stripe : credits) {
-            long credit = Stripe.CREDIT.getAndSet(stripe, 0L);
-            if (credit != 0L) release(credit);
+        for (Lease lease : leases) {
+            if (lease.state.compareAndSet(Lease.IDLE, Lease.RECLAIMING)) {
+                returnCredit(lease);
+                lease.state.set(Lease.IDLE);
+            }
+        }
+    }
+
+    /** Reclaims leases whose owning thread has exited; called by the cache worker. */
+    public void reclaimDeadLeases() {
+        reclaimIdleLeases();
+    }
+
+    /** Returns credit from any lease that is not currently owned by a writer. */
+    public void reclaimIdleLeases() {
+        for (Lease lease : leases) {
+            if (lease.state.get() != Lease.IDLE) continue;
+            if (lease.state.compareAndSet(Lease.IDLE, Lease.RECLAIMING)) {
+                boolean dead = !lease.ownerAlive();
+                returnCredit(lease);
+                lease.state.set(Lease.IDLE);
+                if (dead) leases.remove(lease);
+            }
         }
     }
 
     public void clear() {
-        for (Stripe stripe : credits) stripe.credit = 0L;
+        for (Lease lease : leases) {
+            if (lease.state.get() == Lease.ACTIVE) {
+                throw new IllegalStateException("cannot clear an active budget lease");
+            }
+            lease.credit = 0L;
+        }
         available.set(capacity);
     }
 
-    private boolean consumeCredit(Stripe stripe, long bytes) {
-        for (;;) {
-            long credit = stripe.credit;
-            if (credit < bytes) return false;
-            if (Stripe.CREDIT.compareAndSet(stripe, credit, credit - bytes)) return true;
-        }
+    private void returnCredit(Lease lease) {
+        long credit = lease.credit;
+        lease.credit = 0L;
+        if (credit != 0L) release(credit);
     }
 
-    private boolean refillAndConsume(Stripe stripe, long bytes) {
-        for (;;) {
-            if (consumeCredit(stripe, bytes)) return true;
-            long requested = Math.max(bytes, refillBytes);
-            if (borrowGlobalCredit(stripe, bytes, requested)) return true;
-            if (!reclaimIdleCredits(stripe)) return false;
-        }
-    }
+    public static final class Lease {
+        private final Budget owner;
+        private final WeakReference<Thread> ownerThread;
+        private static final int IDLE = 0;
+        private static final int ACTIVE = 1;
+        private static final int RECLAIMING = 2;
+        private final AtomicInteger state = new AtomicInteger(IDLE);
+        private long credit;
 
-    /** Moves one bounded chunk into this stripe and consumes the requested part in one operation. */
-    private boolean borrowGlobalCredit(Stripe stripe, long bytes, long requested) {
-        for (;;) {
-            long free = available.get();
-            if (free < bytes) return false;
-            long grant = Math.min(free, requested);
-            if (!available.compareAndSet(free, free - grant)) continue;
-            Stripe.CREDIT.getAndAdd(stripe, grant - bytes);
-            return true;
+        private Lease(Budget owner, Thread ownerThread) {
+            this.owner = owner;
+            this.ownerThread = new WeakReference<>(ownerThread);
         }
-    }
 
-    /**
-     * Stripes retain at most a refill chunk. Under pressure a writer reclaims those idle chunks
-     * before rejecting, so short-lived producer threads cannot pin cache capacity forever.
-     */
-    private boolean reclaimIdleCredits(Stripe requestingStripe) {
-        boolean reclaimed = false;
-        for (int offset = 0; offset < credits.length; offset++) {
-            int index = (requestingStripe.index + offset) & stripeMask;
-            Stripe creditsForStripe = credits[index];
+        public long credit() { return credit; }
+        public void activate() {
             for (;;) {
-                long credit = creditsForStripe.credit;
-                if (credit == 0L) break;
-                if (Stripe.CREDIT.compareAndSet(creditsForStripe, credit, 0L)) {
-                    available.addAndGet(credit);
-                    reclaimed = true;
-                    break;
+                int current = state.get();
+                if (current == RECLAIMING) {
+                    // The worker owns this short transition only while it transfers the unused
+                    // credit back to the global balance. A writer racing that transition must
+                    // retry, otherwise an ordinary back-to-back put is reported as a failure.
+                    Thread.onSpinWait();
+                    continue;
                 }
+                if (current == ACTIVE) {
+                    throw new IllegalStateException("budget lease is already active");
+                }
+                if (state.compareAndSet(IDLE, ACTIVE)) return;
             }
         }
-        return reclaimed;
-    }
-
-    /** Separate objects prevent different CPU stripes from sharing one AtomicLongArray cache line. */
-    public static final class Stripe {
-        private static final AtomicLongFieldUpdater<Stripe> CREDIT =
-                AtomicLongFieldUpdater.newUpdater(Stripe.class, "credit");
-        private final Budget owner;
-        private final int index;
-        volatile long credit;
-        @SuppressWarnings("unused") private long pad0, pad1, pad2, pad3, pad4, pad5, pad6;
-
-        private Stripe(Budget owner, int index) {
-            this.owner = owner;
-            this.index = index;
+        public void deactivate() {
+            if (!state.compareAndSet(ACTIVE, IDLE)) {
+                throw new IllegalStateException("budget lease is not active");
+            }
+        }
+        public boolean ownerAlive() {
+            Thread owner = ownerThread.get();
+            return owner != null && owner.isAlive();
         }
     }
 }

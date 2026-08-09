@@ -17,8 +17,11 @@ public interface OHCache<K, V> extends AutoCloseable {
     Map<K, V> getAll(Collection<? extends K> keys);
     int removeAll(Collection<? extends K> keys);
 
-    boolean withDirectValue(K key, DirectValueConsumer consumer);
-    boolean withDirectValue(EncodedKey key, DirectValueConsumer consumer);
+    /** Reads a live value without deserialization while the callback is running. */
+    boolean getDirect(K key, DirectValueConsumer consumer);
+
+    /** Reads live values without deserialization, invoking the callback once per hit. */
+    int getDirectAll(Collection<? extends K> keys, DirectEntryConsumer<K> consumer);
 
     CompletableFuture<Boolean> putIfAbsentAsync(K key, V value, long expireAtMillis);
     CompletableFuture<Boolean> replaceAsync(K key, V expected, V value, long expireAtMillis);
