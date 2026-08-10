@@ -46,6 +46,21 @@ public final class ReliableRemovalQueue {
     }
   }
 
+  /** Attempts one producer-side slot reservation without spinning on a contended slot. */
+  public boolean tryReserve(Reservation reservation) {
+    if (reservation.active()) {
+      throw new IllegalStateException("reservation is active");
+    }
+    long start = producer.get();
+    Slot slot = slots[(int) start & mask];
+    if (slot.sequence != start || !producer.compareAndSet(start, start + 1L)) {
+      return false;
+    }
+    reservation.sequence = start;
+    reservation.slot = slot;
+    return true;
+  }
+
   public void commit(Reservation reservation, Entry entry) {
     publish(reservation, entry, 0L, null);
   }

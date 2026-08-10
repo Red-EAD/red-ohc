@@ -116,7 +116,7 @@ public final class EntryMappingStateTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void laterMutationWaitsForTheRolloverFenceToDrain() throws Exception {
+  public void laterMutationDoesNotWaitForTheRolloverFenceToDrain() throws Exception {
     Entry entry = new Entry(0L, 1, 7, 0L);
     entry.maintenanceMeta = (0xffffffffL << 32) | 0xffffffffL;
     assertTrue(entry.publishMutation(Entry.PENDING_ADD));
@@ -124,13 +124,11 @@ public final class EntryMappingStateTest {
     ExecutorService executor = Executors.newSingleThreadExecutor();
     try {
       Future<Boolean> later = executor.submit(() -> entry.publishMutation(Entry.PENDING_UPDATE));
-      Thread.sleep(10L);
-      assertFalse(later.isDone(), "a second mutation must not reuse the final version lane");
+      assertFalse(later.get(1L, TimeUnit.SECONDS), "the coalesced mutation is not a new queue item");
 
-      assertEquals(entry.takePending(), Entry.PENDING_ADD);
+      assertEquals(entry.takePending(), Entry.PENDING_ADD | Entry.PENDING_UPDATE);
       assertTrue(entry.tryRolloverMaintenanceVersion());
-      assertTrue(later.get(1L, TimeUnit.SECONDS));
-      assertEquals(entry.mutationVersion(), 1L);
+      assertEquals(entry.mutationVersion(), 0L);
     } finally {
       executor.shutdownNow();
     }

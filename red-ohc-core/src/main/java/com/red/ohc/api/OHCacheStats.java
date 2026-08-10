@@ -37,6 +37,18 @@ public final class OHCacheStats {
   private long maintenanceWaitCount;
   private long maintenanceWaitNanos;
   private long maintenanceProgressVersion;
+  private long nonBlockingPutFailureCount;
+  private long nonBlockingReplaceFailureCount;
+  private long nonBlockingRemoveFailureCount;
+  private long writerContentionFailureCount;
+  private long retirementAdmissionFailureCount;
+  private long reliableRemovalAdmissionFailureCount;
+  private long nativeAllocationFailureCount;
+  private long repairQueueDepth;
+  private long asyncMutationQueueDepth;
+  private long asyncMutationCompletedCount;
+  private long asyncMutationFailedCount;
+  private long asyncMutationRejectedCount;
 
   public OHCacheStats(
       long readHits,
@@ -74,6 +86,104 @@ public final class OHCacheStats {
       long maintenanceWaitCount,
       long maintenanceWaitNanos,
       long maintenanceProgressVersion) {
+    this(
+        readHits,
+        readMisses,
+        readAccessDropped,
+        mutationAccepted,
+        mutationApplied,
+        maintenanceQueueDepth,
+        maintenanceQueueCapacity,
+        maintenanceLoopNanos,
+        maintenanceUnhealthy,
+        logicalExpired,
+        physicalExpired,
+        ttlLagMillis,
+        ttlBacklog,
+        evictionCount,
+        evictionScanCount,
+        evictionLockedSkips,
+        retiredEntries,
+        size,
+        liveWeight,
+        residentWeight,
+        retiredWeight,
+        nativeAllocatedBytes,
+        timerHeapBytes,
+        sketchHeapBytes,
+        ghostHeapBytes,
+        retirementQueueNativeBytes,
+        retirementQueueDepth,
+        retirementQueueCapacity,
+        wakeSignals,
+        mergedWakeSignals,
+        maintenanceAssistCount,
+        maintenanceAssistWork,
+        maintenanceWaitCount,
+        maintenanceWaitNanos,
+        maintenanceProgressVersion,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L,
+        0L);
+  }
+
+  public OHCacheStats(
+      long readHits,
+      long readMisses,
+      long readAccessDropped,
+      long mutationAccepted,
+      long mutationApplied,
+      long maintenanceQueueDepth,
+      long maintenanceQueueCapacity,
+      long maintenanceLoopNanos,
+      boolean maintenanceUnhealthy,
+      long logicalExpired,
+      long physicalExpired,
+      long ttlLagMillis,
+      long ttlBacklog,
+      long evictionCount,
+      long evictionScanCount,
+      long evictionLockedSkips,
+      long retiredEntries,
+      long size,
+      long liveWeight,
+      long residentWeight,
+      long retiredWeight,
+      long nativeAllocatedBytes,
+      long timerHeapBytes,
+      long sketchHeapBytes,
+      long ghostHeapBytes,
+      long retirementQueueNativeBytes,
+      long retirementQueueDepth,
+      long retirementQueueCapacity,
+      long wakeSignals,
+      long mergedWakeSignals,
+      long maintenanceAssistCount,
+      long maintenanceAssistWork,
+      long maintenanceWaitCount,
+      long maintenanceWaitNanos,
+      long maintenanceProgressVersion,
+      long nonBlockingPutFailureCount,
+      long nonBlockingReplaceFailureCount,
+      long nonBlockingRemoveFailureCount,
+      long writerContentionFailureCount,
+      long retirementAdmissionFailureCount,
+      long reliableRemovalAdmissionFailureCount,
+      long nativeAllocationFailureCount,
+      long repairQueueDepth,
+      long asyncMutationQueueDepth,
+      long asyncMutationCompletedCount,
+      long asyncMutationFailedCount,
+      long asyncMutationRejectedCount) {
     this.readHits = readHits;
     this.readMisses = readMisses;
     this.readAccessDropped = readAccessDropped;
@@ -109,6 +219,18 @@ public final class OHCacheStats {
     this.maintenanceWaitCount = maintenanceWaitCount;
     this.maintenanceWaitNanos = maintenanceWaitNanos;
     this.maintenanceProgressVersion = maintenanceProgressVersion;
+    this.nonBlockingPutFailureCount = nonBlockingPutFailureCount;
+    this.nonBlockingReplaceFailureCount = nonBlockingReplaceFailureCount;
+    this.nonBlockingRemoveFailureCount = nonBlockingRemoveFailureCount;
+    this.writerContentionFailureCount = writerContentionFailureCount;
+    this.retirementAdmissionFailureCount = retirementAdmissionFailureCount;
+    this.reliableRemovalAdmissionFailureCount = reliableRemovalAdmissionFailureCount;
+    this.nativeAllocationFailureCount = nativeAllocationFailureCount;
+    this.repairQueueDepth = repairQueueDepth;
+    this.asyncMutationQueueDepth = asyncMutationQueueDepth;
+    this.asyncMutationCompletedCount = asyncMutationCompletedCount;
+    this.asyncMutationFailedCount = asyncMutationFailedCount;
+    this.asyncMutationRejectedCount = asyncMutationRejectedCount;
   }
 
   public long getReadHits() {
@@ -251,143 +373,54 @@ public final class OHCacheStats {
     return maintenanceProgressVersion;
   }
 
-  void setReadHits(long readHits) {
-    this.readHits = readHits;
+  public long getNonBlockingPutFailureCount() {
+    return nonBlockingPutFailureCount;
   }
 
-  void setReadMisses(long readMisses) {
-    this.readMisses = readMisses;
+  public long getNonBlockingReplaceFailureCount() {
+    return nonBlockingReplaceFailureCount;
   }
 
-  void setReadAccessDropped(long readAccessDropped) {
-    this.readAccessDropped = readAccessDropped;
+  public long getNonBlockingRemoveFailureCount() {
+    return nonBlockingRemoveFailureCount;
   }
 
-  void setMutationAccepted(long mutationAccepted) {
-    this.mutationAccepted = mutationAccepted;
+  public long getWriterContentionFailureCount() {
+    return writerContentionFailureCount;
   }
 
-  void setMutationApplied(long mutationApplied) {
-    this.mutationApplied = mutationApplied;
+  public long getRetirementAdmissionFailureCount() {
+    return retirementAdmissionFailureCount;
   }
 
-  void setMaintenanceQueueDepth(long maintenanceQueueDepth) {
-    this.maintenanceQueueDepth = maintenanceQueueDepth;
+  public long getReliableRemovalAdmissionFailureCount() {
+    return reliableRemovalAdmissionFailureCount;
   }
 
-  void setMaintenanceQueueCapacity(long maintenanceQueueCapacity) {
-    this.maintenanceQueueCapacity = maintenanceQueueCapacity;
+  public long getNativeAllocationFailureCount() {
+    return nativeAllocationFailureCount;
   }
 
-  void setMaintenanceLoopNanos(long maintenanceLoopNanos) {
-    this.maintenanceLoopNanos = maintenanceLoopNanos;
+  public long getRepairQueueDepth() {
+    return repairQueueDepth;
   }
 
-  void setMaintenanceUnhealthy(boolean maintenanceUnhealthy) {
-    this.maintenanceUnhealthy = maintenanceUnhealthy;
+  public long getAsyncMutationQueueDepth() {
+    return asyncMutationQueueDepth;
   }
 
-  void setLogicalExpired(long logicalExpired) {
-    this.logicalExpired = logicalExpired;
+  public long getAsyncMutationCompletedCount() {
+    return asyncMutationCompletedCount;
   }
 
-  void setPhysicalExpired(long physicalExpired) {
-    this.physicalExpired = physicalExpired;
+  public long getAsyncMutationFailedCount() {
+    return asyncMutationFailedCount;
   }
 
-  void setTtlLagMillis(long ttlLagMillis) {
-    this.ttlLagMillis = ttlLagMillis;
+  public long getAsyncMutationRejectedCount() {
+    return asyncMutationRejectedCount;
   }
-
-  void setTtlBacklog(long ttlBacklog) {
-    this.ttlBacklog = ttlBacklog;
-  }
-
-  void setEvictionCount(long evictionCount) {
-    this.evictionCount = evictionCount;
-  }
-
-  void setEvictionScanCount(long evictionScanCount) {
-    this.evictionScanCount = evictionScanCount;
-  }
-
-  void setEvictionLockedSkips(long evictionLockedSkips) {
-    this.evictionLockedSkips = evictionLockedSkips;
-  }
-
-  void setRetiredEntries(long retiredEntries) {
-    this.retiredEntries = retiredEntries;
-  }
-
   void setSize(long size) {
     this.size = size;
-  }
-
-  void setLiveWeight(long liveWeight) {
-    this.liveWeight = liveWeight;
-  }
-
-  void setResidentWeight(long residentWeight) {
-    this.residentWeight = residentWeight;
-  }
-
-  void setRetiredWeight(long retiredWeight) {
-    this.retiredWeight = retiredWeight;
-  }
-
-  void setNativeAllocatedBytes(long nativeAllocatedBytes) {
-    this.nativeAllocatedBytes = nativeAllocatedBytes;
-  }
-
-  void setTimerHeapBytes(long timerHeapBytes) {
-    this.timerHeapBytes = timerHeapBytes;
-  }
-
-  void setSketchHeapBytes(long sketchHeapBytes) {
-    this.sketchHeapBytes = sketchHeapBytes;
-  }
-
-  void setGhostHeapBytes(long ghostHeapBytes) {
-    this.ghostHeapBytes = ghostHeapBytes;
-  }
-
-  void setRetirementQueueNativeBytes(long retirementQueueNativeBytes) {
-    this.retirementQueueNativeBytes = retirementQueueNativeBytes;
-  }
-
-  void setRetirementQueueDepth(long retirementQueueDepth) {
-    this.retirementQueueDepth = retirementQueueDepth;
-  }
-
-  void setRetirementQueueCapacity(long retirementQueueCapacity) {
-    this.retirementQueueCapacity = retirementQueueCapacity;
-  }
-
-  void setWakeSignals(long wakeSignals) {
-    this.wakeSignals = wakeSignals;
-  }
-
-  void setMergedWakeSignals(long mergedWakeSignals) {
-    this.mergedWakeSignals = mergedWakeSignals;
-  }
-
-  void setMaintenanceAssistCount(long maintenanceAssistCount) {
-    this.maintenanceAssistCount = maintenanceAssistCount;
-  }
-
-  void setMaintenanceAssistWork(long maintenanceAssistWork) {
-    this.maintenanceAssistWork = maintenanceAssistWork;
-  }
-
-  void setMaintenanceWaitCount(long maintenanceWaitCount) {
-    this.maintenanceWaitCount = maintenanceWaitCount;
-  }
-
-  void setMaintenanceWaitNanos(long maintenanceWaitNanos) {
-    this.maintenanceWaitNanos = maintenanceWaitNanos;
-  }
-
-  void setMaintenanceProgressVersion(long maintenanceProgressVersion) {
-    this.maintenanceProgressVersion = maintenanceProgressVersion;
   }
 }

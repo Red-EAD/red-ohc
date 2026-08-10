@@ -2,7 +2,6 @@ package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -130,7 +129,7 @@ public class EncodedWriteTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void pendingByteWatermarkKeepsAContinuousEncodedWriteStreamAccepted() {
+  public void pendingByteWatermarkDoesNotMakeEncodedWritesWaitForMaintenance() {
     final int keys = 4_096;
     try (OffHeapCache<byte[], byte[]> cache =
         (OffHeapCache<byte[], byte[]>)
@@ -147,6 +146,10 @@ public class EncodedWriteTest {
         key[1] = (byte) (i >>> 8);
         encoded[i] = EncodedKey.copyOf(key);
       }
+      long waitCount = cache.stats().getMaintenanceWaitCount();
+      int accepted = 0;
+      boolean rejected = false;
+      outer:
       for (int i = 0; i < 20_000; i += 64) {
         while (cache.mutationBacklogExceeds()) {
           Thread.yield();
@@ -154,27 +157,18 @@ public class EncodedWriteTest {
         for (int offset = 0; offset < 64; offset++) {
           int write = i + offset;
           if (!cache.putEncoded(encoded[write & (keys - 1)], value)) {
-            OHCacheStats stats = cache.stats();
-            fail(
-                "write "
-                    + write
-                    + " rejected: unhealthy="
-                    + stats.getMaintenanceUnhealthy()
-                    + ", resident="
-                    + stats.getResidentWeight()
-                    + ", retired="
-                    + stats.getRetiredWeight()
-                    + ", native="
-                    + stats.getNativeAllocatedBytes()
-                    + ", nativeLimit="
-                    + cache.nativeHardLimitForTest());
+            rejected = true;
+            break outer;
           }
+          accepted++;
         }
       }
       cache.flushAsync().join();
       OHCacheStats stats = cache.stats();
+      assertTrue(accepted > 0);
+      assertTrue(rejected || accepted >= 20_000);
       assertTrue(!stats.getMaintenanceUnhealthy());
-      assertTrue(stats.getMaintenanceAssistCount() + stats.getMaintenanceWaitCount() >= 0L);
+      assertEquals(stats.getMaintenanceWaitCount(), waitCount);
     }
   }
 }

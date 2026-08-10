@@ -2,18 +2,22 @@ package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotSame;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
@@ -55,6 +59,41 @@ public class AsyncControlTest {
   }
 
   @Test
+  public void asyncMutationSerializesOnTheMaintenanceEventLoop() {
+    AtomicReference<Thread> serializerThread = new AtomicReference<>();
+    CacheSerializer<String> tracking =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            serializerThread.set(Thread.currentThread());
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return STRING.serializedSize(value);
+          }
+        };
+    Thread caller = Thread.currentThread();
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(tracking)
+            .build()) {
+      CompletableFuture<Boolean> result = cache.putIfAbsentAsync("async", "value", 0L);
+      assertTrue(result.join());
+      assertNotSame(serializerThread.get(), caller);
+      assertTrue(serializerThread.get().getName().contains("red-ohc-maintenance-event-loop"));
+    }
+  }
+
+  @Test
   public void replaceRejectsAnEntryLargerThanTheByteCapacityBeforePublishing() {
     try (OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
@@ -65,11 +104,12 @@ public class AsyncControlTest {
                 .buildTyped()) {
       assertTrue(cache.put("k", "old"));
       try {
-        cache.replaceAsync("k", "old", repeat('x', 1_000), 0L);
+        cache.replaceAsync("k", "old", repeat('x', 1_000), 0L).join();
         throw new AssertionError("oversized replacement must fail");
-      } catch (IllegalArgumentException expected) {
-        assertEquals(cache.get("k"), "old");
+      } catch (CompletionException expected) {
+        assertTrue(expected.getCause() instanceof IllegalArgumentException);
       }
+      assertEquals(cache.get("k"), "old");
     }
   }
 
@@ -107,12 +147,13 @@ public class AsyncControlTest {
             .build()) {
       assertTrue(cache.put(key, oldValue));
       try {
-        cache.replaceAsync(key, oldValue, newValue, 0L);
+        cache.replaceAsync(key, oldValue, newValue, 0L).join();
         throw new AssertionError(
             "conditional replacement must reject key plus new value over capacity");
-      } catch (IllegalArgumentException expected) {
-        assertEquals(cache.get(key), oldValue);
+      } catch (CompletionException expected) {
+        assertTrue(expected.getCause() instanceof IllegalArgumentException);
       }
+      assertEquals(cache.get(key), oldValue);
     }
   }
 
@@ -355,10 +396,11 @@ public class AsyncControlTest {
     try {
       assertTrue(cache.put(key, oldValue));
       try {
-        cache.replaceAsync(key, oldValue, replacement, 0L);
+        cache.replaceAsync(key, oldValue, replacement, 0L).join();
         throw new AssertionError("replacement serializer failure must be propagated");
-      } catch (IllegalStateException expected) {
-        assertTrue(expected.getMessage().contains("replacement serialization failed"));
+      } catch (CompletionException expected) {
+        assertTrue(expected.getCause() instanceof IllegalStateException);
+        assertTrue(expected.getCause().getMessage().contains("replacement serialization failed"));
       }
       assertTrue(Arrays.equals(oldValue, cache.get(key)));
     } finally {

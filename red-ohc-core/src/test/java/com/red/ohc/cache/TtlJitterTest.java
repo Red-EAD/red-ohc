@@ -58,7 +58,15 @@ public class TtlJitterTest {
             .valueSerializer(STRING)
             .buildTyped()) {
       for (int i = 0; i < 100; i++) {
-        assertTrue(cache.put("key-" + i, "value"));
+        String key = "key-" + i;
+        boolean accepted = false;
+        for (int attempt = 0; attempt < 1_000 && !accepted; attempt++) {
+          accepted = cache.put(key, "value");
+          if (!accepted) {
+            Thread.yield();
+          }
+        }
+        assertTrue(accepted, "put admission did not succeed for " + key);
       }
       Set<Long> expiries = new HashSet<>();
       for (Entry entry : cache.data.values()) {

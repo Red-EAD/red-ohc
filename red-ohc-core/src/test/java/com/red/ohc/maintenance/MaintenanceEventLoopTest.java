@@ -6,7 +6,10 @@ import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -773,10 +776,19 @@ public class MaintenanceEventLoopTest {
       assertTrue(one.claimWriter());
       assertTrue(two.claimWriter());
       loop.start();
-      loop.flush().join();
+      java.util.concurrent.CompletableFuture<Void> flush = loop.flush();
+      long blockedDeadline = System.nanoTime() + 1_000_000_000L;
+      while (loop.snapshot().evictionLockedSkips == 0L
+          && System.nanoTime() < blockedDeadline) {
+        Thread.yield();
+      }
+      assertTrue(
+          loop.snapshot().evictionLockedSkips > 0L,
+          "maintenance did not observe the locked eviction victim");
 
       one.finishWriter();
       two.finishWriter();
+      flush.join();
       long deadline = System.nanoTime() + 1_000_000_000L;
       while (data.size() > 1 && System.nanoTime() < deadline) {
         Thread.yield();
@@ -913,6 +925,204 @@ public class MaintenanceEventLoopTest {
 
       assertTrue(!loop.isAlive(), "terminal failure during close must not retry pending work");
       assertEquals(memory.allocated(), 0L);
+    } finally {
+      if (loop.isAlive()) {
+        loop.stop();
+        loop.join(1_000L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void failedActorRemovalCancelsTheUnusedActorRetirementBatch() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry readers = new ReaderRegistry();
+    ReaderSlot activeReader = new ReaderSlot();
+    activeReader.epoch = 1L;
+    readers.register(activeReader);
+    ConcurrentHashMap<Entry, Entry> data = index();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            data,
+            memory,
+            new Budget(16L << 20),
+            Ticker.DEFAULT,
+            16L << 20,
+            Eviction.LRU,
+            readers);
+    try {
+      Entry entry = new Entry(0L, 0, 127, 8L);
+      data.put(entry, new Entry(0L, 0, 128, 0L));
+
+      assertFalse(loop.removeFromMap(entry, false, entry.generation(), 8L));
+      assertTrue(data.containsKey(entry), "a failed actor removal must preserve the mapping");
+      assertFalse(
+          ((RetirementQueue.Reservation) getField(loop, "actorRetirement")).active(),
+          "a failed actor removal must not leave a partial actor reservation");
+    } finally {
+      activeReader.epoch = 0L;
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void flushBarrierDoesNotWaitForAsyncMutationsSubmittedAfterIt() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch releaseFirst = new CountDownLatch(1);
+    CountDownLatch releaseSecond = new CountDownLatch(1);
+    CompletableFuture<Void> secondResult = new CompletableFuture<>();
+    try {
+      loop.start();
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {
+                firstStarted.countDown();
+                await(releaseFirst);
+              },
+              Throwable::printStackTrace));
+      for (int index = 1; index < 64; index++) {
+        assertTrue(loop.submitAsyncMutation(() -> {}, Throwable::printStackTrace));
+      }
+      assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
+
+      CompletableFuture<Void> flush = loop.flush();
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {
+                await(releaseSecond);
+                secondResult.complete(null);
+              },
+              secondResult::completeExceptionally));
+      releaseFirst.countDown();
+
+      flush.get(2, TimeUnit.SECONDS);
+    } finally {
+      releaseFirst.countDown();
+      releaseSecond.countDown();
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void flushWaitsForRetirementReclaimWhileAReaderIsActive() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    Budget budget = new Budget(1 << 20);
+    ReaderRegistry readers = new ReaderRegistry();
+    ReaderSlot activeReader = new ReaderSlot();
+    activeReader.epoch = 1L;
+    readers.register(activeReader);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
+    try {
+      loop.start();
+      retireOne(loop, memory, budget, new ThreadContext(null, null));
+      waitForRetiredEntries(loop, 1);
+
+      CompletableFuture<Void> flush = loop.flush();
+      Thread.sleep(100L);
+      assertFalse(flush.isDone(), "flush must include pending QSBR retirement reclaim");
+
+      activeReader.epoch = 0L;
+      loop.readerQuiescent();
+      flush.get(3, TimeUnit.SECONDS);
+    } finally {
+      activeReader.epoch = 0L;
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void terminalFailureRejectsQueuedAsyncMutationsBeforeClose() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch releaseFirst = new CountDownLatch(1);
+    CompletableFuture<Void> pending = new CompletableFuture<>();
+    try {
+      loop.start();
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {
+                firstStarted.countDown();
+                await(releaseFirst);
+              },
+              Throwable::printStackTrace));
+      assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
+      assertTrue(
+          loop.submitAsyncMutation(() -> {}, pending::completeExceptionally));
+
+      loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
+
+      assertTrue(
+          pending.isCompletedExceptionally(),
+          "terminal failure must complete queued async mutations exceptionally");
+    } finally {
+      releaseFirst.countDown();
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void terminalFailureCloseClearsPendingMutationQueues() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    Entry entry = new Entry(0L, 0, 128, 0L);
+    try {
+      loop.publishMutation(entry, Entry.PENDING_ADD);
+      @SuppressWarnings("unchecked")
+      ConcurrentLinkedQueue<Entry>[] repairQueues =
+          (ConcurrentLinkedQueue<Entry>[]) getField(loop, "repairQueues");
+      for (ConcurrentLinkedQueue<Entry> repairQueue : repairQueues) {
+        repairQueue.offer(entry);
+      }
+      @SuppressWarnings("unchecked")
+      ArrayDeque<Entry> deferred = (ArrayDeque<Entry>) getField(loop, "deferredMutations");
+      deferred.add(entry);
+
+      loop.start();
+      loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
+      loop.stop();
+      loop.join(1_000L);
+
+      assertTrue(((MpscArrayQueue<?>) getField(loop, "queue")).isEmpty());
+      for (ConcurrentLinkedQueue<Entry> repairQueue : repairQueues) {
+        assertTrue(repairQueue.isEmpty());
+      }
+      assertTrue(deferred.isEmpty());
     } finally {
       if (loop.isAlive()) {
         loop.stop();
@@ -1185,6 +1395,23 @@ public class MaintenanceEventLoopTest {
       Thread.sleep(1L);
     }
     assertTrue(loop.isParked(), "maintenance actor did not park");
+  }
+
+  private static void await(CountDownLatch latch) {
+    try {
+      if (!latch.await(2, TimeUnit.SECONDS)) {
+        throw new AssertionError("test latch was not released");
+      }
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(error);
+    }
+  }
+
+  private static Object getField(Object target, String name) throws Exception {
+    Field field = target.getClass().getDeclaredField(name);
+    field.setAccessible(true);
+    return field.get(target);
   }
 
   private static void invokeProcessEntry(MaintenanceEventLoop loop, Entry entry) throws Exception {

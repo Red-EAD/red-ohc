@@ -1,11 +1,11 @@
 package com.red.ohc.cache;
 
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -62,7 +62,7 @@ public class WriteAdmissionTest {
   }
 
   @Test(timeOut = 30_000L)
-  public void writerAssistEventuallyAdmitsReplacementAfterReaderQuiesces() throws Exception {
+  public void writerReturnsWithoutWaitingForReaderQuiescence() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(8L << 20)
@@ -72,7 +72,7 @@ public class WriteAdmissionTest {
     java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
     java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
     java.util.concurrent.ExecutorService readers =
-        java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.Executors.newFixedThreadPool(2);
     java.util.concurrent.Future<Boolean> direct = null;
     try {
       assertTrue(cache.put("key", "initial"));
@@ -94,18 +94,22 @@ public class WriteAdmissionTest {
                       }));
       assertTrue(entered.await(2L, java.util.concurrent.TimeUnit.SECONDS));
 
-      java.util.concurrent.Future<Boolean> writer =
+      int attempts = (int) cache.stats().getRetirementQueueCapacity() + 64;
+      java.util.concurrent.Future<Integer> writer =
           readers.submit(
               () -> {
-                boolean accepted = true;
-                for (int i = 0; i < 2_000; i++) {
-                  accepted &= cache.put("key", "value-" + i);
+                int accepted = 0;
+                for (int i = 0; i < attempts; i++) {
+                  if (cache.put("key", "value-" + i)) {
+                    accepted++;
+                  }
                 }
                 return accepted;
               });
-      Thread.sleep(100L);
+      assertTrue(
+          writer.get(8L, java.util.concurrent.TimeUnit.SECONDS) < attempts,
+          "writer must return bounded admission failures instead of waiting for the reader");
       release.countDown();
-      assertTrue(writer.get(8L, java.util.concurrent.TimeUnit.SECONDS));
       assertTrue(direct.get(2L, java.util.concurrent.TimeUnit.SECONDS));
     } finally {
       release.countDown();
@@ -118,7 +122,7 @@ public class WriteAdmissionTest {
   }
 
   @Test
-  public void failedWriterLeaseActivationClearsCloseMarker() throws Exception {
+  public void failedWriterLeaseActivationReturnsWithoutSettingCloseMarker() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
@@ -139,18 +143,12 @@ public class WriteAdmissionTest {
       Field stateField = lease.getClass().getDeclaredField("state");
       stateField.setAccessible(true);
       AtomicInteger state = (AtomicInteger) stateField.get(lease);
-      state.set(1); // Budget.Lease.ACTIVE
+      state.set(2); // Budget.Lease.RECLAIMING
 
       Method enterWriter = OffHeapCache.class.getDeclaredMethod("enterWriter");
       enterWriter.setAccessible(true);
-      try {
-        enterWriter.invoke(cache);
-        throw new AssertionError("lease activation should fail while reclaiming");
-      } catch (InvocationTargetException expected) {
-        assertTrue(expected.getCause() instanceof IllegalStateException);
-      } finally {
-        state.set(0); // Budget.Lease.IDLE
-      }
+      assertEquals(enterWriter.invoke(cache), null);
+      state.set(0); // Budget.Lease.IDLE
       assertFalse(
           context.slot.writerActive, "failed lease activation must not block close forever");
     } finally {

@@ -107,6 +107,27 @@ public final class RetirementQueue {
     return false;
   }
 
+  /** Attempts one producer-side reservation without retrying a contended stripe. */
+  public boolean tryReserve(Reservation reservation, int records) {
+    if (records <= 0) {
+      return true;
+    }
+    if (reservation.active()) {
+      throw new IllegalStateException("retirement reservation is still active");
+    }
+    int start =
+        reservation.preferredStripe >= 0
+            ? reservation.preferredStripe
+            : nextPreferredStripe.getAndIncrement() & (stripes.length - 1);
+    for (int offset = 0; offset < stripes.length; offset++) {
+      Stripe stripe = stripes[(start + offset) & (stripes.length - 1)];
+      if (stripe.tryReserve(reservation, records)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   public void append(Reservation reservation, long address, long allocation) {
     if (!reservation.active()) {
       throw new IllegalStateException("missing retirement reservation");
@@ -424,6 +445,19 @@ public final class RetirementQueue {
           return true;
         }
       }
+    }
+
+    boolean tryReserve(Reservation reservation, int records) {
+      if (records > capacity) {
+        return false;
+      }
+      long start = producer.get();
+      if (!available(start, records)
+          || !producer.compareAndSet(start, start + records)) {
+        return false;
+      }
+      reservation.assign(this, start, records);
+      return true;
     }
 
     void publish(long index, long entryAddress, long allocation) {

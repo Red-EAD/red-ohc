@@ -2,8 +2,11 @@ package com.red.ohc.maintenance;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -12,6 +15,7 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 import org.jctools.queues.MpscArrayQueue;
 
@@ -56,6 +60,7 @@ public final class MaintenanceEventLoop
   private static final int CLOCK_SAMPLE_INTERVAL_PASSES = 16;
 
   private static final int RETIREMENT_BATCH_RECORDS = 128;
+  private static final int ASYNC_MUTATION_BATCH = 64;
 
   /**
    * A deferred mutation has a writer in progress; retry it without turning idle into a poll loop.
@@ -77,11 +82,20 @@ public final class MaintenanceEventLoop
   private final AtomicBoolean repairNeeded = new AtomicBoolean();
   private final AtomicLong repairVersion = new AtomicLong();
   private final AtomicBoolean allocationPressureRequested = new AtomicBoolean();
-  private final MpscArrayQueue<Entry>[] repairQueues;
+  private final ConcurrentLinkedQueue<Entry>[] repairQueues;
   private final int repairShardMask;
   private final long repairCapacity;
   private int repairShardCursor;
   private final AtomicLong[] repairDebts;
+  private final ConcurrentLinkedQueue<AsyncMutationTask> asyncMutations =
+      new ConcurrentLinkedQueue<>();
+  /** Linearizes async sequence assignment with queue publication for the flush barrier. */
+  private final Object asyncSubmissionLock = new Object();
+  private final AtomicLong asyncSubmitted = new AtomicLong();
+  private final AtomicLong asyncCompleted = new AtomicLong();
+  private final AtomicLong asyncFailed = new AtomicLong();
+  private final AtomicLong asyncRejected = new AtomicLong();
+  private volatile long asyncCompletedSequence;
 
   /** Actor-owned Entries whose transport item arrived while a writer owns the Entry mutex. */
   private final ArrayDeque<Entry> deferredMutations = new ArrayDeque<>();
@@ -110,7 +124,7 @@ public final class MaintenanceEventLoop
   private final AtomicLong waitCount = new AtomicLong();
   private final AtomicLong waitNanos = new AtomicLong();
   private final AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
-  private final AtomicReference<CompletableFuture<Void>> flushRequest = new AtomicReference<>();
+  private final AtomicReference<FlushRequest> flushRequest = new AtomicReference<>();
   private volatile boolean closing;
   private volatile boolean stopping;
   private volatile boolean parked;
@@ -157,13 +171,20 @@ public final class MaintenanceEventLoop
   private final AtomicLong maintenanceLoopNanos = new AtomicLong();
   private final AtomicLong evictionScans = new AtomicLong();
   private final AtomicLong evictionLockedSkips = new AtomicLong();
+  private final AtomicLong nonBlockingPutFailures = new AtomicLong();
+  private final AtomicLong nonBlockingReplaceFailures = new AtomicLong();
+  private final AtomicLong nonBlockingRemoveFailures = new AtomicLong();
+  private final AtomicLong writerContentionFailures = new AtomicLong();
+  private final AtomicLong retirementAdmissionFailures = new AtomicLong();
+  private final AtomicLong reliableRemovalAdmissionFailures = new AtomicLong();
+  private final AtomicLong nativeAllocationFailures = new AtomicLong();
 
   /** Updated only on the rare idle-to-required wake transition, never on a merged put. */
   private final AtomicLong wakeUnparks = new AtomicLong();
 
   private final AtomicBoolean unhealthy = new AtomicBoolean();
 
-  /** A retry blocked by a business writer may complete a control-plane flush without deadlock. */
+  /** A writer-blocked eviction remains part of the control-plane flush barrier. */
   private boolean evictionBlockedOnWriter;
 
   private long evictionRetryNanos = Long.MAX_VALUE;
@@ -282,10 +303,10 @@ public final class MaintenanceEventLoop
       shardCount <<= 1;
     }
     @SuppressWarnings("unchecked")
-    MpscArrayQueue<Entry>[] repairQueues = new MpscArrayQueue[shardCount];
+    ConcurrentLinkedQueue<Entry>[] repairQueues = new ConcurrentLinkedQueue[shardCount];
     int repairQueueCapacity = Math.max(1_024, queueCapacity / shardCount);
     for (int i = 0; i < shardCount; i++) {
-      repairQueues[i] = new MpscArrayQueue<>(repairQueueCapacity);
+      repairQueues[i] = new ConcurrentLinkedQueue<>();
     }
     this.repairQueues = repairQueues;
     this.repairShardMask = shardCount - 1;
@@ -431,6 +452,62 @@ public final class MaintenanceEventLoop
     return retirements.exceedsHighWatermark();
   }
 
+  public long repairQueueDepth() {
+    return repairDebt();
+  }
+
+  public long asyncMutationQueueDepth() {
+    return asyncMutations.size();
+  }
+
+  public long asyncMutationCompletedCount() {
+    return asyncCompleted.get();
+  }
+
+  public long asyncMutationFailedCount() {
+    return asyncFailed.get();
+  }
+
+  public long asyncMutationRejectedCount() {
+    return asyncRejected.get();
+  }
+
+  /** Adds a mutation task without executing it on the calling thread. */
+  public boolean submitAsyncMutation(Runnable action, Consumer<Throwable> reject) {
+    if (action == null || reject == null) {
+      throw new NullPointerException("action/reject");
+    }
+    Throwable rejection = null;
+    try {
+      synchronized (asyncSubmissionLock) {
+        if (closing || stopping) {
+          rejection = new IllegalStateException("cache is closing");
+        } else {
+          Throwable unavailable = terminalFailure.get();
+          if (unavailable != null) {
+            rejection =
+                new com.red.ohc.api.CacheMaintenanceException(unavailable);
+          } else {
+            long sequence = asyncSubmitted.incrementAndGet();
+            asyncMutations.offer(new AsyncMutationTask(sequence, action, reject));
+          }
+        }
+      }
+    } catch (OutOfMemoryError error) {
+      asyncRejected.incrementAndGet();
+      recordTerminalFailure(error);
+      reject.accept(error);
+      return false;
+    }
+    if (rejection != null) {
+      asyncRejected.incrementAndGet();
+      reject.accept(rejection);
+      return false;
+    }
+    signal();
+    return true;
+  }
+
   public void registerReader(ReaderSlot slot) {
     readers.register(slot);
   }
@@ -473,6 +550,34 @@ public final class MaintenanceEventLoop
     if (count > 0) {
       accepted.add(count);
     }
+  }
+
+  public void recordNonBlockingPutFailure() {
+    nonBlockingPutFailures.incrementAndGet();
+  }
+
+  public void recordNonBlockingReplaceFailure() {
+    nonBlockingReplaceFailures.incrementAndGet();
+  }
+
+  public void recordNonBlockingRemoveFailure() {
+    nonBlockingRemoveFailures.incrementAndGet();
+  }
+
+  public void recordWriterContentionFailure() {
+    writerContentionFailures.incrementAndGet();
+  }
+
+  public void recordRetirementAdmissionFailure() {
+    retirementAdmissionFailures.incrementAndGet();
+  }
+
+  public void recordReliableRemovalAdmissionFailure() {
+    reliableRemovalAdmissionFailures.incrementAndGet();
+  }
+
+  public void recordNativeAllocationFailure() {
+    nativeAllocationFailures.incrementAndGet();
   }
 
   public void throwIfUnavailable() {
@@ -573,20 +678,31 @@ public final class MaintenanceEventLoop
   }
 
   public void recordTerminalFailure(Throwable failure) {
-    if (terminalFailure.compareAndSet(null, failure)) {
-      unhealthy.set(true);
-      CompletableFuture<Void> future = flushRequest.getAndSet(null);
-      if (future != null) {
-        future.completeExceptionally(
-            new com.red.ohc.api.CacheMaintenanceException(failure));
-      }
-      if (ownerLock.isHeldByCurrentThread()) {
-        signalProgressAllLocked();
-      } else {
-        signalProgressAll();
-      }
-      signal();
+    if (failure == null) {
+      throw new NullPointerException("failure");
     }
+    FlushRequest request;
+    List<AsyncMutationTask> pending;
+    synchronized (asyncSubmissionLock) {
+      if (!terminalFailure.compareAndSet(null, failure)) {
+        return;
+      }
+      unhealthy.set(true);
+      request = flushRequest.getAndSet(null);
+      pending = drainPendingAsyncTasks();
+    }
+    com.red.ohc.api.CacheMaintenanceException unavailable =
+        new com.red.ohc.api.CacheMaintenanceException(failure);
+    if (request != null) {
+      request.future.completeExceptionally(unavailable);
+    }
+    rejectAsyncTasks(pending, unavailable);
+    if (ownerLock.isHeldByCurrentThread()) {
+      signalProgressAllLocked();
+    } else {
+      signalProgressAll();
+    }
+    signal();
   }
 
   /** Reliable removal only: ADD/UPDATE are published after their data-plane mutation. */
@@ -597,8 +713,7 @@ public final class MaintenanceEventLoop
     if (unhealthy.get()) {
       return false;
     }
-    entry.beginPending(flags);
-    return true;
+    return entry.tryBeginPending(flags);
   }
 
   /** Publishes an ADD/UPDATE hint after the associated CHM/value mutation is visible. */
@@ -652,20 +767,7 @@ public final class MaintenanceEventLoop
   }
 
   private void enqueueRepair(Entry entry, int shard) {
-    MpscArrayQueue<Entry> repairQueue = repairQueues[shard];
-    while (!repairQueue.offer(entry)) {
-      requestMaintenance();
-      if (Thread.currentThread() == thread) {
-        Entry ready = repairQueue.poll();
-        if (ready != null) {
-          processEntry(ready);
-        }
-      } else {
-        if (!assistMaintenance()) {
-          awaitMaintenanceProgress();
-        }
-      }
-    }
+    repairQueues[shard].offer(entry);
   }
 
   /** Cancels a reliable removal reservation before CHM visibility changes. */
@@ -713,44 +815,43 @@ public final class MaintenanceEventLoop
    * Reserves native retirement records before an index mutation publishes a replacement or removal.
    */
   public boolean prepareRetirement(com.red.ohc.runtime.ThreadContext context, int records) {
-    boolean reserved = retirements.reserve(context.retirement, records);
-    return reserved;
+    return retirements.tryReserve(context.retirement, records);
   }
 
   /**
    * Reserves removal cleanup and a reliable queue slot before the caller changes CHM visibility.
    */
-  public void prepareReliableRemoval(
+  public boolean prepareReliableRemoval(
       com.red.ohc.runtime.ThreadContext context, Entry entry) {
     if (context == null || entry == null) {
       throw new NullPointerException("context/entry");
     }
-    while (true) {
-      throwIfUnavailable();
-      if (reliableRemovals.reserve(context.reliableRemoval)) {
-        try {
-          if (retirements.reserve(context.retirement, 2)
-              && reserveMutation(entry, Entry.PENDING_REMOVE)) {
-            return;
-          }
-        } catch (Throwable failure) {
-          if (context.retirement.active()) {
-            retirements.cancel(context.retirement);
-          }
-          reliableRemovals.cancel(context.reliableRemoval);
-          signal();
-          throw failure;
-        }
-        if (context.retirement.active()) {
-          retirements.cancel(context.retirement);
-        }
+    throwIfUnavailable();
+    if (!reliableRemovals.tryReserve(context.reliableRemoval)) {
+      return false;
+    }
+    try {
+      if (!retirements.tryReserve(context.retirement, 2)) {
         reliableRemovals.cancel(context.reliableRemoval);
         signal();
+        return false;
       }
-      requestMaintenance();
-      if (!assistMaintenance()) {
-        awaitMaintenanceProgress();
+      if (!reserveMutation(entry, Entry.PENDING_REMOVE)) {
+        retirements.cancel(context.retirement);
+        reliableRemovals.cancel(context.reliableRemoval);
+        signal();
+        return false;
       }
+      return true;
+    } catch (Throwable failure) {
+      if (context.retirement.active()) {
+        retirements.cancel(context.retirement);
+      }
+      if (context.reliableRemoval.active()) {
+        reliableRemovals.cancel(context.reliableRemoval);
+      }
+      signal();
+      throw failure;
     }
   }
 
@@ -810,17 +911,26 @@ public final class MaintenanceEventLoop
       failed.completeExceptionally(new com.red.ohc.api.CacheMaintenanceException(failure));
       return failed;
     }
-    while (true) {
-      CompletableFuture<Void> existing = flushRequest.get();
+    synchronized (asyncSubmissionLock) {
+      failure = terminalFailure.get();
+      if (failure != null) {
+        CompletableFuture<Void> failed = new CompletableFuture<>();
+        failed.completeExceptionally(
+            new com.red.ohc.api.CacheMaintenanceException(failure));
+        return failed;
+      }
+      FlushRequest existing = flushRequest.get();
       if (existing != null) {
-        return existing;
+        return existing.future;
       }
-      CompletableFuture<Void> created = new CompletableFuture<>();
-      if (flushRequest.compareAndSet(null, created)) {
-        clockRefreshRequested = true;
-        signal();
-        return created;
+      FlushRequest created =
+          new FlushRequest(asyncSubmitted.get(), new CompletableFuture<>());
+      if (!flushRequest.compareAndSet(null, created)) {
+        return flushRequest.get().future;
       }
+      clockRefreshRequested = true;
+      signal();
+      return created.future;
     }
   }
 
@@ -859,7 +969,19 @@ public final class MaintenanceEventLoop
         assistWork.get(),
         waitCount.get(),
         waitNanos.get(),
-        progressVersion.get());
+        progressVersion.get(),
+        nonBlockingPutFailures.get(),
+        nonBlockingReplaceFailures.get(),
+        nonBlockingRemoveFailures.get(),
+        writerContentionFailures.get(),
+        retirementAdmissionFailures.get(),
+        reliableRemovalAdmissionFailures.get(),
+        nativeAllocationFailures.get(),
+        repairQueueDepth(),
+        asyncMutationQueueDepth(),
+        asyncMutationCompletedCount(),
+        asyncMutationFailedCount(),
+        asyncMutationRejectedCount());
   }
 
   @Override
@@ -992,6 +1114,7 @@ public final class MaintenanceEventLoop
     if (allocationPressureRequested.getAndSet(false)) {
       work += memory.trimIdlePages() > 0L ? 1 : 0;
     }
+    work += drainAsyncMutations(ASYNC_MUTATION_BATCH);
     publishLiveWeight();
     completeFlushIfIdle();
     return work;
@@ -1009,7 +1132,10 @@ public final class MaintenanceEventLoop
   }
 
   private boolean hasWork() {
-    return hasSourceWork() || reliableRemovals.size() != 0L || retirements.hasPendingReclaim();
+    return hasSourceWork()
+        || reliableRemovals.size() != 0L
+        || !asyncMutations.isEmpty()
+        || retirements.hasPendingReclaim();
   }
 
   private boolean hasSourceWork() {
@@ -1022,6 +1148,7 @@ public final class MaintenanceEventLoop
         || repairNeeded.get()
         || allocationPressureRequested.get()
         || accessHint.get()
+        || !asyncMutations.isEmpty()
         || flushNeedsImmediatePass()
         || retirements.hasReadyHint()
         || clockRefreshRequested
@@ -1098,14 +1225,14 @@ public final class MaintenanceEventLoop
   }
 
   private void completeFlushIfIdle() {
-    CompletableFuture<Void> future = flushRequest.get();
-    if (future == null) {
+    FlushRequest request = flushRequest.get();
+    if (request == null) {
       return;
     }
     // A bounded eviction scan may have deferred its next retry to protect the worker from
-    // repeated scans. Flush must retain its barrier until that retry either brings the
-    // policy back under capacity or schedules another genuinely pending maintenance pass.
-    if (policy.usedWeight() > capacity && !evictionWorkDue() && !evictionBlockedOnWriter) {
+    // repeated scans. Flush must retain its barrier until that retry brings the policy back under
+    // capacity, including when the previous scan was blocked by a writer.
+    if (policy.usedWeight() > capacity) {
       return;
     }
     if (clockRefreshRequested) {
@@ -1115,14 +1242,64 @@ public final class MaintenanceEventLoop
         || !queue.isEmpty()
         || !deferredMutations.isEmpty()
         || repairNeeded.get()
+        || asyncCompletedSequence < request.sequence
         || allocationPressureRequested.get()
         || accessHint.get()
         || retirements.hasReadyHint()
+        || retirements.hasPendingReclaim()
         || reclaimContinuation) {
       return;
     }
-    if (flushRequest.compareAndSet(future, null)) {
-      future.complete(null);
+    if (flushRequest.compareAndSet(request, null)) {
+      request.future.complete(null);
+    }
+  }
+
+  private int drainAsyncMutations(int limit) {
+    int work = 0;
+    while (work < limit) {
+      FlushRequest barrier = flushRequest.get();
+      AsyncMutationTask next = asyncMutations.peek();
+      if (next == null || (barrier != null && next.sequence > barrier.sequence)) {
+        break;
+      }
+      AsyncMutationTask task = asyncMutations.poll();
+      if (closing || stopping) {
+        asyncRejected.incrementAndGet();
+        task.reject.accept(new IllegalStateException("cache is closing"));
+      } else {
+        try {
+          task.action.run();
+          asyncCompleted.incrementAndGet();
+        } catch (Throwable failure) {
+          asyncFailed.incrementAndGet();
+          task.reject.accept(failure);
+        }
+      }
+      asyncCompletedSequence = task.sequence;
+      work++;
+    }
+    return work;
+  }
+
+  private void rejectPendingAsync(Throwable failure) {
+    rejectAsyncTasks(drainPendingAsyncTasks(), failure);
+  }
+
+  private List<AsyncMutationTask> drainPendingAsyncTasks() {
+    List<AsyncMutationTask> pending = new ArrayList<>();
+    AsyncMutationTask task;
+    while ((task = asyncMutations.poll()) != null) {
+      asyncCompletedSequence = task.sequence;
+      pending.add(task);
+    }
+    return pending;
+  }
+
+  private void rejectAsyncTasks(List<AsyncMutationTask> tasks, Throwable failure) {
+    for (AsyncMutationTask task : tasks) {
+      asyncRejected.incrementAndGet();
+      task.reject.accept(failure);
     }
   }
 
@@ -1192,7 +1369,7 @@ public final class MaintenanceEventLoop
   }
 
   private boolean repairQueuesEmpty() {
-    for (MpscArrayQueue<Entry> queue : repairQueues) {
+    for (ConcurrentLinkedQueue<Entry> queue : repairQueues) {
       if (!queue.isEmpty()) {
         return false;
       }
@@ -1319,11 +1496,10 @@ public final class MaintenanceEventLoop
     }
   }
 
-  /** Compatibility for the actor-focused unit tests and local maintenance probes. */
+  /** Compatibility entry point used by actor-focused tests to apply one current mutation. */
   private void applyEntry(Entry entry) {
     applyEntry(entry, entry.mutationVersion(), Entry.PENDING_UPDATE);
   }
-
   private void republishMutation(Entry entry, int flags) {
     if (!entry.requeueMutation(flags)) {
       return;
@@ -1619,16 +1795,6 @@ public final class MaintenanceEventLoop
       boolean eviction,
       long expectedGeneration,
       long expectedValueAddress,
-      long evictionHash) {
-    return removeFromMap(
-        entry, eviction, expectedGeneration, expectedValueAddress, evictionHash, true, null);
-  }
-
-  private boolean removeFromMap(
-      Entry entry,
-      boolean eviction,
-      long expectedGeneration,
-      long expectedValueAddress,
       long evictionHash,
       RemovalCause cause) {
     return removeFromMap(
@@ -1650,8 +1816,7 @@ public final class MaintenanceEventLoop
       return false;
     }
     boolean removed = false;
-    boolean retirementPrepared = false;
-    long value = 0L;
+      long value = 0L;
     try {
       if (entry.generation() != expectedGeneration || entry.valueAddress != expectedValueAddress) {
         return false;
@@ -1659,8 +1824,7 @@ public final class MaintenanceEventLoop
       if (!prepareActorRetirement(2)) {
         return false;
       }
-      retirementPrepared = true;
-      removed = removeCurrent(entry);
+        removed = removeCurrent(entry);
       if (removed) {
         value = Entry.rawValueAddress(entry.valueAddress);
         entry.clearValue();
@@ -1670,9 +1834,7 @@ public final class MaintenanceEventLoop
       entry.finishWriter();
     }
     if (!removed) {
-      if (retirementPrepared) {
-        retirements.cancelPrefix(actorRetirement, 2);
-      }
+      finishActorRetirementBatch();
       return false;
     }
     wheel.remove(entry);
@@ -1722,6 +1884,7 @@ public final class MaintenanceEventLoop
   }
 
   private void shutdownAndFree() {
+    rejectPendingAsync(new IllegalStateException("cache is closed"));
     finishActorRetirementBatch();
     while (hasActiveReaders()) {
       LockSupport.park(this);
@@ -1733,6 +1896,7 @@ public final class MaintenanceEventLoop
         latestRetireEpoch = epoch;
       }
     }
+    clearPendingMutationQueues();
     for (Entry entry : data.values()) {
       long value = Entry.rawValueAddress(entry.valueAddress);
       entry.clearValue();
@@ -1747,6 +1911,20 @@ public final class MaintenanceEventLoop
     memory.closeArenas();
     budget.returnUnusedCredits();
     budget.clear();
+  }
+
+  private void clearPendingMutationQueues() {
+    while (queue.poll() != null) {
+      // Drop the transport reference without touching entry ownership.
+    }
+    for (ConcurrentLinkedQueue<Entry> repairQueue : repairQueues) {
+      repairQueue.clear();
+    }
+    deferredMutations.clear();
+    repairNeeded.set(false);
+    for (AtomicLong debt : repairDebts) {
+      debt.set(0L);
+    }
   }
 
   private boolean hasActiveReaders() {
@@ -1845,6 +2023,28 @@ public final class MaintenanceEventLoop
     }
   }
 
+  private static final class AsyncMutationTask {
+    private final long sequence;
+    private final Runnable action;
+    private final Consumer<Throwable> reject;
+
+    private AsyncMutationTask(long sequence, Runnable action, Consumer<Throwable> reject) {
+      this.sequence = sequence;
+      this.action = action;
+      this.reject = reject;
+    }
+  }
+
+  private static final class FlushRequest {
+    private final long sequence;
+    private final CompletableFuture<Void> future;
+
+    private FlushRequest(long sequence, CompletableFuture<Void> future) {
+      this.sequence = sequence;
+      this.future = future;
+    }
+  }
+
   public static final class Snapshot {
     public final long hits;
     public final long misses;
@@ -1880,6 +2080,18 @@ public final class MaintenanceEventLoop
     public final long waitCount;
     public final long waitNanos;
     public final long progressVersion;
+    public final long nonBlockingPutFailures;
+    public final long nonBlockingReplaceFailures;
+    public final long nonBlockingRemoveFailures;
+    public final long writerContentionFailures;
+    public final long retirementAdmissionFailures;
+    public final long reliableRemovalAdmissionFailures;
+    public final long nativeAllocationFailures;
+    public final long repairQueueDepth;
+    public final long asyncMutationQueueDepth;
+    public final long asyncMutationCompletedCount;
+    public final long asyncMutationFailedCount;
+    public final long asyncMutationRejectedCount;
 
     Snapshot(
         long hits,
@@ -1915,7 +2127,19 @@ public final class MaintenanceEventLoop
         long assistWork,
         long waitCount,
         long waitNanos,
-        long progressVersion) {
+        long progressVersion,
+        long nonBlockingPutFailures,
+        long nonBlockingReplaceFailures,
+        long nonBlockingRemoveFailures,
+        long writerContentionFailures,
+        long retirementAdmissionFailures,
+        long reliableRemovalAdmissionFailures,
+        long nativeAllocationFailures,
+        long repairQueueDepth,
+        long asyncMutationQueueDepth,
+        long asyncMutationCompletedCount,
+        long asyncMutationFailedCount,
+        long asyncMutationRejectedCount) {
       this.hits = hits;
       this.misses = misses;
       this.accessDropped = accessDropped;
@@ -1950,6 +2174,18 @@ public final class MaintenanceEventLoop
       this.waitCount = waitCount;
       this.waitNanos = waitNanos;
       this.progressVersion = progressVersion;
+      this.nonBlockingPutFailures = nonBlockingPutFailures;
+      this.nonBlockingReplaceFailures = nonBlockingReplaceFailures;
+      this.nonBlockingRemoveFailures = nonBlockingRemoveFailures;
+      this.writerContentionFailures = writerContentionFailures;
+      this.retirementAdmissionFailures = retirementAdmissionFailures;
+      this.reliableRemovalAdmissionFailures = reliableRemovalAdmissionFailures;
+      this.nativeAllocationFailures = nativeAllocationFailures;
+      this.repairQueueDepth = repairQueueDepth;
+      this.asyncMutationQueueDepth = asyncMutationQueueDepth;
+      this.asyncMutationCompletedCount = asyncMutationCompletedCount;
+      this.asyncMutationFailedCount = asyncMutationFailedCount;
+      this.asyncMutationRejectedCount = asyncMutationRejectedCount;
     }
   }
 }

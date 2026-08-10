@@ -67,6 +67,36 @@ public final class Budget {
     }
   }
 
+  /**
+   * Attempts one producer-side reservation without reclaiming another writer's lease or waiting
+   * for the maintenance actor.
+   */
+  public boolean tryReserve(Lease lease, long bytes) {
+    if (lease == null || lease.owner != this) {
+      throw new IllegalArgumentException("foreign budget lease");
+    }
+    if (bytes <= 0L || bytes > capacity) {
+      return false;
+    }
+    long credit = lease.credit;
+    if (credit >= bytes) {
+      lease.credit = credit - bytes;
+      return true;
+    }
+    long needed = bytes - credit;
+    long free = available.get();
+    if (free < needed) {
+      return false;
+    }
+    long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
+    long grant = Math.min(free, request);
+    if (!available.compareAndSet(free, free - grant)) {
+      return false;
+    }
+    lease.credit = credit + grant - bytes;
+    return true;
+  }
+
   public void refund(Lease lease, long bytes) {
     if (bytes <= 0L) {
       return;
@@ -177,23 +207,9 @@ public final class Budget {
       return credit;
     }
 
-    public void activate() {
-      while (true) {
-        int current = state.get();
-        if (current == RECLAIMING) {
-          // The worker owns this short transition only while it transfers the unused
-          // credit back to the global balance. A writer racing that transition must
-          // retry, otherwise an ordinary back-to-back put is reported as a failure.
-          Thread.onSpinWait();
-          continue;
-        }
-        if (current == ACTIVE) {
-          throw new IllegalStateException("budget lease is already active");
-        }
-        if (state.compareAndSet(IDLE, ACTIVE)) {
-          return;
-        }
-      }
+    /** Attempts to activate this lease once; a concurrent maintenance reclaim is a write miss. */
+    public boolean tryActivate() {
+      return state.compareAndSet(IDLE, ACTIVE);
     }
 
     public void deactivate() {

@@ -18,6 +18,7 @@ import org.testng.annotations.Test;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
+import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
 
 public final class MaxSizeTest {
@@ -100,9 +101,9 @@ public final class MaxSizeTest {
     String medium = repeat('m', 8_192);
     String large = repeat('l', 16_384);
     try (OHCache<String, String> cache = newMaxSizeCache(3)) {
-      assertTrue(cache.put("small", small));
-      assertTrue(cache.put("medium", medium));
-      assertTrue(cache.put("large", large));
+      assertPutEventually(cache, "small", small);
+      assertPutEventually(cache, "medium", medium);
+      assertPutEventually(cache, "large", large);
 
       cache.flushAsync().join();
 
@@ -158,7 +159,19 @@ public final class MaxSizeTest {
         task.get();
       }
       cache.flushAsync().join();
-      assertTrue(cache.size() <= 8L);
+      OHCacheStats stats = cache.stats();
+      assertTrue(
+          cache.size() <= 8L,
+          "size="
+              + cache.size()
+              + ", queue="
+              + stats.getMaintenanceQueueDepth()
+              + ", repair="
+              + stats.getRepairQueueDepth()
+              + ", retired="
+              + stats.getRetirementQueueDepth()
+              + ", liveWeight="
+              + stats.getLiveWeight());
     } finally {
       writers.shutdownNow();
     }
@@ -190,6 +203,17 @@ public final class MaxSizeTest {
     char[] result = new char[count];
     java.util.Arrays.fill(result, value);
     return new String(result);
+  }
+
+  private static void assertPutEventually(
+      OHCache<String, String> cache, String key, String value) {
+    for (int attempt = 0; attempt < 1_000; attempt++) {
+      if (cache.put(key, value)) {
+        return;
+      }
+      Thread.yield();
+    }
+    assertTrue(false, "put admission did not succeed for " + key);
   }
 
   private static final class MutableTicker implements Ticker {

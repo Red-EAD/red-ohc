@@ -467,12 +467,23 @@ public final class Entry {
     }
   }
 
+  /** Attempts a reliable-removal claim once; callers must not wait for another producer. */
+  public boolean tryBeginPending(int flags) {
+    if (flags != PENDING_REMOVE) {
+      throw new IllegalArgumentException("invalid pending flags: " + flags);
+    }
+    int current = pendingFlags;
+    return (current & PENDING_CLAIMED) == 0
+        && PENDING.compareAndSet(
+            this, current, current | PENDING_CLAIMED | (flags << PENDING_CLAIM_SHIFT));
+  }
+
   /** Releases a successful reliable removal claim after its retirement records are visible. */
   public void completePendingClaim() {
     if ((pendingFlags & PENDING_CLAIMED) == 0) {
       throw new IllegalStateException("missing pending claim");
     }
-    incrementMutationVersion();
+    tryIncrementMutationVersion();
     while (true) {
       int current = pendingFlags;
       if ((current & PENDING_CLAIMED) == 0) {
@@ -496,66 +507,24 @@ public final class Entry {
     return maintenanceMeta & VERSION_MASK;
   }
 
-  private void incrementMutationVersion() {
-    while (true) {
-      if ((pendingFlags & PENDING_ROLLOVER_CLAIMED) != 0) {
-        // This branch is reachable only once per 2^32 publications for an Entry. The
-        // maintenance owner has claimed the rollover fence and will clear it shortly.
-        LockSupport.parkNanos(this, 1_000L);
-        continue;
-      }
-      long current = maintenanceMeta;
-      long currentVersion = current >>> MUTATION_VERSION_SHIFT;
-      if (currentVersion == VERSION_MASK) {
-        // Do not wrap while the worker may still be applying the final version. The
-        // caller still publishes a coalesced event at VERSION_MASK; the worker resets
-        // both lanes only after that event is drained and no newer flags remain.
-        if (requestRollover()) {
-          return;
-        }
-        continue;
-      }
-      long version = currentVersion + 1L;
-      long next = (current & VERSION_MASK) | (version << MUTATION_VERSION_SHIFT);
-      if (MAINTENANCE.compareAndSet(this, current, next)) {
-        return;
-      }
+  /** Best-effort version publication for producer paths; it never waits for the actor. */
+  private boolean tryIncrementMutationVersion() {
+    int flags = pendingFlags;
+    if ((flags & (PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) != 0) {
+      return false;
     }
-  }
-
-  private boolean requestRollover() {
-    while (true) {
-      int current = pendingFlags;
-      if ((current & PENDING_ROLLOVER_CLAIMED) != 0) {
-        LockSupport.parkNanos(this, 1_000L);
-        continue;
+    long current = maintenanceMeta;
+    long currentVersion = current >>> MUTATION_VERSION_SHIFT;
+    if (currentVersion == VERSION_MASK) {
+      int nextFlags = flags | PENDING_ROLLOVER;
+      if ((flags & PENDING_ROLLOVER) == 0
+          && (flags & PENDING_ROLLOVER_CLAIMED) == 0) {
+        PENDING.compareAndSet(this, flags, nextFlags);
       }
-      if ((current & PENDING_ROLLOVER) != 0) {
-        return false;
-      }
-      if (PENDING.compareAndSet(this, current, current | PENDING_ROLLOVER)) {
-        // The maintenance owner may have completed the fence after the metadata read
-        // above but before this CAS. Do not leave a stale rollover bit behind and make
-        // the following mutation look as if it were still waiting on the old version.
-        if (mutationVersion() != VERSION_MASK) {
-          clearStaleRollover();
-          return false;
-        }
-        return true;
-      }
+      return false;
     }
-  }
-
-  private void clearStaleRollover() {
-    while (true) {
-      int current = pendingFlags;
-      if ((current & PENDING_ROLLOVER) == 0) {
-        return;
-      }
-      if (PENDING.compareAndSet(this, current, current & ~PENDING_ROLLOVER)) {
-        return;
-      }
-    }
+    long next = (current & VERSION_MASK) | ((currentVersion + 1L) << MUTATION_VERSION_SHIFT);
+    return MAINTENANCE.compareAndSet(this, current, next);
   }
 
   /** Clears a fully applied final version. Called by the single maintenance owner. */
@@ -616,7 +585,7 @@ public final class Entry {
     if ((flags & ~(PENDING_ADD | PENDING_UPDATE)) != 0 || flags == 0) {
       throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
     }
-    incrementMutationVersion();
+    tryIncrementMutationVersion();
     while (true) {
       int current = pendingFlags;
       int next = current | flags;

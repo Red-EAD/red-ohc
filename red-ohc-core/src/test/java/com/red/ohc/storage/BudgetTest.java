@@ -118,7 +118,7 @@ public class BudgetTest {
     Budget budget = new Budget(1 << 20);
     Budget.Lease lease = budget.leaseForCurrentThread();
 
-    lease.activate();
+    assertTrue(lease.tryActivate());
     assertTrue(budget.reserve(lease, 64L));
     long activeCredit = lease.credit();
     budget.reclaimIdleLeases();

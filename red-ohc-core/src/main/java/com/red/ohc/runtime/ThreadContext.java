@@ -119,8 +119,8 @@ public final class ThreadContext {
     return budgetLease;
   }
 
-  public void activateWriter() {
-    budgetLease.activate();
+  public boolean tryActivateWriter() {
+    return budgetLease.tryActivate();
   }
 
   public void deactivateWriter() {
