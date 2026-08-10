@@ -689,10 +689,18 @@ public final class MaintenanceEventLoop
 
   /** Completes the pre-reserved removal claim after CHM and retirement records are published. */
   public void publishRemoval(com.red.ohc.runtime.ThreadContext context, Entry entry) {
+    publishRemoval(context, entry, true);
+  }
+
+  /** Completes a removal and optionally defers the wake to the surrounding public batch call. */
+  public void publishRemoval(
+      com.red.ohc.runtime.ThreadContext context, Entry entry, boolean wake) {
     try {
       entry.completePendingClaim();
       reliableRemovals.commit(context.reliableRemoval, entry);
-      signal();
+      if (wake) {
+        signal();
+      }
     } catch (Throwable failure) {
       if (context.reliableRemoval.active()) {
         reliableRemovals.cancel(context.reliableRemoval);

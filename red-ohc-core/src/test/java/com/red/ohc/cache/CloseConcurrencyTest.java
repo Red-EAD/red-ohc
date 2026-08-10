@@ -9,6 +9,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -140,7 +142,7 @@ public class CloseConcurrencyTest {
   }
 
   @Test(timeOut = 5_000L)
-  public void closeDoesNotWaitForHeapOnlyDeserialization() throws Exception {
+  public void closeWaitsForNativeBackedDeserialization() throws Exception {
     CountDownLatch deserializeStarted = new CountDownLatch(1);
     CountDownLatch releaseDeserialize = new CountDownLatch(1);
     CacheSerializer<String> blockingValue =
@@ -180,13 +182,20 @@ public class CloseConcurrencyTest {
       read = reader.submit(() -> cache.get("key"));
       assertTrue(deserializeStarted.await(2L, TimeUnit.SECONDS), "deserialize did not start");
 
-      cache.close();
-      closed = true;
+      try {
+        cache.close();
+        fail("close must wait for the active native-backed deserialization");
+      } catch (IllegalStateException expected) {
+        // The configured close timeout expires while the serializer is still inside the reader
+        // epoch. Releasing it below allows the second close call to finish cleanup.
+      }
     } finally {
       releaseDeserialize.countDown();
       if (read != null) {
         assertEquals(read.get(2L, TimeUnit.SECONDS), "value");
       }
+      cache.close();
+      closed = true;
       reader.shutdownNow();
       if (!closed) {
         cache.close();
@@ -232,6 +241,62 @@ public class CloseConcurrencyTest {
     } finally {
       releaseDirect.countDown();
       callers.shutdownNow();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void closeWaitsForBlockingGetAllDeserializer() throws Exception {
+    CountDownLatch deserializeStarted = new CountDownLatch(1);
+    CountDownLatch releaseDeserialize = new CountDownLatch(1);
+    CacheSerializer<String> blockingValue =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            buffer.put(value.getBytes(StandardCharsets.UTF_8));
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            deserializeStarted.countDown();
+            await(releaseDeserialize);
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            return new String(bytes, StandardCharsets.UTF_8);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return value.getBytes(StandardCharsets.UTF_8).length;
+          }
+        };
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .closeTimeoutMillis(100L)
+            .keySerializer(STRING)
+            .valueSerializer(blockingValue)
+            .buildTyped();
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      assertTrue(cache.put("key", "value"));
+      cache.flushAsync().join();
+      Future<Map<String, String>> read =
+          callers.submit(() -> cache.getAll(Collections.singletonList("key")));
+      assertTrue(deserializeStarted.await(2L, TimeUnit.SECONDS));
+      try {
+        cache.close();
+        fail("close must wait for the active getAll reader");
+      } catch (IllegalStateException expected) {
+        // The timeout is expected while the deserializer owns the reader epoch.
+      }
+      releaseDeserialize.countDown();
+      assertEquals(read.get(2L, TimeUnit.SECONDS).get("key"), "value");
+      cache.close();
+      assertEquals(cache.totalAllocatedBytes(), 0L);
+    } finally {
+      releaseDeserialize.countDown();
+      callers.shutdownNow();
+      cache.close();
     }
   }
 

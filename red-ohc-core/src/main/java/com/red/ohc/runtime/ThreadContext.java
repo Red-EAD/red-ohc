@@ -2,6 +2,8 @@ package com.red.ohc.runtime;
 
 import java.nio.ByteBuffer;
 
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
@@ -11,19 +13,20 @@ import com.red.ohc.storage.Budget;
 import com.red.ohc.storage.WriterArena;
 
 public final class ThreadContext {
+  private static final int MAX_REUSABLE_BULK_KEYS = 4_096;
   public byte[] keyBytes = new byte[64];
-  public byte[] valueBytes = new byte[64];
   public ByteBuffer keyBuffer = ByteBuffer.wrap(keyBytes);
-  public ByteBuffer valueBuffer = ByteBuffer.wrap(valueBytes);
   public final LookupKey lookupKey = new LookupKey();
   public final ReaderSlot slot = new ReaderSlot();
   private DirectValueView[] directViews = new DirectValueView[4];
   private int directViewDepth;
   private int readerDepth;
-  private byte[] bulkPayload = new byte[0];
-  private int[] bulkOffsets = new int[64];
-  private int[] bulkLengths = new int[64];
-  private Object[] bulkKeys = new Object[64];
+  private ByteBuffer writableValueBuffer;
+  private ByteBuffer[] readOnlyValueBuffers = new ByteBuffer[4];
+  private int readOnlyValueDepth;
+  private ObjectOpenHashSet<Object>[] bulkKeySets = new ObjectOpenHashSet[2];
+  private boolean[] reusableBulkKeySets = new boolean[2];
+  private int bulkKeySetDepth;
 
   /**
    * Reusable native-retirement reservation; it is active only across one writer critical section.
@@ -51,17 +54,14 @@ public final class ThreadContext {
     this.budgetLease = budgetLease;
   }
 
+  public static void verifyNativeByteBufferSupported() {
+    NativeByteBuffer.verifySupported();
+  }
+
   public void ensureKey(int length) {
     if (keyBytes.length < length) {
       keyBytes = new byte[round(length)];
       keyBuffer = ByteBuffer.wrap(keyBytes);
-    }
-  }
-
-  public void ensureValue(int length) {
-    if (valueBytes.length < length) {
-      valueBytes = new byte[round(length)];
-      valueBuffer = ByteBuffer.wrap(valueBytes);
     }
   }
 
@@ -71,10 +71,44 @@ public final class ThreadContext {
     return keyBuffer;
   }
 
-  public ByteBuffer valueBuffer(int length) {
-    valueBuffer.clear();
-    valueBuffer.limit(length);
-    return valueBuffer;
+  /** Reuses the direct-buffer shell while each invocation still invalidates it before returning. */
+  public ByteBuffer writableValueBuffer(long address, int length) {
+    if (writableValueBuffer == null) {
+      writableValueBuffer = NativeByteBuffer.writable(address, length);
+    } else {
+      NativeByteBuffer.writable(writableValueBuffer, address, length);
+    }
+    return writableValueBuffer;
+  }
+
+  /** Reuses read-only native views while preserving nested deserialize calls by depth. */
+  public ByteBuffer readOnlyValueBuffer(long address, int length) {
+    if (readOnlyValueDepth == readOnlyValueBuffers.length) {
+      ByteBuffer[] expanded = new ByteBuffer[readOnlyValueBuffers.length << 1];
+      System.arraycopy(readOnlyValueBuffers, 0, expanded, 0, readOnlyValueBuffers.length);
+      readOnlyValueBuffers = expanded;
+    }
+    ByteBuffer buffer = readOnlyValueBuffers[readOnlyValueDepth];
+    if (buffer == null) {
+      buffer = NativeByteBuffer.readOnly(address, length);
+      readOnlyValueBuffers[readOnlyValueDepth] = buffer;
+    } else {
+      NativeByteBuffer.readOnly(buffer, address, length);
+    }
+    readOnlyValueDepth++;
+    return buffer;
+  }
+
+  public void releaseReadOnlyValueBuffer() {
+    if (readOnlyValueDepth <= 0) {
+      throw new IllegalStateException("read-only value buffer is not entered");
+    }
+    ByteBuffer buffer = readOnlyValueBuffers[--readOnlyValueDepth];
+    NativeByteBuffer.invalidate(buffer);
+  }
+
+  public void invalidateWritableValueBuffer(ByteBuffer buffer) {
+    NativeByteBuffer.invalidate(buffer);
   }
 
   public WriterArena writer() {
@@ -135,69 +169,54 @@ public final class ThreadContext {
     directViews[--directViewDepth].reset(0L, 0);
   }
 
-  public byte[] ensureBulkPayload(int required) {
-    if (required < 0) {
-      throw new IllegalArgumentException("bulk payload is too large");
+  /** Acquires per-depth duplicate tracking without retaining a huge collection's table. */
+  @SuppressWarnings("unchecked")
+  public <K> ObjectOpenHashSet<K> acquireBulkKeys(int expected) {
+    if (expected < 0) {
+      throw new IllegalArgumentException("negative bulk key count");
     }
-    if (bulkPayload.length < required) {
-      int previous = bulkPayload.length;
-      int next = bulkPayload.length == 0 ? 256 : bulkPayload.length;
-      while (next < required) {
-        int grown = next << 1;
-        if (grown <= next) {
-          next = required;
-          break;
-        }
-        next = grown;
-      }
-      byte[] expanded = new byte[next];
-      if (previous != 0) {
-        System.arraycopy(bulkPayload, 0, expanded, 0, previous);
-      }
-      bulkPayload = expanded;
+    ensureBulkKeyDepth();
+    int depth = bulkKeySetDepth++;
+    boolean reusable = expected <= MAX_REUSABLE_BULK_KEYS;
+    ObjectOpenHashSet<Object> keys = bulkKeySets[depth];
+    if (!reusable || keys == null) {
+      keys = new ObjectOpenHashSet<>(expected);
+      bulkKeySets[depth] = keys;
+    } else {
+      keys.clear();
+      keys.ensureCapacity(expected);
     }
-    return bulkPayload;
+    reusableBulkKeySets[depth] = reusable;
+    return (ObjectOpenHashSet<K>) keys;
   }
 
-  public void ensureBulkSlots(int required) {
-    if (required <= bulkKeys.length) {
+  /** Releases a duplicate table while preserving nested bulk-call isolation. */
+  public void releaseBulkKeys(Object keys) {
+    if (bulkKeySetDepth <= 0) {
+      throw new IllegalStateException("bulk key set is not acquired");
+    }
+    int depth = --bulkKeySetDepth;
+    if (bulkKeySets[depth] != keys) {
+      throw new IllegalStateException("bulk key set release order mismatch");
+    }
+    ((ObjectOpenHashSet<?>) keys).clear();
+    if (!reusableBulkKeySets[depth]) {
+      bulkKeySets[depth] = null;
+    }
+    reusableBulkKeySets[depth] = false;
+  }
+
+  private void ensureBulkKeyDepth() {
+    if (bulkKeySetDepth < bulkKeySets.length) {
       return;
     }
-    int next = bulkKeys.length;
-    while (next < required) {
-      next <<= 1;
-    }
-    int[] offsets = new int[next];
-    int[] lengths = new int[next];
-    Object[] keys = new Object[next];
-    System.arraycopy(bulkOffsets, 0, offsets, 0, bulkOffsets.length);
-    System.arraycopy(bulkLengths, 0, lengths, 0, bulkLengths.length);
-    System.arraycopy(bulkKeys, 0, keys, 0, bulkKeys.length);
-    bulkOffsets = offsets;
-    bulkLengths = lengths;
-    bulkKeys = keys;
-  }
-
-  public byte[] bulkPayload() {
-    return bulkPayload;
-  }
-
-  public int[] bulkOffsets() {
-    return bulkOffsets;
-  }
-
-  public int[] bulkLengths() {
-    return bulkLengths;
-  }
-
-  public Object[] bulkKeys() {
-    return bulkKeys;
-  }
-
-  public void clearBulk(int count) {
-    for (int i = 0; i < count; i++) {
-      bulkKeys[i] = null;
-    }
+    int expandedLength = bulkKeySets.length << 1;
+    ObjectOpenHashSet<Object>[] expanded = new ObjectOpenHashSet[expandedLength];
+    boolean[] expandedReusable = new boolean[expandedLength];
+    System.arraycopy(bulkKeySets, 0, expanded, 0, bulkKeySets.length);
+    System.arraycopy(reusableBulkKeySets, 0, expandedReusable, 0, reusableBulkKeySets.length);
+    bulkKeySets = expanded;
+    reusableBulkKeySets = expandedReusable;
   }
 
   public void markRegistered() {
@@ -330,7 +349,7 @@ public final class ThreadContext {
 
   private static int round(int value) {
     if (value < 0 || value > (1 << 30)) {
-      throw new IllegalArgumentException("serialized value is too large: " + value);
+      throw new IllegalArgumentException("serialized key is too large: " + value);
     }
     long size = 64L;
     while (size < value) {

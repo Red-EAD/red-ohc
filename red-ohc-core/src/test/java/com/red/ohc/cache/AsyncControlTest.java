@@ -2,10 +2,12 @@ package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -219,10 +221,165 @@ public class AsyncControlTest {
     }
   }
 
+  @Test(timeOut = 10_000L)
+  public void getOrLoadMissReusesOneEncodedKeyAndReturnsLoadedObject() throws Exception {
+    CountingSerializer keySerializer = new CountingSerializer();
+    CountingSerializer valueSerializer = new CountingSerializer();
+    ExecutorService loaderExecutor = Executors.newSingleThreadExecutor();
+    byte[] key = bytes(24, 7);
+    byte[] loaded = bytes(5 * 1024, 11);
+    try (OHCache<byte[], byte[]> cache =
+        newCache(keySerializer, valueSerializer, loaderExecutor)) {
+      byte[] result = cache.getOrLoadAsync(key, ignored -> loaded, 0L).get();
+
+      assertSame(result, loaded);
+      assertEquals(keySerializer.sizeCalls.get(), 1);
+      assertEquals(keySerializer.serializeCalls.get(), 1);
+      assertEquals(valueSerializer.deserializeCalls.get(), 0);
+    } finally {
+      loaderExecutor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void replaceMismatchDoesNotSerializeReplacementValue() {
+    byte[] key = bytes(24, 1);
+    byte[] oldValue = bytes(5 * 1024, 2);
+    byte[] wrongExpected = bytes(5 * 1024, 3);
+    byte[] replacement = bytes(5 * 1024, 4);
+    TrackingValueSerializer values = new TrackingValueSerializer(wrongExpected, replacement);
+
+    try (OHCache<byte[], byte[]> cache =
+        newCache(new CountingSerializer(), values, Runnable::run)) {
+      assertTrue(cache.put(key, oldValue));
+      values.reset();
+
+      assertFalse(cache.replaceAsync(key, wrongExpected, replacement, 0L).join());
+      assertEquals(values.expectedSizeCalls.get(), 1);
+      assertEquals(values.expectedSerializeCalls.get(), 1);
+      assertEquals(values.replacementSizeCalls.get(), 0);
+      assertEquals(values.replacementSerializeCalls.get(), 0);
+      assertTrue(Arrays.equals(oldValue, cache.get(key)));
+    }
+  }
+
+  @Test
+  public void replaceMissingKeyDoesNotSerializeExpectedOrReplacement() {
+    byte[] key = bytes(24, 5);
+    byte[] expected = bytes(5 * 1024, 6);
+    byte[] replacement = bytes(5 * 1024, 7);
+    TrackingValueSerializer values = new TrackingValueSerializer(expected, replacement);
+
+    try (OHCache<byte[], byte[]> cache =
+        newCache(new CountingSerializer(), values, Runnable::run)) {
+      assertFalse(cache.replaceAsync(key, expected, replacement, 0L).join());
+      assertEquals(values.expectedSizeCalls.get(), 0);
+      assertEquals(values.expectedSerializeCalls.get(), 0);
+      assertEquals(values.replacementSizeCalls.get(), 0);
+      assertEquals(values.replacementSerializeCalls.get(), 0);
+    }
+  }
+
+  @Test
+  public void replaceExpiredKeyDoesNotSerializeExpectedOrReplacement() {
+    AtomicInteger now = new AtomicInteger();
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return now.get() * 1_000_000L;
+          }
+
+          @Override
+          public long currentTimeMillis() {
+            return now.get();
+          }
+        };
+    byte[] key = bytes(24, 12);
+    byte[] oldValue = bytes(5 * 1024, 13);
+    byte[] expected = bytes(5 * 1024, 14);
+    byte[] replacement = bytes(5 * 1024, 15);
+    TrackingValueSerializer values = new TrackingValueSerializer(expected, replacement);
+
+    try (OffHeapCache<byte[], byte[]> cache =
+        (OffHeapCache<byte[], byte[]>)
+            OHCacheBuilder.<byte[], byte[]>newBuilder()
+                .capacity(16L << 20)
+                .ticker(ticker)
+                .keySerializer(new CountingSerializer())
+                .valueSerializer(values)
+                .build()) {
+      assertTrue(cache.put(key, oldValue, 10L));
+      values.reset();
+      now.set(10);
+
+      assertFalse(cache.replaceAsync(key, expected, replacement, 0L).join());
+      assertEquals(values.expectedSizeCalls.get(), 0);
+      assertEquals(values.expectedSerializeCalls.get(), 0);
+      assertEquals(values.replacementSizeCalls.get(), 0);
+      assertEquals(values.replacementSerializeCalls.get(), 0);
+    }
+  }
+
+  @Test
+  public void replaceMatchSerializesReplacementOnceAndPublishesIt() {
+    byte[] key = bytes(24, 8);
+    byte[] oldValue = bytes(5 * 1024, 9);
+    byte[] replacement = bytes(5 * 1024, 10);
+    TrackingValueSerializer values = new TrackingValueSerializer(oldValue, replacement);
+
+    try (OHCache<byte[], byte[]> cache =
+        newCache(new CountingSerializer(), values, Runnable::run)) {
+      assertTrue(cache.put(key, oldValue));
+      values.reset();
+
+      assertTrue(cache.replaceAsync(key, oldValue, replacement, 0L).join());
+      assertEquals(values.expectedSizeCalls.get(), 1);
+      assertEquals(values.expectedSerializeCalls.get(), 1);
+      assertEquals(values.replacementSizeCalls.get(), 1);
+      assertEquals(values.replacementSerializeCalls.get(), 1);
+      assertTrue(Arrays.equals(replacement, cache.get(key)));
+    }
+  }
+
+  @Test
+  public void replacementSerializationFailureLeavesOldValueAndReleasesNativeMemory() {
+    byte[] key = bytes(24, 16);
+    byte[] oldValue = bytes(5 * 1024, 17);
+    byte[] replacement = bytes(5 * 1024, 18);
+    ThrowingReplacementSerializer values = new ThrowingReplacementSerializer(replacement);
+    OffHeapCache<byte[], byte[]> cache =
+        (OffHeapCache<byte[], byte[]>)
+            OHCacheBuilder.<byte[], byte[]>newBuilder()
+                .capacity(16L << 20)
+                .keySerializer(new CountingSerializer())
+                .valueSerializer(values)
+                .build();
+    try {
+      assertTrue(cache.put(key, oldValue));
+      try {
+        cache.replaceAsync(key, oldValue, replacement, 0L);
+        throw new AssertionError("replacement serializer failure must be propagated");
+      } catch (IllegalStateException expected) {
+        assertTrue(expected.getMessage().contains("replacement serialization failed"));
+      }
+      assertTrue(Arrays.equals(oldValue, cache.get(key)));
+    } finally {
+      cache.close();
+    }
+    assertEquals(cache.totalAllocatedBytes(), 0L);
+  }
+
   private static String repeat(char value, int length) {
     char[] chars = new char[length];
     java.util.Arrays.fill(chars, value);
     return new String(chars);
+  }
+
+  private static byte[] bytes(int length, int seed) {
+    byte[] result = new byte[length];
+    Arrays.fill(result, (byte) seed);
+    return result;
   }
 
   private static final class MutableTicker implements Ticker {
@@ -250,5 +407,101 @@ public class AsyncControlTest {
         .valueSerializer(STRING)
         .loaderExecutor(executor)
         .build();
+  }
+
+  private static OHCache<byte[], byte[]> newCache(
+      CacheSerializer<byte[]> keySerializer,
+      CacheSerializer<byte[]> valueSerializer,
+      Executor loaderExecutor) {
+    return OHCacheBuilder.<byte[], byte[]>newBuilder()
+        .capacity(16L << 20)
+        .keySerializer(keySerializer)
+        .valueSerializer(valueSerializer)
+        .loaderExecutor(loaderExecutor)
+        .build();
+  }
+
+  private static class CountingSerializer implements CacheSerializer<byte[]> {
+    final AtomicInteger sizeCalls = new AtomicInteger();
+    final AtomicInteger serializeCalls = new AtomicInteger();
+    final AtomicInteger deserializeCalls = new AtomicInteger();
+
+    @Override
+    public void serialize(byte[] value, ByteBuffer buffer) {
+      serializeCalls.incrementAndGet();
+      buffer.put(value);
+    }
+
+    @Override
+    public byte[] deserialize(ByteBuffer buffer) {
+      deserializeCalls.incrementAndGet();
+      byte[] result = new byte[buffer.remaining()];
+      buffer.get(result);
+      return result;
+    }
+
+    @Override
+    public int serializedSize(byte[] value) {
+      sizeCalls.incrementAndGet();
+      return value.length;
+    }
+  }
+
+  private static final class ThrowingReplacementSerializer extends CountingSerializer {
+    private final byte[] replacement;
+
+    ThrowingReplacementSerializer(byte[] replacement) {
+      this.replacement = replacement;
+    }
+
+    @Override
+    public void serialize(byte[] value, ByteBuffer buffer) {
+      if (value == replacement) {
+        throw new IllegalStateException("replacement serialization failed");
+      }
+      super.serialize(value, buffer);
+    }
+  }
+
+  private static final class TrackingValueSerializer extends CountingSerializer {
+    private final byte[] expected;
+    private final byte[] replacement;
+    final AtomicInteger expectedSizeCalls = new AtomicInteger();
+    final AtomicInteger expectedSerializeCalls = new AtomicInteger();
+    final AtomicInteger replacementSizeCalls = new AtomicInteger();
+    final AtomicInteger replacementSerializeCalls = new AtomicInteger();
+
+    TrackingValueSerializer(byte[] expected, byte[] replacement) {
+      this.expected = expected;
+      this.replacement = replacement;
+    }
+
+    void reset() {
+      expectedSizeCalls.set(0);
+      expectedSerializeCalls.set(0);
+      replacementSizeCalls.set(0);
+      replacementSerializeCalls.set(0);
+    }
+
+    @Override
+    public void serialize(byte[] value, ByteBuffer buffer) {
+      super.serialize(value, buffer);
+      if (value == expected) {
+        expectedSerializeCalls.incrementAndGet();
+      } else if (value == replacement) {
+        replacementSerializeCalls.incrementAndGet();
+      }
+    }
+
+    @Override
+    public int serializedSize(byte[] value) {
+      int length = super.serializedSize(value);
+      if (value == expected) {
+        expectedSizeCalls.incrementAndGet();
+      } else if (value == replacement) {
+        replacementSizeCalls.incrementAndGet();
+      }
+      return length;
+    }
   }
 }

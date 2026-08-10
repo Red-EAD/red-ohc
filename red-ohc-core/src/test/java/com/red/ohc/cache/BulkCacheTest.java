@@ -6,10 +6,12 @@ import static org.testng.Assert.assertTrue;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractCollection;
 import java.util.AbstractMap;
 import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -147,7 +149,7 @@ public class BulkCacheTest {
   }
 
   @Test
-  public void directAllCrossesReaderBatchesAndReleasesTheReaderEpoch() throws Exception {
+  public void directAllKeepsOneReaderEpochForTheWholeCollection() throws Exception {
     try (OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
@@ -165,10 +167,42 @@ public class BulkCacheTest {
 
       AtomicInteger callbacks = new AtomicInteger();
       AtomicBoolean observedReaderEpoch = new AtomicBoolean();
+      AtomicBoolean readerActiveAtBoundary = new AtomicBoolean();
       com.red.ohc.runtime.ThreadContext context = threadContext(cache);
+      Collection<String> boundedKeys =
+          new AbstractCollection<String>() {
+            @Override
+            public Iterator<String> iterator() {
+              Iterator<String> delegate = values.keySet().iterator();
+              return new Iterator<String>() {
+                private int seen;
+                private boolean boundaryRecorded;
+
+                @Override
+                public boolean hasNext() {
+                  if (seen == 512 && !boundaryRecorded) {
+                    boundaryRecorded = true;
+                    readerActiveAtBoundary.set(context.readerDepth() > 0);
+                  }
+                  return delegate.hasNext();
+                }
+
+                @Override
+                public String next() {
+                  seen++;
+                  return delegate.next();
+                }
+              };
+            }
+
+            @Override
+            public int size() {
+              return values.size();
+            }
+          };
       int hits =
           cache.getDirectAll(
-              values.keySet(),
+              boundedKeys,
               (key, value) -> {
                 callbacks.incrementAndGet();
                 if (context.slot.epoch != 0L) {
@@ -180,6 +214,7 @@ public class BulkCacheTest {
       assertEquals(hits, values.size());
       assertEquals(callbacks.get(), values.size());
       assertTrue(observedReaderEpoch.get());
+      assertTrue(readerActiveAtBoundary.get());
       assertEquals(context.readerDepth(), 0);
       assertEquals(context.slot.epoch, 0L);
     }
@@ -339,6 +374,7 @@ public class BulkCacheTest {
           assertEquals(
               cache.get(entry.getKey()), entry.getValue(), "putAll visibility at boundary " + size);
         }
+        assertEquals(cache.getAll(values.keySet()), values, "getAll at boundary " + size);
         assertEquals(
             cache.removeAll(new ArrayList<>(values.keySet())),
             size,
@@ -392,7 +428,7 @@ public class BulkCacheTest {
   }
 
   @Test
-  public void putAllKeepsWriterAdmissionAcrossEach512EntryBatch() throws Exception {
+  public void putAllKeepsWriterAdmissionForTheWholeCollection() throws Exception {
     try (OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
@@ -407,6 +443,7 @@ public class BulkCacheTest {
       }
       com.red.ohc.runtime.ThreadContext context = threadContext(cache);
       ArrayList<Boolean> writerStates = new ArrayList<>();
+      ArrayList<Boolean> writerStatesAtBatchBoundary = new ArrayList<>();
       Map<String, String> observed =
           new AbstractMap<String, String>() {
             @Override
@@ -416,14 +453,22 @@ public class BulkCacheTest {
                 public Iterator<Entry<String, String>> iterator() {
                   Iterator<Entry<String, String>> delegate = values.entrySet().iterator();
                   return new Iterator<Entry<String, String>>() {
+                    private int seen;
+                    private boolean boundaryRecorded;
+
                     @Override
                     public boolean hasNext() {
+                      if (seen == 512 && !boundaryRecorded) {
+                        boundaryRecorded = true;
+                        writerStatesAtBatchBoundary.add(context.slot.writerActive);
+                      }
                       return delegate.hasNext();
                     }
 
                     @Override
                     public Entry<String, String> next() {
                       writerStates.add(context.slot.writerActive);
+                      seen++;
                       return delegate.next();
                     }
 
@@ -446,8 +491,66 @@ public class BulkCacheTest {
       assertEquals(writerStates.size(), values.size());
       for (Boolean writerActive : writerStates) {
         assertTrue(
-            writerActive, "putAll must keep writer admission for the active 512-entry batch");
+            writerActive, "putAll must keep writer admission for each mutation");
       }
+      assertEquals(
+          writerStatesAtBatchBoundary,
+          Arrays.asList(true),
+          "putAll must keep writer admission for the whole collection");
+    }
+  }
+
+  @Test
+  public void removeAllKeepsWriterAdmissionForTheWholeCollection() throws Exception {
+    try (OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>)
+            OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 23)
+                .expectedEntries(1_024)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+      Map<String, String> values = new LinkedHashMap<>();
+      for (int index = 0; index < 513; index++) {
+        values.put("remove-writer-key-" + index, "remove-writer-value-" + index);
+      }
+      assertEquals(cache.putAll(values), values.size());
+      com.red.ohc.runtime.ThreadContext context = threadContext(cache);
+      AtomicBoolean writerActiveAtBoundary = new AtomicBoolean();
+      Collection<String> keys =
+          new AbstractCollection<String>() {
+            @Override
+            public Iterator<String> iterator() {
+              Iterator<String> delegate = values.keySet().iterator();
+              return new Iterator<String>() {
+                private int seen;
+                private boolean boundaryRecorded;
+
+                @Override
+                public boolean hasNext() {
+                  if (seen == 512 && !boundaryRecorded) {
+                    boundaryRecorded = true;
+                    writerActiveAtBoundary.set(context.slot.writerActive);
+                  }
+                  return delegate.hasNext();
+                }
+
+                @Override
+                public String next() {
+                  seen++;
+                  return delegate.next();
+                }
+              };
+            }
+
+            @Override
+            public int size() {
+              return values.size();
+            }
+          };
+
+      assertEquals(cache.removeAll(keys), values.size());
+      assertTrue(writerActiveAtBoundary.get());
     }
   }
 
@@ -660,7 +763,7 @@ public class BulkCacheTest {
   }
 
   @Test
-  public void bulkReadStartsDeserializingAfterTheFirst512KeyBatch() {
+  public void bulkReadDeserializesEachHitImmediatelyInsideTheReaderEpoch() {
     AtomicInteger encodedKeys = new AtomicInteger();
     AtomicInteger deserializations = new AtomicInteger();
     AtomicInteger firstDeserializeAfterKeys = new AtomicInteger();
@@ -720,8 +823,8 @@ public class BulkCacheTest {
       assertEquals(cache.getAll(values.keySet()).size(), values.size());
       assertEquals(
           firstDeserializeAfterKeys.get(),
-          512,
-          "getAll must deserialize a completed reader batch before scanning the next batch");
+          1,
+          "getAll must deserialize each hit while its reader epoch is active");
     }
   }
 
@@ -766,9 +869,9 @@ public class BulkCacheTest {
   }
 
   @Test
-  public void bulkDeserializationRunsAfterTheReaderEpochIsReleased() throws Exception {
+  public void bulkDeserializationRunsInsideTheReaderEpoch() throws Exception {
     AtomicReference<com.red.ohc.runtime.ThreadContext> context = new AtomicReference<>();
-    AtomicBoolean deserializedOutsideEpoch = new AtomicBoolean();
+    AtomicBoolean deserializedInsideEpoch = new AtomicBoolean();
     CacheSerializer<String> checkingValueSerializer =
         new CacheSerializer<String>() {
           @Override
@@ -778,7 +881,7 @@ public class BulkCacheTest {
 
           @Override
           public String deserialize(ByteBuffer buffer) {
-            deserializedOutsideEpoch.set(context.get().slot.epoch == 0L);
+            deserializedInsideEpoch.set(context.get().slot.epoch != 0L);
             return STRING.deserialize(buffer);
           }
 
@@ -794,14 +897,54 @@ public class BulkCacheTest {
                 .keySerializer(STRING)
                 .valueSerializer(checkingValueSerializer)
                 .build()) {
-      assertTrue(cache.put("key", "value"));
+      Map<String, String> values = new LinkedHashMap<>();
+      for (int index = 0; index < 513; index++) {
+        values.put("epoch-key-" + index, "value-" + index);
+      }
+      assertEquals(cache.putAll(values), values.size());
       cache.flushAsync().join();
       context.set(threadContext(cache));
 
-      assertEquals(cache.getAll(Arrays.asList("key")).get("key"), "value");
+      AtomicBoolean readerActiveAtBatchBoundary = new AtomicBoolean();
+      Collection<String> boundedKeys =
+          new AbstractCollection<String>() {
+            @Override
+            public Iterator<String> iterator() {
+              Iterator<String> delegate = values.keySet().iterator();
+              return new Iterator<String>() {
+                private int seen;
+                private boolean boundaryRecorded;
+
+                @Override
+                public boolean hasNext() {
+                  if (seen == 512 && !boundaryRecorded) {
+                    boundaryRecorded = true;
+                    readerActiveAtBatchBoundary.set(context.get().readerDepth() > 0);
+                  }
+                  return delegate.hasNext();
+                }
+
+                @Override
+                public String next() {
+                  seen++;
+                  return delegate.next();
+                }
+              };
+            }
+
+            @Override
+            public int size() {
+              return values.size();
+            }
+          };
+
+      assertEquals(cache.getAll(boundedKeys).size(), values.size());
       assertTrue(
-          deserializedOutsideEpoch.get(),
-          "getAll must deserialize only after it releases its QSBR reader epoch");
+          deserializedInsideEpoch.get(),
+          "getAll must deserialize while its QSBR reader epoch is active");
+      assertTrue(
+          readerActiveAtBatchBoundary.get(),
+          "getAll must keep one reader epoch for the whole collection");
     }
   }
 

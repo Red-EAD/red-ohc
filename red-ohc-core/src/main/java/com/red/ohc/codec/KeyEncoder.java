@@ -16,6 +16,10 @@ public final class KeyEncoder {
     context.ensureKey(length);
     ByteBuffer buffer = context.keyBuffer(length);
     serializer.serialize(key, buffer);
+    if (buffer.position() != length) {
+      throw new IllegalArgumentException(
+          "key serializer wrote " + buffer.position() + " bytes, expected " + length);
+    }
     context.lookupKey.set(context.keyBytes, length);
     return length;
   }
