@@ -22,6 +22,7 @@ public final class OHCacheBuilder<K, V> {
   private Ticker ticker = Ticker.DEFAULT;
   private Eviction eviction = Eviction.S3_FIFO;
   private EvictionListener<K, V> evictionListener;
+  private boolean weakValues;
   private AllocatorType allocatorType = AllocatorType.JNA;
   private Executor loaderExecutor;
   private long closeTimeoutMillis = 30_000L;
@@ -97,6 +98,22 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
+  /**
+   * Enables weak reuse of deserialized Java values.
+   *
+   * <p>The option is disabled by default. A value serializer whose generic type resolves to
+   * {@link java.nio.ByteBuffer} is rejected during {@link #build()}. Java generic erasure can make
+   * that type undecidable; such serializers are checked again when values are written or
+   * deserialized. ByteBuffer values are never accepted while this option is enabled. A weak hit
+   * may return the same Java object supplied to a cache write, so callers should prefer immutable
+   * values. Mutating a value in place does not update the native authoritative copy; write a new
+   * value again to synchronize it.
+   */
+  public OHCacheBuilder<K, V> weakValues(boolean enabled) {
+    this.weakValues = enabled;
+    return this;
+  }
+
   public OHCacheBuilder<K, V> allocator(AllocatorType allocatorType) {
     this.allocatorType = Objects.requireNonNull(allocatorType, "allocatorType");
     return this;
@@ -123,6 +140,10 @@ public final class OHCacheBuilder<K, V> {
     if (keySerializer == null || valueSerializer == null) {
       throw new IllegalStateException("both keySerializer and valueSerializer are required");
     }
+    if (weakValues && SerializerTypeResolver.resolvesToByteBuffer(valueSerializer)) {
+      throw new IllegalArgumentException(
+          "weakValues(true) does not support ByteBuffer values; use weakValues(false) or a non-ByteBuffer value type");
+    }
     long effectiveMaxEntrySize = maxEntrySize == 0L ? capacity : maxEntrySize;
     return new OffHeapCache<>(
         keySerializer,
@@ -135,6 +156,7 @@ public final class OHCacheBuilder<K, V> {
         ticker,
         eviction,
         evictionListener,
+        weakValues,
         capacity,
         effectiveMaxEntrySize,
         expectedEntries);

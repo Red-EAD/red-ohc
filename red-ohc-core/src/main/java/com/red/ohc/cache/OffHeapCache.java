@@ -56,6 +56,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final CacheSerializer<K> keySerializer;
   private final CacheSerializer<V> valueSerializer;
   private final EvictionListener<K, V> evictionListener;
+  private final boolean weakValues;
   private final Ticker ticker;
   private final long defaultTtlMillis;
   private final double ttlJitterPercent;
@@ -91,6 +92,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Ticker ticker,
       Eviction eviction,
       EvictionListener<K, V> evictionListener,
+      boolean weakValues,
       long capacity,
       long maxEntrySize,
       long expectedEntries) {
@@ -98,6 +100,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.keySerializer = keySerializer;
     this.valueSerializer = valueSerializer;
     this.evictionListener = evictionListener;
+    this.weakValues = weakValues;
     this.ticker = ticker;
     this.defaultTtlMillis = defaultTtlMillis;
     this.ttlJitterPercent = ttlJitterPercent;
@@ -169,7 +172,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                       context,
                       valueSerializer,
                       ValueBlock.payloadAddress(valueAddress),
-                      valueLength));
+                      valueLength,
+                      weakValues));
       listener.onEviction(key, value, cause);
     } catch (Throwable ignored) {
       // Listener and lazy-deserialization failures must not prevent native retirement.
@@ -185,9 +189,23 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private static <T> T deserialize(
       ThreadContext context, CacheSerializer<T> serializer, long address, int length) {
+    return deserialize(context, serializer, address, length, false);
+  }
+
+  private static <T> T deserialize(
+      ThreadContext context,
+      CacheSerializer<T> serializer,
+      long address,
+      int length,
+      boolean rejectByteBuffer) {
     ByteBuffer buffer = context.readOnlyValueBuffer(address, length);
     try {
-      return serializer.deserialize(buffer);
+      T result = serializer.deserialize(buffer);
+      if (rejectByteBuffer && result instanceof ByteBuffer) {
+        throw new IllegalArgumentException(
+            "weakValues(true) does not support ByteBuffer values; use weakValues(false) or a non-ByteBuffer value type");
+      }
+      return result;
     } finally {
       context.releaseReadOnlyValueBuffer();
     }
@@ -243,6 +261,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private boolean putInternal(K key, V value, long expireAtMillis) {
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(value, "value");
+    rejectByteBufferValue(value);
     ThreadContext context = enterWriter();
     if (context == null) {
       throw new IllegalStateException("cache is closed");
@@ -263,6 +282,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ThreadContext context, K key, V value, long expireAtMillis, boolean deferMaintenanceWake) {
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(value, "value");
+    rejectByteBufferValue(value);
     int keyLength = KeyEncoder.encode(keySerializer, key, context);
     int valueLength = serializedSize(valueSerializer, value);
     return putSerialized(
@@ -328,6 +348,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int valueLength,
       long requestedExpiry,
       boolean deferMaintenanceWake) {
+    if (value != null) {
+      rejectByteBufferValue(value);
+    }
     if (keyLength < 0 || valueLength < 0 || (long) keyLength + valueLength > maxEntrySize) {
       throw new IllegalArgumentException("serialized entry exceeds maxEntrySize=" + maxEntrySize);
     }
@@ -469,7 +492,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
         return 0;
       }
-      entry.valueAddress = Entry.tagValueAddress(replacement, expireAtMillis > 0L);
+      long newTaggedValue = Entry.tagValueAddress(replacement, expireAtMillis > 0L);
+      Entry.WeakValueSlot newWeakValue =
+          prepareWeakValue(value, valueBytes, newTaggedValue);
+      entry.publishValue(newTaggedValue, newWeakValue);
       published = true;
       worker.retireValue(context, old, oldAllocation);
       entry.finishWriter();
@@ -541,12 +567,18 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       valueAddress = arena.allocate(valueAllocation);
       ValueBlock.initialize(valueAddress, expireAtMillis, valueLength);
       writeValue(context, ValueBlock.payloadAddress(valueAddress), value, valueBytes, valueLength);
-      return new Entry(
-          keyAddress,
-          keyLength,
-          hash,
-          hash64,
-          Entry.tagValueAddress(valueAddress, expireAtMillis > 0L));
+      Entry entry =
+          new Entry(
+              keyAddress,
+              keyLength,
+              hash,
+              hash64,
+              Entry.tagValueAddress(valueAddress, expireAtMillis > 0L));
+      if (weakValues) {
+        entry.initializeValueState(
+            entry.valueAddress, prepareWeakValue(value, valueBytes, entry.valueAddress));
+      }
+      return entry;
     } catch (NativeMemory.AllocationLimitException rejected) {
       if (valueAddress != 0L) {
         freeBlock(valueAddress, valueAllocation);
@@ -619,7 +651,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           long value = Entry.rawValueAddress(entry.valueAddress);
           long valueAllocation =
               value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
-          entry.valueAddress = 0L;
+          entry.clearValue();
           worker.retireValue(context, value, valueAllocation);
           worker.retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
           entry.finishWriter();
@@ -669,11 +701,25 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return null;
       }
       hit(context, entry);
+      Entry.ValueState observedState = entry.valueState();
+      V cached = weakValue(entry, value, observedState);
+      if (cached != null) {
+        return cached;
+      }
+      long taggedValue = observedState == null ? 0L : observedState.taggedValueAddress();
+      if (Entry.rawValueAddress(taggedValue) != value || entry.valueAddress != taggedValue) {
+        taggedValue = 0L;
+      }
       int length = ValueBlock.length(value);
       ByteBuffer serializedValue =
           context.readOnlyValueBuffer(ValueBlock.payloadAddress(value), length);
       serializedValueEntered = true;
-      return valueSerializer.deserialize(serializedValue);
+      V result = valueSerializer.deserialize(serializedValue);
+      rejectByteBufferValue(result);
+      if (taggedValue != 0L) {
+        publishWeakValueIfCurrent(entry, result, taggedValue, observedState);
+      }
+      return result;
     } finally {
       if (serializedValueEntered) {
         context.releaseReadOnlyValueBuffer();
@@ -836,6 +882,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         Map.Entry<? extends K, ? extends V> entry = iterator.next();
         K key = Objects.requireNonNull(entry.getKey(), "key");
         V value = Objects.requireNonNull(entry.getValue(), "value");
+        rejectByteBufferValue(value);
         if (isClosing()) {
           throw new IllegalStateException("cache is closed");
         }
@@ -885,11 +932,26 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           context.bulkMiss();
         } else {
           context.bulkHit(entry);
+          Entry.ValueState observedState = entry.valueState();
+          V cached = weakValue(entry, value, observedState);
+          if (cached != null) {
+            result.put(key, cached);
+            continue;
+          }
+          long taggedValue = observedState == null ? 0L : observedState.taggedValueAddress();
+          if (Entry.rawValueAddress(taggedValue) != value || entry.valueAddress != taggedValue) {
+            taggedValue = 0L;
+          }
           int length = ValueBlock.length(value);
           ByteBuffer serializedValue =
               context.readOnlyValueBuffer(ValueBlock.payloadAddress(value), length);
           try {
-            result.put(key, valueSerializer.deserialize(serializedValue));
+            V deserialized = valueSerializer.deserialize(serializedValue);
+            rejectByteBufferValue(deserialized);
+            result.put(key, deserialized);
+            if (taggedValue != 0L) {
+              publishWeakValueIfCurrent(entry, deserialized, taggedValue, observedState);
+            }
           } finally {
             context.releaseReadOnlyValueBuffer();
           }
@@ -952,6 +1014,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   public CompletableFuture<Boolean> putIfAbsentAsync(K key, V value, long expireAtMillis) {
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(value, "value");
+    rejectByteBufferValue(value);
     ThreadContext context = enterWriter();
     if (context == null) {
       throw new IllegalStateException("cache is closed");
@@ -973,6 +1036,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int keyLength,
       Object value,
       long expireAtMillis) {
+    rejectByteBufferValue(value);
     while (true) {
       worker.awaitMutationAdmission();
       Entry current;
@@ -1071,7 +1135,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               && removeCurrent(entry);
       if (removed) {
         long valueAllocation = ValueBlock.allocationLength(ValueBlock.length(value));
-        entry.valueAddress = 0L;
+        entry.clearValue();
         worker.retireValue(context, value, valueAllocation);
         worker.retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
         entry.finishWriter();
@@ -1102,6 +1166,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(expected, "expected");
     Objects.requireNonNull(value, "value");
+    rejectByteBufferValue(value);
     ThreadContext context = enterWriter();
     if (context == null) {
       throw new IllegalStateException("cache is closed");
@@ -1160,6 +1225,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int expectedLength,
       Object value,
       long expireAtMillis) {
+    rejectByteBufferValue(value);
     while (true) {
       worker.awaitMutationAdmission();
       if (!claimWriter(entry)) {
@@ -1208,7 +1274,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           worker.requestMaintenance();
         } else {
           retirementPrepared = true;
-          entry.valueAddress = Entry.tagValueAddress(replacement, expireAtMillis > 0L);
+          long newTaggedValue = Entry.tagValueAddress(replacement, expireAtMillis > 0L);
+          Entry.WeakValueSlot newWeakValue =
+              prepareWeakValue(value, null, newTaggedValue);
+          entry.publishValue(newTaggedValue, newWeakValue);
           published = true;
           worker.retireValue(context, old, oldAllocation);
           entry.finishWriter();
@@ -1693,6 +1762,60 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return now > Long.MAX_VALUE - duration ? Long.MAX_VALUE : now + duration;
     }
     return Long.MAX_VALUE - now < defaultTtlMillis ? Long.MAX_VALUE : now + defaultTtlMillis;
+  }
+
+  private void rejectByteBufferValue(Object value) {
+    if (weakValues && value instanceof ByteBuffer) {
+      throw new IllegalArgumentException(
+          "weakValues(true) does not support ByteBuffer values; use weakValues(false) or a non-ByteBuffer value type");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private V weakValue(Entry entry, long rawValueAddress, Entry.ValueState state) {
+    if (!weakValues) {
+      return null;
+    }
+    if (state == null || Entry.rawValueAddress(state.taggedValueAddress()) != rawValueAddress) {
+      return null;
+    }
+    Entry.WeakValueSlot slot = state.weakValue();
+    if (slot == null || entry.valueAddress != state.taggedValueAddress()) {
+      return null;
+    }
+    return (V) slot.get();
+  }
+
+  private Entry.WeakValueSlot prepareWeakValue(
+      Object value, byte[] valueBytes, long taggedValueAddress) {
+    if (!weakValues) {
+      return null;
+    }
+    if (valueBytes != null || value == null) {
+      return null;
+    }
+    return new Entry.WeakValueSlot(value, taggedValueAddress);
+  }
+
+  private void publishWeakValueIfCurrent(
+      Entry entry, Object value, long taggedValueAddress, Entry.ValueState observedState) {
+    if (!weakValues) {
+      return;
+    }
+    try {
+      if (observedState == null || observedState.taggedValueAddress() != taggedValueAddress) {
+        return;
+      }
+      if (entry.valueAddress != taggedValueAddress) {
+        return;
+      }
+      Entry.WeakValueSlot replacement =
+          value == null ? null : new Entry.WeakValueSlot(value, taggedValueAddress);
+      Entry.ValueState next = new Entry.ValueState(taggedValueAddress, replacement);
+      entry.compareAndSetValueState(observedState, next);
+    } catch (OutOfMemoryError ignored) {
+      // Weak-value backfill is an optimization; the native-deserialized result remains valid.
+    }
   }
 
   private static long mix64(long value) {

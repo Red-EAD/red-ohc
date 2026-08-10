@@ -1639,7 +1639,7 @@ public final class MaintenanceEventLoop
       removed = removeCurrent(entry);
       if (removed) {
         value = Entry.rawValueAddress(entry.valueAddress);
-        entry.valueAddress = 0L;
+        entry.clearValue();
         clearRepairWork(entry);
       }
     } finally {
@@ -1711,7 +1711,7 @@ public final class MaintenanceEventLoop
     }
     for (Entry entry : data.values()) {
       long value = Entry.rawValueAddress(entry.valueAddress);
-      entry.valueAddress = 0L;
+      entry.clearValue();
       if (value != 0L) {
         memory.releaseEntry(value, ValueBlock.allocationLength(ValueBlock.length(value)));
       }

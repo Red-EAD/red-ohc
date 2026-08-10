@@ -30,8 +30,10 @@ public interface CacheSerializer<T> {
    * @param buf direct, read-only, non-array {@code ByteBuffer} from which deserialization needs to
    *     happen. The buffer is invalidated immediately after this method returns.
    * @return the type that was deserialized. Must not return {@code null}, and must not retain the
-   *     buffer, a view derived from it, or any native address. Generic cache APIs return owned
-   *     objects; use the direct cache APIs for an explicitly scoped zero-copy view.
+   *     input buffer, a {@code slice()}, {@code duplicate()}, {@code asReadOnlyBuffer()} view, or
+   *     any native address. Generic cache APIs return owned objects; use the direct cache APIs for
+   *     an explicitly scoped zero-copy view. When {@code weakValues(true)} is enabled, the result
+   *     must not be a {@link java.nio.ByteBuffer} or any subclass of it.
    */
   T deserialize(ByteBuffer buf);
 

@@ -1,7 +1,9 @@
 package com.red.ohc.index;
 
+import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.concurrent.locks.LockSupport;
 
 import com.red.ohc.storage.CacheMath;
@@ -58,6 +60,9 @@ public final class Entry {
       AtomicIntegerFieldUpdater.newUpdater(Entry.class, "policyMeta");
   private static final AtomicLongFieldUpdater<Entry> MAINTENANCE =
       AtomicLongFieldUpdater.newUpdater(Entry.class, "maintenanceMeta");
+  private static final AtomicReferenceFieldUpdater<Entry, ValueState> VALUE_STATE =
+      AtomicReferenceFieldUpdater.newUpdater(Entry.class, ValueState.class, "valueState");
+  private static final ValueState EMPTY_VALUE_STATE = new ValueState(0L, null);
 
   public final long nativeKeyAddress;
 
@@ -66,6 +71,9 @@ public final class Entry {
 
   /** Eight-byte aligned native value address; bit 0 marks a TTL-bearing value. */
   public volatile long valueAddress;
+
+  /** Optional weak Java value bound to one immutable publication of the native value. */
+  private volatile ValueState valueState;
 
   public volatile long lifecycle;
   public Entry policyPrev;
@@ -147,6 +155,151 @@ public final class Entry {
 
   public long rawValueAddress() {
     return rawValueAddress(valueAddress);
+  }
+
+  public WeakValueSlot weakValueSlot() {
+    ValueState state = valueState;
+    return state == null ? null : state.weakValue;
+  }
+
+  public boolean compareAndSetWeakValueSlot(WeakValueSlot expected, WeakValueSlot update) {
+    while (true) {
+      ValueState current = valueState;
+      WeakValueSlot currentValue = current == null ? null : current.weakValue;
+      if (currentValue != expected) {
+        return false;
+      }
+      ValueState next =
+          current == null
+              ? new ValueState(valueAddress, update)
+              : new ValueState(current.taggedValueAddress, update);
+      if (VALUE_STATE.compareAndSet(this, current, next)) {
+        return true;
+      }
+    }
+  }
+
+  public void clearWeakValueSlot() {
+    ValueState current = valueState;
+    while (current != null) {
+      ValueState next = new ValueState(current.taggedValueAddress, null);
+      if (valueAddress != current.taggedValueAddress) {
+        return;
+      }
+      if (VALUE_STATE.compareAndSet(this, current, next)) {
+        return;
+      }
+      current = valueState;
+    }
+  }
+
+  public void setWeakValueSlot(WeakValueSlot slot) {
+    if (slot == null && valueState == null) {
+      return;
+    }
+    long taggedValueAddress = valueAddress;
+    if (taggedValueAddress == 0L && slot != null) {
+      throw new IllegalArgumentException("weak value requires a native value address");
+    }
+    valueState = new ValueState(taggedValueAddress, slot);
+  }
+
+  /** Initializes weak-value publication metadata without allocating it for disabled caches. */
+  public void initializeValueState(long taggedValueAddress, WeakValueSlot slot) {
+    valueState = new ValueState(taggedValueAddress, slot);
+  }
+
+  /** Publishes a new native value and its weak-value binding as one immutable logical state. */
+  public void publishValueState(long taggedValueAddress, WeakValueSlot slot) {
+    ValueState next = new ValueState(taggedValueAddress, slot);
+    valueAddress = taggedValueAddress;
+    valueState = next;
+  }
+
+  /** Publishes a native value while preserving the no-metadata fast path for strong caches. */
+  public void publishValue(long taggedValueAddress, WeakValueSlot slot) {
+    if (valueState == null && slot == null) {
+      valueAddress = taggedValueAddress;
+      return;
+    }
+    publishValueState(taggedValueAddress, slot);
+  }
+
+  /** Clears the published value before native retirement, if weak-value state is enabled. */
+  public void clearValueState() {
+    if (valueState != null) {
+      valueAddress = 0L;
+      valueState = EMPTY_VALUE_STATE;
+      return;
+    }
+    valueAddress = 0L;
+  }
+
+  /** Clears the native value and weak binding, preserving the strong-cache no-metadata path. */
+  public void clearValue() {
+    if (valueState != null) {
+      clearValueState();
+    } else {
+      valueAddress = 0L;
+    }
+  }
+
+  public ValueState valueState() {
+    return valueState;
+  }
+
+  public boolean compareAndSetValueState(ValueState expected, ValueState update) {
+    return expected != null
+        && update != null
+        && valueAddress == expected.taggedValueAddress
+        && VALUE_STATE.compareAndSet(this, expected, update);
+  }
+
+  /** Immutable token joining a native value address and its optional weak Java object. */
+  public static final class ValueState {
+    private final long taggedValueAddress;
+    private final WeakValueSlot weakValue;
+
+    public ValueState(long taggedValueAddress, WeakValueSlot weakValue) {
+      if (taggedValueAddress == 0L && weakValue != null) {
+        throw new IllegalArgumentException("weak value requires a native value address");
+      }
+      this.taggedValueAddress = taggedValueAddress;
+      this.weakValue = weakValue;
+    }
+
+    public long taggedValueAddress() {
+      return taggedValueAddress;
+    }
+
+    public WeakValueSlot weakValue() {
+      return weakValue;
+    }
+  }
+
+  /** Weak value metadata bound to one exact tagged native value address. */
+  public static final class WeakValueSlot {
+    private final WeakReference<Object> reference;
+    private final long taggedValueAddress;
+
+    public WeakValueSlot(Object value, long taggedValueAddress) {
+      if (value == null) {
+        throw new NullPointerException("value");
+      }
+      if (taggedValueAddress == 0L) {
+        throw new IllegalArgumentException("weak value requires a native value address");
+      }
+      this.reference = new WeakReference<>(value);
+      this.taggedValueAddress = taggedValueAddress;
+    }
+
+    public Object get() {
+      return reference.get();
+    }
+
+    public long taggedValueAddress() {
+      return taggedValueAddress;
+    }
   }
 
   public static long tagValueAddress(long rawAddress, boolean hasTtl) {

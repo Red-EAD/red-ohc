@@ -67,7 +67,7 @@ public final class ChmSizing {
     long requested = Math.max(1_024L, planned / 64L);
     long bounded = Math.min(1L << 20, requested);
     int result = 1;
-    while (result < bounded && result < (1 << 20)) {
+    while (result < bounded) {
       result <<= 1;
     }
     return result;
