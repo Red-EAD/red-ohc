@@ -54,12 +54,17 @@ public final class CHMArchitectureTest {
   @Test
   public void expectedEntriesSizingLeavesHeadroomBeforeTheChmThreshold() {
     assertEquals(ChmSizing.plannedEntries(1_000_000L), 1_125_000L);
-    assertEquals(ChmSizing.tableLengthFor(1_000_000L, 1L, 1L), 2_097_152);
+    assertEquals(ChmSizing.tableLengthFor(1_000_000L, 1L), 2_097_152);
   }
 
   @Test
   public void expectedEntriesSizingDoesNotWrapBeforeApplyingHeadroom() {
     assertEquals(ChmSizing.plannedEntries(2_000_000_000_000_000_000L), 2_250_000_000_000_000_000L);
+  }
+
+  @Test
+  public void byteCapacitySizingStaysConservativeWithoutExpectedEntries() {
+    assertEquals(ChmSizing.initialCapacity(0L, 64L << 20), 64L);
   }
 
   @Test

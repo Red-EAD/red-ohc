@@ -63,8 +63,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final Executor loaderExecutor;
   private final long closeTimeoutMillis;
   private final long capacity;
-  private final long maxEntrySize;
-  private final long residentHardLimit;
+  private final long byteCapacity;
+    private final long residentHardLimit;
   private final long nativeHardLimit;
   private final NativeMemory.Memory memory;
   private final Budget budget;
@@ -73,8 +73,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final ThreadLocal<ThreadContext> evictionContexts;
   private final MaintenanceEventLoop worker;
   private final ReaderGuard readerGuard;
-  private final ConcurrentHashMap<EncodedKey, CompletableFuture<V>> loadFlights =
-      new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<EncodedKey, CompletableFuture<V>> loadFlights = new ConcurrentHashMap<>();
   private final AtomicInteger closeState = new AtomicInteger(OPEN);
   private final AtomicBoolean shutdownStarted = new AtomicBoolean();
   private final AtomicReference<Thread> closeLeader = new AtomicReference<>();
@@ -94,7 +93,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       EvictionListener<K, V> evictionListener,
       boolean weakValues,
       long capacity,
-      long maxEntrySize,
+      long maxSize,
       long expectedEntries) {
     ThreadContext.verifyNativeByteBufferSupported();
     this.keySerializer = keySerializer;
@@ -106,24 +105,33 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.ttlJitterPercent = ttlJitterPercent;
     this.loaderExecutor = loaderExecutor;
     this.closeTimeoutMillis = closeTimeoutMillis;
-    this.capacity = capacity;
-    this.maxEntrySize = maxEntrySize;
-    long maxValueWeight =
-        allocationWeight(
-            ValueBlock.allocationLength((int) Math.min(maxEntrySize, Integer.MAX_VALUE - 16L)));
-    long headroom = Math.max(maxValueWeight, capacity / 8L);
-    this.residentHardLimit = saturatedAdd(capacity, headroom);
-    // Every writer stripe may retain a partially-used page for the key and value size classes.
-    // This is allocator overhead, not resident cache weight, and must not turn a legal write
-    // into a permanent AllocationLimitException under full-CPU churn.
-    long stripePageSlack =
-        saturatedMultiply(
-            nextPowerOfTwo(Math.max(1, Runtime.getRuntime().availableProcessors()) * 4L),
-            2L * 64L * 1024L);
-    long allocatorSlack = Math.max(8L << 20, Math.max(stripePageSlack, capacity / 16L));
-    this.nativeHardLimit =
-        saturatedAdd(saturatedAdd(residentHardLimit, allocatorSlack), 512L << 10);
-    int initialCapacity = ChmSizing.constructorCapacity(expectedEntries, capacity, maxEntrySize);
+    boolean countBounded = maxSize > 0L;
+    this.capacity = countBounded ? -1L : capacity;
+    this.byteCapacity = countBounded ? Long.MAX_VALUE : capacity;
+    long limit = countBounded ? maxSize : capacity;
+    if (countBounded) {
+      this.residentHardLimit = Long.MAX_VALUE;
+      this.nativeHardLimit = Long.MAX_VALUE;
+    } else {
+      long maxValueWeight =
+          allocationWeight(
+              ValueBlock.allocationLength((int) Math.min(capacity, Integer.MAX_VALUE - 16L)));
+      long headroom = Math.max(maxValueWeight, capacity / 8L);
+      this.residentHardLimit = saturatedAdd(capacity, headroom);
+      // Every writer stripe may retain a partially-used page for the key and value size classes.
+      // This is allocator overhead, not resident cache weight, and must not turn a legal write
+      // into a permanent AllocationLimitException under full-CPU churn.
+      long stripePageSlack =
+          saturatedMultiply(
+              nextPowerOfTwo(Math.max(1, Runtime.getRuntime().availableProcessors()) * 4L),
+              2L * 64L * 1024L);
+      long allocatorSlack = Math.max(8L << 20, Math.max(stripePageSlack, capacity / 16L));
+      this.nativeHardLimit =
+          saturatedAdd(saturatedAdd(residentHardLimit, allocatorSlack), 512L << 10);
+    }
+    long sizingExpectedEntries =
+        expectedEntries > 0L ? expectedEntries : (countBounded ? maxSize : 0L);
+    int initialCapacity = ChmSizing.constructorCapacity(sizingExpectedEntries, limit);
     this.data = new ConcurrentHashMap<>(initialCapacity, 0.75f, 1);
     Entry bootstrap = Entry.bootstrap();
     data.put(bootstrap, bootstrap);
@@ -141,11 +149,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             memory,
             budget,
             ticker,
-            capacity,
+                limit,
             eviction,
             evictionListener == null ? null : this::notifyEviction,
             readers,
-            ChmSizing.maintenanceQueueCapacity(expectedEntries, capacity, maxEntrySize));
+            ChmSizing.maintenanceQueueCapacity(sizingExpectedEntries, limit),
+                countBounded);
     this.readerGuard = new ReaderGuard(worker, this::isClosing);
     worker.start();
   }
@@ -351,9 +360,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (value != null) {
       rejectByteBufferValue(value);
     }
-    if (keyLength < 0 || valueLength < 0 || (long) keyLength + valueLength > maxEntrySize) {
-      throw new IllegalArgumentException("serialized entry exceeds maxEntrySize=" + maxEntrySize);
-    }
     long expireAtMillis =
         requestedExpiry == DEFAULT_TTL ? defaultExpiry(lookup.hash64()) : requestedExpiry;
     while (true) {
@@ -553,7 +559,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyLength + Long.BYTES));
     long valueAllocation = ValueBlock.allocationLength(valueLength);
     long totalWeight = allocationWeight(keyAllocation) + allocationWeight(valueAllocation);
-    if (totalWeight > capacity) {
+    if (totalWeight > byteCapacity) {
       throw new IllegalArgumentException("serialized entry allocation exceeds cache capacity");
     }
     reserveBudget(context, totalWeight);
@@ -1064,9 +1070,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         continue;
       }
       int valueLength = serializedSize(valueSerializer, value);
-      if (keyLength < 0 || (long) keyLength + valueLength > maxEntrySize) {
-        throw new IllegalArgumentException("serialized entry exceeds maxEntrySize=" + maxEntrySize);
-      }
       Entry candidate =
           allocateEntry(
               context,
@@ -1190,11 +1193,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return CompletableFuture.completedFuture(false);
       }
       int expectedLength = serializedSize(valueSerializer, expected);
-      if ((long) context.lookupKey.length() + expectedLength > maxEntrySize) {
-        throw new IllegalArgumentException("serialized entry exceeds maxEntrySize=" + maxEntrySize);
-      }
       expectedAllocation = ValueBlock.allocationLength(expectedLength);
-      if (allocationWeight(expectedAllocation) > capacity
+      if (allocationWeight(expectedAllocation) > byteCapacity
           || expectedAllocation > nativeHardLimit) {
         throw new IllegalArgumentException("expected value exceeds cache capacity");
       }
@@ -1248,14 +1248,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
 
         int valueLength = serializedSize(valueSerializer, value);
-        if ((long) lookup.length() + valueLength > maxEntrySize) {
-          throw new IllegalArgumentException(
-              "serialized entry exceeds maxEntrySize=" + maxEntrySize);
-        }
         allocation = ValueBlock.allocationLength(valueLength);
         weight = allocationWeight(allocation);
         ensureReplacementFitsCapacity(entry.keyAllocationLength(), allocation);
-        if (weight > capacity) {
+        if (weight > byteCapacity) {
           throw new IllegalArgumentException("replacement exceeds cache capacity");
         }
         reserveBudget(context, weight);
@@ -1626,7 +1622,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   private void reserveBudget(ThreadContext context, long weight) {
-    if (weight <= 0L || weight > capacity) {
+    if (weight <= 0L || weight > byteCapacity) {
       throw new IllegalArgumentException("entry allocation exceeds cache capacity");
     }
     while (true) {
@@ -1887,7 +1883,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void ensureReplacementFitsCapacity(long keyAllocation, long valueAllocation) {
     long keyWeight = allocationWeight(keyAllocation);
     long valueWeight = allocationWeight(valueAllocation);
-    if (keyWeight > capacity || valueWeight > capacity || keyWeight > capacity - valueWeight) {
+    if (keyWeight > byteCapacity
+        || valueWeight > byteCapacity
+        || keyWeight > byteCapacity - valueWeight) {
       throw new IllegalArgumentException(
           "replacement key and value allocations exceed cache capacity");
     }

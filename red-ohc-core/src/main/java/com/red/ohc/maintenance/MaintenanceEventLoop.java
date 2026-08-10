@@ -135,8 +135,8 @@ public final class MaintenanceEventLoop
   /**
    * Cross-thread snapshot of the actor-owned policy weight. Writers never update this value: it is
    * deliberately published only after a bounded maintenance pass has applied all of its policy
-   * mutations. Reading {@link MaintenancePolicy#usedBytes()} from a cache caller would otherwise be
-   * a data race with the actor.
+   * mutations. Reading actor-owned policy state from a cache caller would otherwise be a data race
+   * with the actor.
    */
   private volatile long publishedLiveWeight;
 
@@ -195,7 +195,7 @@ public final class MaintenanceEventLoop
         eviction,
         null,
         readers,
-        ChmSizing.maintenanceQueueCapacity(0L, capacity, capacity));
+        ChmSizing.maintenanceQueueCapacity(0L, capacity));
   }
 
   public MaintenanceEventLoop(
@@ -216,7 +216,7 @@ public final class MaintenanceEventLoop
         eviction,
         evictionNotifier,
         readers,
-        ChmSizing.maintenanceQueueCapacity(0L, capacity, capacity));
+        ChmSizing.maintenanceQueueCapacity(0L, capacity));
   }
 
   public MaintenanceEventLoop(
@@ -228,7 +228,7 @@ public final class MaintenanceEventLoop
       Eviction eviction,
       ReaderRegistry readers,
       int queueCapacity) {
-    this(data, memory, budget, ticker, capacity, eviction, null, readers, queueCapacity);
+    this(data, memory, budget, ticker, capacity, eviction, null, readers, queueCapacity, false);
   }
 
   public MaintenanceEventLoop(
@@ -241,6 +241,30 @@ public final class MaintenanceEventLoop
       EvictionNotifier evictionNotifier,
       ReaderRegistry readers,
       int queueCapacity) {
+    this(
+        data,
+        memory,
+        budget,
+        ticker,
+        capacity,
+        eviction,
+        evictionNotifier,
+        readers,
+        queueCapacity,
+        false);
+  }
+
+  public MaintenanceEventLoop(
+      ConcurrentHashMap<Entry, Entry> data,
+      NativeMemory.Memory memory,
+      Budget budget,
+      Ticker ticker,
+      long capacity,
+      Eviction eviction,
+      EvictionNotifier evictionNotifier,
+      ReaderRegistry readers,
+      int queueCapacity,
+      boolean countBounded) {
     this.data = data;
     this.memory = memory;
     this.budget = budget;
@@ -271,7 +295,7 @@ public final class MaintenanceEventLoop
       this.repairDebts[i] = new AtomicLong();
     }
     this.reliableRemovals = new ReliableRemovalQueue(queueCapacity);
-    this.policy = new MaintenancePolicy(eviction, capacity);
+    this.policy = new MaintenancePolicy(eviction, capacity, countBounded);
     this.readers = readers;
     this.retirements = new RetirementQueue(memory, stripeCount(), retirementRecordsPerStripe());
     this.wheel = new TimerWheel(ticker.currentTimeMillis());
@@ -1081,7 +1105,7 @@ public final class MaintenanceEventLoop
     // A bounded eviction scan may have deferred its next retry to protect the worker from
     // repeated scans. Flush must retain its barrier until that retry either brings the
     // policy back under capacity or schedules another genuinely pending maintenance pass.
-    if (policy.usedBytes() > capacity && !evictionWorkDue() && !evictionBlockedOnWriter) {
+    if (policy.usedWeight() > capacity && !evictionWorkDue() && !evictionBlockedOnWriter) {
       return;
     }
     if (clockRefreshRequested) {
@@ -1391,7 +1415,7 @@ public final class MaintenanceEventLoop
           delay = Math.min(delay, retryDelay);
         }
       }
-      if (policy.usedBytes() <= capacity || evictionRetryNanos == Long.MAX_VALUE) {
+      if (policy.usedWeight() <= capacity || evictionRetryNanos == Long.MAX_VALUE) {
         return delay;
       }
       long evictionDelay = evictionRetryNanos - ticker.nanos();
@@ -1404,7 +1428,7 @@ public final class MaintenanceEventLoop
   private boolean evictionWorkDue() {
     ownerLock.lock();
     try {
-      if (policy.usedBytes() <= capacity) {
+      if (policy.usedWeight() <= capacity) {
         return false;
       }
       return evictionRetryNanos <= ticker.nanos();
@@ -1521,7 +1545,7 @@ public final class MaintenanceEventLoop
     long target = capacity;
     boolean scanExhausted = false;
     evictionBlockedOnWriter = false;
-    while (work < limit && scans < limit && policy.usedBytes() > target) {
+    while (work < limit && scans < limit && policy.usedWeight() > target) {
       MaintenancePolicy.Selection selection = policy.selectVictim(limit - scans);
       int selectionScans = policy.lastVictimScanCount();
       scans += selectionScans;
@@ -1562,7 +1586,7 @@ public final class MaintenanceEventLoop
     if (scans != 0) {
       evictionScans.addAndGet(scans);
     }
-    if (policy.usedBytes() <= target) {
+    if (policy.usedWeight() <= target) {
       evictionBlockedOnWriter = false;
       evictionRetryNanos = Long.MAX_VALUE;
       evictionRetryBackoffNanos = 1_000L;

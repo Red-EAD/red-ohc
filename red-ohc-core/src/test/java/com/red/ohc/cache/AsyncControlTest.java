@@ -55,18 +55,17 @@ public class AsyncControlTest {
   }
 
   @Test
-  public void replaceRejectsAnEntryLargerThanTheConfiguredMaximumBeforePublishing() {
+  public void replaceRejectsAnEntryLargerThanTheByteCapacityBeforePublishing() {
     try (OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
-                .capacity(1 << 20)
-                .maxEntrySize(8)
+                .capacity(256)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped()) {
       assertTrue(cache.put("k", "old"));
       try {
-        cache.replaceAsync("k", "old", "too-large", 0L);
+        cache.replaceAsync("k", "old", repeat('x', 1_000), 0L);
         throw new AssertionError("oversized replacement must fail");
       } catch (IllegalArgumentException expected) {
         assertEquals(cache.get("k"), "old");
@@ -82,7 +81,6 @@ public class AsyncControlTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1_024)
-            .maxEntrySize(2_048)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
@@ -104,7 +102,6 @@ public class AsyncControlTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1_024)
-            .maxEntrySize(2_048)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {

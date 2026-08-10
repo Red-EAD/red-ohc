@@ -1,5 +1,7 @@
 package com.red.ohc.maintenance;
 
+import java.util.IdentityHashMap;
+
 import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 
 import com.red.ohc.api.Eviction;
@@ -24,6 +26,7 @@ public final class MaintenancePolicy {
 
   private final Eviction eviction;
   private final long capacity;
+  private final boolean countBounded;
   private final FrequencySketch sketch;
   private final EntryDeque lru = new EntryDeque();
   private final EntryDeque small = new EntryDeque();
@@ -31,6 +34,7 @@ public final class MaintenancePolicy {
   private final EntryDeque window = new EntryDeque();
   private final EntryDeque probation = new EntryDeque();
   private final EntryDeque protectedQueue = new EntryDeque();
+  private final IdentityHashMap<Entry, Long> byteWeights = new IdentityHashMap<>();
   private final Long2LongLinkedOpenHashMap ghost;
   private final long ghostMaximum;
   private final long smallMaximum;
@@ -38,6 +42,7 @@ public final class MaintenancePolicy {
   private long protectedMaximum;
 
   private long weightedSize;
+  private long liveBytes;
   private long smallWeight;
   private long mainWeight;
   private long windowWeight;
@@ -61,8 +66,13 @@ public final class MaintenancePolicy {
   private int lastVictimScanCount;
 
   public MaintenancePolicy(Eviction eviction, long capacity) {
+    this(eviction, capacity, false);
+  }
+
+  public MaintenancePolicy(Eviction eviction, long capacity, boolean countBounded) {
     this.eviction = eviction;
     this.capacity = capacity;
+    this.countBounded = countBounded;
     long plannedEntries = Math.max(256L, capacity / 128L);
     this.sketch = eviction == Eviction.W_TINY_LFU ? new FrequencySketch(plannedEntries) : null;
     this.smallMaximum = Math.max(1L, capacity / 10L);
@@ -85,6 +95,9 @@ public final class MaintenancePolicy {
     }
     entry.policyWeight = weightOf(entry);
     weightedSize += entry.policyWeight;
+    long bytes = byteWeightOf(entry);
+    byteWeights.put(entry, bytes);
+    liveBytes += bytes;
     switch (eviction) {
       case S3_FIFO:
         long hash = entry.keyHash64();
@@ -196,6 +209,8 @@ public final class MaintenancePolicy {
       default:
     }
     weightedSize -= entry.policyWeight;
+    Long removedByteWeight = byteWeights.remove(entry);
+    liveBytes -= removedByteWeight == null ? byteWeightOf(entry) : removedByteWeight;
     entry.policyState(Entry.POLICY_NONE);
     entry.policyWeight = 0L;
     entry.policyAccessCount(0);
@@ -248,8 +263,12 @@ public final class MaintenancePolicy {
     }
   }
 
-  long usedBytes() {
+  long usedWeight() {
     return weightedSize;
+  }
+
+  long usedBytes() {
+    return liveBytes;
   }
 
   long evictions() {
@@ -470,11 +489,15 @@ public final class MaintenancePolicy {
 
   private void updateWeight(Entry entry) {
     long updated = weightOf(entry);
+    long updatedBytes = byteWeightOf(entry);
     long delta = updated - entry.policyWeight;
-    if (delta == 0L) {
+    Long previousBytes = byteWeights.get(entry);
+    long byteDelta = updatedBytes - (previousBytes == null ? updatedBytes : previousBytes);
+    if (previousBytes != null && delta == 0L && byteDelta == 0L) {
       return;
     }
     weightedSize += delta;
+    liveBytes += byteDelta;
     switch (entry.policyState()) {
       case Entry.POLICY_S3_SMALL:
         smallWeight += delta;
@@ -494,6 +517,7 @@ public final class MaintenancePolicy {
       default:
     }
     entry.policyWeight = updated;
+    byteWeights.put(entry, updatedBytes);
   }
 
   private void addGhost(Entry entry, long fingerprint) {
@@ -542,7 +566,14 @@ public final class MaintenancePolicy {
     }
   }
 
-  private static long weightOf(Entry entry) {
+  private long weightOf(Entry entry) {
+    if (countBounded) {
+      return 1L;
+    }
+    return byteWeightOf(entry);
+  }
+
+  private static long byteWeightOf(Entry entry) {
     long key = WriterArena.allocationWeight(entry.keyAllocationLength());
     long valueAddress = Entry.rawValueAddress(entry.valueAddress);
     if (valueAddress == 0L) {

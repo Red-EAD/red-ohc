@@ -52,8 +52,7 @@ public class WriteAdmissionTest {
   public void oversizePutThrowsInsteadOfReturningFalse() {
     try (OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .maxEntrySize(16)
+            .capacity(128)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped()) {

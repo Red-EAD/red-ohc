@@ -13,7 +13,9 @@ import com.red.ohc.api.Ticker;
 /** Builder for the off-heap cache. */
 public final class OHCacheBuilder<K, V> {
   private long capacity = 64L << 20;
-  private long maxEntrySize;
+  private long maxSize;
+  private boolean capacityConfigured;
+  private boolean maxSizeConfigured;
   private long expectedEntries;
   private CacheSerializer<K> keySerializer;
   private CacheSerializer<V> valueSerializer;
@@ -37,15 +39,23 @@ public final class OHCacheBuilder<K, V> {
     if (capacity <= 0L) {
       throw new IllegalArgumentException("capacity must be positive");
     }
+    if (maxSizeConfigured) {
+      throw new IllegalStateException("capacity and maxSize are mutually exclusive");
+    }
     this.capacity = capacity;
+    this.capacityConfigured = true;
     return this;
   }
 
-  public OHCacheBuilder<K, V> maxEntrySize(long maxEntrySize) {
-    if (maxEntrySize <= 0L) {
-      throw new IllegalArgumentException("maxEntrySize must be positive");
+  public OHCacheBuilder<K, V> maxSize(long maxSize) {
+    if (maxSize <= 0L) {
+      throw new IllegalArgumentException("maxSize must be positive");
     }
-    this.maxEntrySize = maxEntrySize;
+    if (capacityConfigured) {
+      throw new IllegalStateException("capacity and maxSize are mutually exclusive");
+    }
+    this.maxSize = maxSize;
+    this.maxSizeConfigured = true;
     return this;
   }
 
@@ -144,7 +154,6 @@ public final class OHCacheBuilder<K, V> {
       throw new IllegalArgumentException(
           "weakValues(true) does not support ByteBuffer values; use weakValues(false) or a non-ByteBuffer value type");
     }
-    long effectiveMaxEntrySize = maxEntrySize == 0L ? capacity : maxEntrySize;
     return new OffHeapCache<>(
         keySerializer,
         valueSerializer,
@@ -158,7 +167,7 @@ public final class OHCacheBuilder<K, V> {
         evictionListener,
         weakValues,
         capacity,
-        effectiveMaxEntrySize,
+        maxSize,
         expectedEntries);
   }
 
@@ -166,8 +175,8 @@ public final class OHCacheBuilder<K, V> {
     return capacity;
   }
 
-  long maxEntrySizeValue() {
-    return maxEntrySize;
+  long maxSizeValue() {
+    return maxSize;
   }
 
   long expectedEntriesValue() {
