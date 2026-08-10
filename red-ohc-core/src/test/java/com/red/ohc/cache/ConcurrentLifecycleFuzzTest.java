@@ -92,25 +92,25 @@ public final class ConcurrentLifecycleFuzzTest {
 
       awaitQuiescence(cache);
       OHCacheStats stats = cache.stats();
-      assertFalse(stats.maintenanceUnhealthy);
-      assertEquals(stats.maintenanceQueueDepth, 0L);
-      assertEquals(stats.retirementQueueDepth, 0L);
+      assertFalse(stats.getMaintenanceUnhealthy());
+      assertEquals(stats.getMaintenanceQueueDepth(), 0L);
+      assertEquals(stats.getRetirementQueueDepth(), 0L);
       assertTrue(
-          stats.liveWeight <= cache.capacity(),
+          stats.getLiveWeight() <= cache.capacity(),
           "liveWeight="
-              + stats.liveWeight
+              + stats.getLiveWeight()
               + ", capacity="
               + cache.capacity()
               + ", evictions="
-              + stats.evictionCount
+              + stats.getEvictionCount()
               + ", scans="
-              + stats.evictionScanCount
+              + stats.getEvictionScanCount()
               + ", size="
               + cache.size()
               + ", queue="
-              + stats.maintenanceQueueDepth
+              + stats.getMaintenanceQueueDepth()
               + ", retirement="
-              + stats.retirementQueueDepth);
+              + stats.getRetirementQueueDepth());
     } finally {
       callers.shutdownNow();
       cache.close();
@@ -182,9 +182,9 @@ public final class ConcurrentLifecycleFuzzTest {
 
       awaitQuiescence(cache);
       OHCacheStats stats = cache.stats();
-      assertFalse(stats.maintenanceUnhealthy);
-      assertEquals(stats.maintenanceQueueDepth, 0L);
-      assertEquals(stats.retirementQueueDepth, 0L);
+      assertFalse(stats.getMaintenanceUnhealthy());
+      assertEquals(stats.getMaintenanceQueueDepth(), 0L);
+      assertEquals(stats.getRetirementQueueDepth(), 0L);
     } finally {
       callers.shutdownNow();
       cache.close();
@@ -204,7 +204,7 @@ public final class ConcurrentLifecycleFuzzTest {
     }
     // Concurrent stats snapshots must never traverse the actor-owned retirement compact set.
     OHCacheStats stats = cache.stats();
-    if (stats.maintenanceUnhealthy) {
+    if (stats.getMaintenanceUnhealthy()) {
       throw new AssertionError("maintenance actor became unhealthy during concurrent write");
     }
   }
@@ -214,16 +214,16 @@ public final class ConcurrentLifecycleFuzzTest {
     while (System.nanoTime() < deadline) {
       cache.flushAsync().join();
       OHCacheStats stats = cache.stats();
-      if (stats.maintenanceQueueDepth == 0L && stats.retirementQueueDepth == 0L) {
+      if (stats.getMaintenanceQueueDepth() == 0L && stats.getRetirementQueueDepth() == 0L) {
         return;
       }
       Thread.yield();
     }
     throw new AssertionError(
         "maintenance did not quiesce: queue="
-            + cache.stats().maintenanceQueueDepth
+            + cache.stats().getMaintenanceQueueDepth()
             + ", retirement="
-            + cache.stats().retirementQueueDepth);
+            + cache.stats().getRetirementQueueDepth());
   }
 
   private static void await(CountDownLatch latch) {

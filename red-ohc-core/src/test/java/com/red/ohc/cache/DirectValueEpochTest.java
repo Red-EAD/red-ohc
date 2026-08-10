@@ -95,7 +95,7 @@ public class DirectValueEpochTest {
   private static boolean waitForRetiredEntry(OHCache<?, ?> cache) {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
     while (System.nanoTime() < deadline) {
-      if (cache.stats().retiredEntries > 0L) {
+      if (cache.stats().getRetiredEntries() > 0L) {
         return true;
       }
       LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));

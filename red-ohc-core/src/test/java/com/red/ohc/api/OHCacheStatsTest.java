@@ -3,6 +3,8 @@ package com.red.ohc.api;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import org.testng.annotations.Test;
 
 public final class OHCacheStatsTest {
@@ -27,6 +29,7 @@ public final class OHCacheStatsTest {
             15L,
             16L,
             17L,
+            18L,
             18L,
             19L,
             20L,
@@ -62,6 +65,7 @@ public final class OHCacheStatsTest {
     assertEquals(stats.getEvictionScanCount(), 15L);
     assertEquals(stats.getEvictionLockedSkips(), 16L);
     assertEquals(stats.getRetiredEntries(), 17L);
+    assertEquals(stats.getSize(), 18L);
     assertEquals(stats.getLiveWeight(), 18L);
     assertEquals(stats.getResidentWeight(), 19L);
     assertEquals(stats.getRetiredWeight(), 20L);
@@ -79,5 +83,19 @@ public final class OHCacheStatsTest {
     assertEquals(stats.getMaintenanceWaitCount(), 32L);
     assertEquals(stats.getMaintenanceWaitNanos(), 33L);
     assertEquals(stats.getMaintenanceProgressVersion(), 34L);
+
+    stats.setSize(19L);
+    assertEquals(stats.getSize(), 19L);
+  }
+
+  @Test
+  public void statsFieldsArePrivate() {
+    for (Field field : OHCacheStats.class.getDeclaredFields()) {
+      if (!Modifier.isStatic(field.getModifiers())) {
+        assertTrue(
+            Modifier.isPrivate(field.getModifiers()),
+            "stats field must be private: " + field.getName());
+      }
+    }
   }
 }

@@ -47,9 +47,9 @@ public class MaintenanceAccountingTest {
             .build()) {
       assertTrue(cache.put("key", "value", 64L));
       cache.flushAsync().join();
-      assertTrue(cache.stats().liveWeight > 0L);
+      assertTrue(cache.stats().getLiveWeight() > 0L);
       assertEquals(
-          cache.stats().liveWeight,
+          cache.stats().getLiveWeight(),
           256L,
           "live weight must include two 128-byte allocator slots, not only the 32-byte raw blocks");
 
@@ -57,7 +57,7 @@ public class MaintenanceAccountingTest {
       cache.flushAsync().join();
 
       assertEquals(cache.size(), 0L);
-      assertEquals(cache.stats().liveWeight, 0L, "TTL removal must refund live weight");
+      assertEquals(cache.stats().getLiveWeight(), 0L, "TTL removal must refund live weight");
     }
   }
 

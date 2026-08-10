@@ -280,7 +280,7 @@ public final class EvictionListenerTest {
       evictOne(cache);
       cache.flushAsync().join();
       assertEquals(valueDeserializations.get(), 1);
-      assertEquals(cache.stats().evictionCount, 1L);
+      assertEquals(cache.stats().getEvictionCount(), 1L);
     }
   }
 
@@ -295,7 +295,7 @@ public final class EvictionListenerTest {
             })) {
       evictOne(cache);
       cache.flushAsync().join();
-      assertEquals(cache.stats().evictionCount, 1L);
+      assertEquals(cache.stats().getEvictionCount(), 1L);
     }
   }
 

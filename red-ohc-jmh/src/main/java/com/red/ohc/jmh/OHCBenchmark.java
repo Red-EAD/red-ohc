@@ -104,15 +104,15 @@ public class OHCBenchmark {
     ohc.flushAsync().join();
     if ("HIT_ONLY".equals(residency)) {
       if (ohc.size() != WORKING_SET
-          || ohc.stats().evictionCount != 0L
-          || ohc.stats().readMisses != 0L) {
+          || ohc.stats().getEvictionCount() != 0L
+          || ohc.stats().getReadMisses() != 0L) {
         throw new IllegalStateException(
             "HIT_ONLY preload was not a complete hit set: size="
                 + ohc.size()
                 + ", evicted="
-                + ohc.stats().evictionCount
+                + ohc.stats().getEvictionCount()
                 + ", misses="
-                + ohc.stats().readMisses);
+                + ohc.stats().getReadMisses());
       }
     }
   }

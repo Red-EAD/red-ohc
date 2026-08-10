@@ -145,12 +145,12 @@ public class OHCGetAllPutAllBenchmark {
       // Stabilize the preload once. Repeated barriers here would measure setup cost and
       // make the benchmark needlessly sensitive to maintenance wake-up latency.
       ohc.flushAsync().join();
-      if (ohc.size() != KEY_COUNT || ohc.stats().maintenanceUnhealthy) {
+      if (ohc.size() != KEY_COUNT || ohc.stats().getMaintenanceUnhealthy()) {
         throw new IllegalStateException(
             "OHC preload did not converge: size="
                 + ohc.size()
                 + ", unhealthy="
-                + ohc.stats().maintenanceUnhealthy);
+                + ohc.stats().getMaintenanceUnhealthy());
       }
     } else {
       caffeine =

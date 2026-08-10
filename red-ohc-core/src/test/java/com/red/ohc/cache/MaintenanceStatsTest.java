@@ -45,15 +45,14 @@ public final class MaintenanceStatsTest {
       cache.flushAsync().join();
 
       OHCacheStats stats = cache.stats();
-      assertEquals(stats.getReadHits(), stats.readHits);
-      assertEquals(stats.getNativeAllocatedBytes(), stats.nativeAllocatedBytes);
-      assertTrue(stats.liveWeight > 0L);
-      assertTrue(stats.residentWeight >= stats.liveWeight);
-      assertTrue(stats.retiredWeight >= 0L);
-      assertTrue(stats.nativeAllocatedBytes >= stats.residentWeight);
-      assertTrue(stats.ttlBacklog >= 0L);
-      assertEquals(stats.evictionLockedSkips, 0L);
-      assertTrue(stats.mergedWakeSignals >= 0L);
+      assertEquals(stats.getSize(), 1L);
+      assertTrue(stats.getLiveWeight() > 0L);
+      assertTrue(stats.getResidentWeight() >= stats.getLiveWeight());
+      assertTrue(stats.getRetiredWeight() >= 0L);
+      assertTrue(stats.getNativeAllocatedBytes() >= stats.getResidentWeight());
+      assertTrue(stats.getTtlBacklog() >= 0L);
+      assertEquals(stats.getEvictionLockedSkips(), 0L);
+      assertTrue(stats.getMergedWakeSignals() >= 0L);
     }
   }
 }

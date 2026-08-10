@@ -48,7 +48,7 @@ public class OffHeapCacheTest {
       }
       cache.flushAsync().join();
       assertEquals(
-          cache.stats().readHits,
+          cache.stats().getReadHits(),
           1_024L,
           "a thread registered by put must still publish later get statistics");
     }

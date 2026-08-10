@@ -1,41 +1,42 @@
 package com.red.ohc.api;
 
-/** Immutable, eventually-consistent cache and maintenance metrics. */
+/** Eventually-consistent cache and maintenance metrics. */
 public final class OHCacheStats {
-  public final long readHits;
-  public final long readMisses;
-  public final long readAccessDropped;
-  public final long mutationAccepted;
-  public final long mutationApplied;
-  public final long maintenanceQueueDepth;
-  public final long maintenanceQueueCapacity;
-  public final long maintenanceLoopNanos;
-  public final boolean maintenanceUnhealthy;
-  public final long logicalExpired;
-  public final long physicalExpired;
-  public final long ttlLagMillis;
-  public final long ttlBacklog;
-  public final long evictionCount;
-  public final long evictionScanCount;
-  public final long evictionLockedSkips;
-  public final long retiredEntries;
-  public final long liveWeight;
-  public final long residentWeight;
-  public final long retiredWeight;
-  public final long nativeAllocatedBytes;
-  public final long timerHeapBytes;
-  public final long sketchHeapBytes;
-  public final long ghostHeapBytes;
-  public final long retirementQueueNativeBytes;
-  public final long retirementQueueDepth;
-  public final long retirementQueueCapacity;
-  public final long wakeSignals;
-  public final long mergedWakeSignals;
-  public final long maintenanceAssistCount;
-  public final long maintenanceAssistWork;
-  public final long maintenanceWaitCount;
-  public final long maintenanceWaitNanos;
-  public final long maintenanceProgressVersion;
+  private long readHits;
+  private long readMisses;
+  private long readAccessDropped;
+  private long mutationAccepted;
+  private long mutationApplied;
+  private long maintenanceQueueDepth;
+  private long maintenanceQueueCapacity;
+  private long maintenanceLoopNanos;
+  private boolean maintenanceUnhealthy;
+  private long logicalExpired;
+  private long physicalExpired;
+  private long ttlLagMillis;
+  private long ttlBacklog;
+  private long evictionCount;
+  private long evictionScanCount;
+  private long evictionLockedSkips;
+  private long retiredEntries;
+  private long size;
+  private long liveWeight;
+  private long residentWeight;
+  private long retiredWeight;
+  private long nativeAllocatedBytes;
+  private long timerHeapBytes;
+  private long sketchHeapBytes;
+  private long ghostHeapBytes;
+  private long retirementQueueNativeBytes;
+  private long retirementQueueDepth;
+  private long retirementQueueCapacity;
+  private long wakeSignals;
+  private long mergedWakeSignals;
+  private long maintenanceAssistCount;
+  private long maintenanceAssistWork;
+  private long maintenanceWaitCount;
+  private long maintenanceWaitNanos;
+  private long maintenanceProgressVersion;
 
   public OHCacheStats(
       long readHits,
@@ -55,6 +56,7 @@ public final class OHCacheStats {
       long evictionScanCount,
       long evictionLockedSkips,
       long retiredEntries,
+      long size,
       long liveWeight,
       long residentWeight,
       long retiredWeight,
@@ -89,6 +91,7 @@ public final class OHCacheStats {
     this.evictionScanCount = evictionScanCount;
     this.evictionLockedSkips = evictionLockedSkips;
     this.retiredEntries = retiredEntries;
+    this.size = size;
     this.liveWeight = liveWeight;
     this.residentWeight = residentWeight;
     this.retiredWeight = retiredWeight;
@@ -176,6 +179,10 @@ public final class OHCacheStats {
     return retiredEntries;
   }
 
+  public long getSize() {
+    return size;
+  }
+
   public long getLiveWeight() {
     return liveWeight;
   }
@@ -242,5 +249,145 @@ public final class OHCacheStats {
 
   public long getMaintenanceProgressVersion() {
     return maintenanceProgressVersion;
+  }
+
+  public void setReadHits(long readHits) {
+    this.readHits = readHits;
+  }
+
+  public void setReadMisses(long readMisses) {
+    this.readMisses = readMisses;
+  }
+
+  public void setReadAccessDropped(long readAccessDropped) {
+    this.readAccessDropped = readAccessDropped;
+  }
+
+  public void setMutationAccepted(long mutationAccepted) {
+    this.mutationAccepted = mutationAccepted;
+  }
+
+  public void setMutationApplied(long mutationApplied) {
+    this.mutationApplied = mutationApplied;
+  }
+
+  public void setMaintenanceQueueDepth(long maintenanceQueueDepth) {
+    this.maintenanceQueueDepth = maintenanceQueueDepth;
+  }
+
+  public void setMaintenanceQueueCapacity(long maintenanceQueueCapacity) {
+    this.maintenanceQueueCapacity = maintenanceQueueCapacity;
+  }
+
+  public void setMaintenanceLoopNanos(long maintenanceLoopNanos) {
+    this.maintenanceLoopNanos = maintenanceLoopNanos;
+  }
+
+  public void setMaintenanceUnhealthy(boolean maintenanceUnhealthy) {
+    this.maintenanceUnhealthy = maintenanceUnhealthy;
+  }
+
+  public void setLogicalExpired(long logicalExpired) {
+    this.logicalExpired = logicalExpired;
+  }
+
+  public void setPhysicalExpired(long physicalExpired) {
+    this.physicalExpired = physicalExpired;
+  }
+
+  public void setTtlLagMillis(long ttlLagMillis) {
+    this.ttlLagMillis = ttlLagMillis;
+  }
+
+  public void setTtlBacklog(long ttlBacklog) {
+    this.ttlBacklog = ttlBacklog;
+  }
+
+  public void setEvictionCount(long evictionCount) {
+    this.evictionCount = evictionCount;
+  }
+
+  public void setEvictionScanCount(long evictionScanCount) {
+    this.evictionScanCount = evictionScanCount;
+  }
+
+  public void setEvictionLockedSkips(long evictionLockedSkips) {
+    this.evictionLockedSkips = evictionLockedSkips;
+  }
+
+  public void setRetiredEntries(long retiredEntries) {
+    this.retiredEntries = retiredEntries;
+  }
+
+  public void setSize(long size) {
+    this.size = size;
+  }
+
+  public void setLiveWeight(long liveWeight) {
+    this.liveWeight = liveWeight;
+  }
+
+  public void setResidentWeight(long residentWeight) {
+    this.residentWeight = residentWeight;
+  }
+
+  public void setRetiredWeight(long retiredWeight) {
+    this.retiredWeight = retiredWeight;
+  }
+
+  public void setNativeAllocatedBytes(long nativeAllocatedBytes) {
+    this.nativeAllocatedBytes = nativeAllocatedBytes;
+  }
+
+  public void setTimerHeapBytes(long timerHeapBytes) {
+    this.timerHeapBytes = timerHeapBytes;
+  }
+
+  public void setSketchHeapBytes(long sketchHeapBytes) {
+    this.sketchHeapBytes = sketchHeapBytes;
+  }
+
+  public void setGhostHeapBytes(long ghostHeapBytes) {
+    this.ghostHeapBytes = ghostHeapBytes;
+  }
+
+  public void setRetirementQueueNativeBytes(long retirementQueueNativeBytes) {
+    this.retirementQueueNativeBytes = retirementQueueNativeBytes;
+  }
+
+  public void setRetirementQueueDepth(long retirementQueueDepth) {
+    this.retirementQueueDepth = retirementQueueDepth;
+  }
+
+  public void setRetirementQueueCapacity(long retirementQueueCapacity) {
+    this.retirementQueueCapacity = retirementQueueCapacity;
+  }
+
+  public void setWakeSignals(long wakeSignals) {
+    this.wakeSignals = wakeSignals;
+  }
+
+  public void setMergedWakeSignals(long mergedWakeSignals) {
+    this.mergedWakeSignals = mergedWakeSignals;
+  }
+
+  public void setMaintenanceAssistCount(long maintenanceAssistCount) {
+    this.maintenanceAssistCount = maintenanceAssistCount;
+  }
+
+  public void setMaintenanceAssistWork(long maintenanceAssistWork) {
+    this.maintenanceAssistWork = maintenanceAssistWork;
+  }
+
+  public void setMaintenanceWaitCount(long maintenanceWaitCount) {
+    this.maintenanceWaitCount = maintenanceWaitCount;
+  }
+
+  public void setMaintenanceWaitNanos(long maintenanceWaitNanos) {
+    this.maintenanceWaitNanos = maintenanceWaitNanos;
+  }
+
+  public void setMaintenanceProgressVersion(long maintenanceProgressVersion) {
+    this.maintenanceProgressVersion = maintenanceProgressVersion;
   }
 }

@@ -114,13 +114,13 @@ public class EncodedWriteTest {
       EncodedKey key = EncodedKey.copyOf(new byte[] {21, 22, 23, 24});
       assertTrue(cache.putEncoded(key, new byte[] {1, 2, 3, 4}));
       cache.flushAsync().join();
-      long applied = cache.stats().mutationApplied;
+      long applied = cache.stats().getMutationApplied();
 
       assertTrue(cache.putEncoded(key, new byte[] {5, 6, 7, 8}));
       cache.flushAsync().join();
 
       assertEquals(
-          cache.stats().mutationApplied,
+          cache.stats().getMutationApplied(),
           applied,
           "same allocation weight and deadline leave actor-owned policy/timer state unchanged");
       assertTrue(
@@ -159,13 +159,13 @@ public class EncodedWriteTest {
                 "write "
                     + write
                     + " rejected: unhealthy="
-                    + stats.maintenanceUnhealthy
+                    + stats.getMaintenanceUnhealthy()
                     + ", resident="
-                    + stats.residentWeight
+                    + stats.getResidentWeight()
                     + ", retired="
-                    + stats.retiredWeight
+                    + stats.getRetiredWeight()
                     + ", native="
-                    + stats.nativeAllocatedBytes
+                    + stats.getNativeAllocatedBytes()
                     + ", nativeLimit="
                     + cache.nativeHardLimitForTest());
           }
@@ -173,8 +173,8 @@ public class EncodedWriteTest {
       }
       cache.flushAsync().join();
       OHCacheStats stats = cache.stats();
-      assertTrue(!stats.maintenanceUnhealthy);
-      assertTrue(stats.maintenanceAssistCount + stats.maintenanceWaitCount >= 0L);
+      assertTrue(!stats.getMaintenanceUnhealthy());
+      assertTrue(stats.getMaintenanceAssistCount() + stats.getMaintenanceWaitCount() >= 0L);
     }
   }
 }

@@ -97,13 +97,13 @@ public class OHCTimeoutDrainBenchmark {
             "OHC TTL setup rejected entry "
                 + index
                 + ": queueDepth="
-                + stats.maintenanceQueueDepth
+                + stats.getMaintenanceQueueDepth()
                 + ", resident="
-                + stats.residentWeight);
+                + stats.getResidentWeight());
       }
     }
     cache.flushAsync().join();
-    physicalExpiredBefore = cache.stats().physicalExpired;
+    physicalExpiredBefore = cache.stats().getPhysicalExpired();
     ticker.setMillis(EXPIRED_MILLIS);
   }
 
@@ -115,18 +115,18 @@ public class OHCTimeoutDrainBenchmark {
     while (cache.size() != 0L) {
       if (System.nanoTime() >= deadline) {
         throw new IllegalStateException(
-            "OHC TTL drain did not finish: " + cache.stats().ttlBacklog);
+            "OHC TTL drain did not finish: " + cache.stats().getTtlBacklog());
       }
       Thread.onSpinWait();
     }
     OHCacheStats stats = cache.stats();
-    long expired = stats.physicalExpired - physicalExpiredBefore;
-    if (expired != entries || stats.maintenanceUnhealthy) {
+    long expired = stats.getPhysicalExpired() - physicalExpiredBefore;
+    if (expired != entries || stats.getMaintenanceUnhealthy()) {
       throw new IllegalStateException(
           "invalid OHC TTL drain: expired="
               + expired
               + ", unhealthy="
-              + stats.maintenanceUnhealthy);
+              + stats.getMaintenanceUnhealthy());
     }
     return expired;
   }

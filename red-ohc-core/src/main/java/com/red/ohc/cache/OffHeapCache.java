@@ -1412,6 +1412,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         snapshot.evictionScans,
         snapshot.evictionLockedSkips,
         snapshot.retiredEntries,
+        size(),
         snapshot.liveWeight,
         resident,
         snapshot.retiredBytes,

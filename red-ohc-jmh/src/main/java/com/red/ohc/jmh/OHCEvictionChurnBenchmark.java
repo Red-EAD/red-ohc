@@ -90,7 +90,7 @@ public class OHCEvictionChurnBenchmark {
               "OHC eviction preload rejected at "
                   + index
                   + ": unhealthy="
-                  + stats.maintenanceUnhealthy);
+                  + stats.getMaintenanceUnhealthy());
         }
       }
     }
@@ -102,18 +102,18 @@ public class OHCEvictionChurnBenchmark {
     cache.flushAsync().join();
     try {
       OHCacheStats stats = cache.stats();
-      if (stats.maintenanceUnhealthy
-          || stats.maintenanceQueueDepth != 0L
-          || stats.retirementQueueDepth != 0L
-          || stats.evictionCount == 0L
-          || stats.liveWeight > cache.capacity()) {
+      if (stats.getMaintenanceUnhealthy()
+          || stats.getMaintenanceQueueDepth() != 0L
+          || stats.getRetirementQueueDepth() != 0L
+          || stats.getEvictionCount() == 0L
+          || stats.getLiveWeight() > cache.capacity()) {
         throw new IllegalStateException(
             "invalid OHC eviction churn: evictions="
-                + stats.evictionCount
+                + stats.getEvictionCount()
                 + ", queue="
-                + stats.maintenanceQueueDepth
+                + stats.getMaintenanceQueueDepth()
                 + ", live="
-                + stats.liveWeight
+                + stats.getLiveWeight()
                 + ", capacity="
                 + cache.capacity());
       }
@@ -145,7 +145,7 @@ public class OHCEvictionChurnBenchmark {
       if (!cache.putEncoded(keys[slot], values[slot])) {
         OHCacheStats stats = cache.stats();
         throw new IllegalStateException(
-            "OHC eviction churn rejected: unhealthy=" + stats.maintenanceUnhealthy);
+            "OHC eviction churn rejected: unhealthy=" + stats.getMaintenanceUnhealthy());
       }
     }
   }

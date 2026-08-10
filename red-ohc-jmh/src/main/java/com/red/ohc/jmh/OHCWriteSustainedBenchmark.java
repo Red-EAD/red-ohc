@@ -113,18 +113,18 @@ public class OHCWriteSustainedBenchmark {
         OHCacheStats stats = cache.stats();
         throw new IllegalStateException(
             "OHC encoded write rejected: unhealthy="
-                + stats.maintenanceUnhealthy
+                + stats.getMaintenanceUnhealthy()
                 + ", queue="
-                + stats.maintenanceQueueDepth
+                + stats.getMaintenanceQueueDepth()
                 + ", retired="
-                + stats.retirementQueueDepth);
+                + stats.getRetirementQueueDepth());
       }
     }
   }
 
   private void assertHealthyAndDrained() {
     OHCacheStats stats = cache.stats();
-    if (stats.maintenanceUnhealthy || stats.maintenanceQueueDepth != 0L) {
+    if (stats.getMaintenanceUnhealthy() || stats.getMaintenanceQueueDepth() != 0L) {
       throw new IllegalStateException("invalid OHC sustained write measurement");
     }
   }
