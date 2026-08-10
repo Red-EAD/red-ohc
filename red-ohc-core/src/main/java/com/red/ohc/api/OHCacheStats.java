@@ -251,143 +251,143 @@ public final class OHCacheStats {
     return maintenanceProgressVersion;
   }
 
-  public void setReadHits(long readHits) {
+  void setReadHits(long readHits) {
     this.readHits = readHits;
   }
 
-  public void setReadMisses(long readMisses) {
+  void setReadMisses(long readMisses) {
     this.readMisses = readMisses;
   }
 
-  public void setReadAccessDropped(long readAccessDropped) {
+  void setReadAccessDropped(long readAccessDropped) {
     this.readAccessDropped = readAccessDropped;
   }
 
-  public void setMutationAccepted(long mutationAccepted) {
+  void setMutationAccepted(long mutationAccepted) {
     this.mutationAccepted = mutationAccepted;
   }
 
-  public void setMutationApplied(long mutationApplied) {
+  void setMutationApplied(long mutationApplied) {
     this.mutationApplied = mutationApplied;
   }
 
-  public void setMaintenanceQueueDepth(long maintenanceQueueDepth) {
+  void setMaintenanceQueueDepth(long maintenanceQueueDepth) {
     this.maintenanceQueueDepth = maintenanceQueueDepth;
   }
 
-  public void setMaintenanceQueueCapacity(long maintenanceQueueCapacity) {
+  void setMaintenanceQueueCapacity(long maintenanceQueueCapacity) {
     this.maintenanceQueueCapacity = maintenanceQueueCapacity;
   }
 
-  public void setMaintenanceLoopNanos(long maintenanceLoopNanos) {
+  void setMaintenanceLoopNanos(long maintenanceLoopNanos) {
     this.maintenanceLoopNanos = maintenanceLoopNanos;
   }
 
-  public void setMaintenanceUnhealthy(boolean maintenanceUnhealthy) {
+  void setMaintenanceUnhealthy(boolean maintenanceUnhealthy) {
     this.maintenanceUnhealthy = maintenanceUnhealthy;
   }
 
-  public void setLogicalExpired(long logicalExpired) {
+  void setLogicalExpired(long logicalExpired) {
     this.logicalExpired = logicalExpired;
   }
 
-  public void setPhysicalExpired(long physicalExpired) {
+  void setPhysicalExpired(long physicalExpired) {
     this.physicalExpired = physicalExpired;
   }
 
-  public void setTtlLagMillis(long ttlLagMillis) {
+  void setTtlLagMillis(long ttlLagMillis) {
     this.ttlLagMillis = ttlLagMillis;
   }
 
-  public void setTtlBacklog(long ttlBacklog) {
+  void setTtlBacklog(long ttlBacklog) {
     this.ttlBacklog = ttlBacklog;
   }
 
-  public void setEvictionCount(long evictionCount) {
+  void setEvictionCount(long evictionCount) {
     this.evictionCount = evictionCount;
   }
 
-  public void setEvictionScanCount(long evictionScanCount) {
+  void setEvictionScanCount(long evictionScanCount) {
     this.evictionScanCount = evictionScanCount;
   }
 
-  public void setEvictionLockedSkips(long evictionLockedSkips) {
+  void setEvictionLockedSkips(long evictionLockedSkips) {
     this.evictionLockedSkips = evictionLockedSkips;
   }
 
-  public void setRetiredEntries(long retiredEntries) {
+  void setRetiredEntries(long retiredEntries) {
     this.retiredEntries = retiredEntries;
   }
 
-  public void setSize(long size) {
+  void setSize(long size) {
     this.size = size;
   }
 
-  public void setLiveWeight(long liveWeight) {
+  void setLiveWeight(long liveWeight) {
     this.liveWeight = liveWeight;
   }
 
-  public void setResidentWeight(long residentWeight) {
+  void setResidentWeight(long residentWeight) {
     this.residentWeight = residentWeight;
   }
 
-  public void setRetiredWeight(long retiredWeight) {
+  void setRetiredWeight(long retiredWeight) {
     this.retiredWeight = retiredWeight;
   }
 
-  public void setNativeAllocatedBytes(long nativeAllocatedBytes) {
+  void setNativeAllocatedBytes(long nativeAllocatedBytes) {
     this.nativeAllocatedBytes = nativeAllocatedBytes;
   }
 
-  public void setTimerHeapBytes(long timerHeapBytes) {
+  void setTimerHeapBytes(long timerHeapBytes) {
     this.timerHeapBytes = timerHeapBytes;
   }
 
-  public void setSketchHeapBytes(long sketchHeapBytes) {
+  void setSketchHeapBytes(long sketchHeapBytes) {
     this.sketchHeapBytes = sketchHeapBytes;
   }
 
-  public void setGhostHeapBytes(long ghostHeapBytes) {
+  void setGhostHeapBytes(long ghostHeapBytes) {
     this.ghostHeapBytes = ghostHeapBytes;
   }
 
-  public void setRetirementQueueNativeBytes(long retirementQueueNativeBytes) {
+  void setRetirementQueueNativeBytes(long retirementQueueNativeBytes) {
     this.retirementQueueNativeBytes = retirementQueueNativeBytes;
   }
 
-  public void setRetirementQueueDepth(long retirementQueueDepth) {
+  void setRetirementQueueDepth(long retirementQueueDepth) {
     this.retirementQueueDepth = retirementQueueDepth;
   }
 
-  public void setRetirementQueueCapacity(long retirementQueueCapacity) {
+  void setRetirementQueueCapacity(long retirementQueueCapacity) {
     this.retirementQueueCapacity = retirementQueueCapacity;
   }
 
-  public void setWakeSignals(long wakeSignals) {
+  void setWakeSignals(long wakeSignals) {
     this.wakeSignals = wakeSignals;
   }
 
-  public void setMergedWakeSignals(long mergedWakeSignals) {
+  void setMergedWakeSignals(long mergedWakeSignals) {
     this.mergedWakeSignals = mergedWakeSignals;
   }
 
-  public void setMaintenanceAssistCount(long maintenanceAssistCount) {
+  void setMaintenanceAssistCount(long maintenanceAssistCount) {
     this.maintenanceAssistCount = maintenanceAssistCount;
   }
 
-  public void setMaintenanceAssistWork(long maintenanceAssistWork) {
+  void setMaintenanceAssistWork(long maintenanceAssistWork) {
     this.maintenanceAssistWork = maintenanceAssistWork;
   }
 
-  public void setMaintenanceWaitCount(long maintenanceWaitCount) {
+  void setMaintenanceWaitCount(long maintenanceWaitCount) {
     this.maintenanceWaitCount = maintenanceWaitCount;
   }
 
-  public void setMaintenanceWaitNanos(long maintenanceWaitNanos) {
+  void setMaintenanceWaitNanos(long maintenanceWaitNanos) {
     this.maintenanceWaitNanos = maintenanceWaitNanos;
   }
 
-  public void setMaintenanceProgressVersion(long maintenanceProgressVersion) {
+  void setMaintenanceProgressVersion(long maintenanceProgressVersion) {
     this.maintenanceProgressVersion = maintenanceProgressVersion;
   }
 }

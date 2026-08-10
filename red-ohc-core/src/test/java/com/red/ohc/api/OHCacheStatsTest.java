@@ -1,9 +1,11 @@
 package com.red.ohc.api;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import org.testng.annotations.Test;
 
@@ -95,6 +97,17 @@ public final class OHCacheStatsTest {
         assertTrue(
             Modifier.isPrivate(field.getModifiers()),
             "stats field must be private: " + field.getName());
+      }
+    }
+  }
+
+  @Test
+  public void settersAreInternalOnly() {
+    for (Method method : OHCacheStats.class.getDeclaredMethods()) {
+      if (method.getName().startsWith("set")) {
+        assertFalse(
+            Modifier.isPublic(method.getModifiers()),
+            "stats setter must not be public: " + method.getName());
       }
     }
   }
