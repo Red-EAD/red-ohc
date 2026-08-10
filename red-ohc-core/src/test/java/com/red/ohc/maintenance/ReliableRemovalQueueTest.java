@@ -16,12 +16,12 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
     Entry entry = new Entry(0L, 0, 1, 0L);
 
-    assertTrue(queue.reserve(first));
+    assertTrue(queue.tryReserve(first));
     assertFalse(queue.poll() != null, "an uncommitted ticket must block consumption");
     queue.commit(first, entry);
     assertEquals(queue.poll(), entry);
 
-    assertTrue(queue.reserve(second));
+    assertTrue(queue.tryReserve(second));
     queue.cancel(second);
     assertTrue(queue.pollTombstone());
     assertEquals(queue.size(), 0L);
@@ -32,7 +32,7 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
 
-    assertTrue(queue.reserve(reservation));
+    assertTrue(queue.tryReserve(reservation));
     assertEquals(queue.size(), 1L);
     assertFalse(queue.hasCommittedHead());
 
@@ -46,8 +46,8 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Reservation first = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
 
-    assertTrue(queue.reserve(first));
-    assertTrue(queue.reserve(second));
+    assertTrue(queue.tryReserve(first));
+    assertTrue(queue.tryReserve(second));
     queue.commit(second, new Entry(0L, 0, 2, 0L));
     assertFalse(queue.pollTombstone());
     queue.cancel(first);
@@ -62,7 +62,7 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
     Entry entry = new Entry(0L, 0, 3, 0L);
 
-    assertTrue(queue.reserve(reservation));
+    assertTrue(queue.tryReserve(reservation));
     queue.commit(reservation, entry);
     queue.cancel(reservation);
 
@@ -77,9 +77,9 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Reservation first = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
 
-    assertTrue(queue.reserve(first));
+    assertTrue(queue.tryReserve(first));
     queue.commit(first, new Entry(0L, 0, 4, 0L));
-    assertTrue(queue.reserve(second));
+    assertTrue(queue.tryReserve(second));
     queue.cancel(second);
 
     assertEquals(queue.drain(), 2);

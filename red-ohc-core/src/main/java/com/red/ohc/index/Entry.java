@@ -4,7 +4,6 @@ import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
-import java.util.concurrent.locks.LockSupport;
 
 import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.NativeMemory;
@@ -94,6 +93,7 @@ public final class Entry {
   public volatile long maintenanceMeta;
 
   public long policyWeight;
+  public long policyByteWeight;
   public volatile int pendingFlags;
 
   public Entry(long nativeKeyAddress, int keyLength, int chmHash, long valueAddress) {
@@ -441,30 +441,6 @@ public final class Entry {
 
   public void timerSlot(int slot) {
     timerLocation = (timerLocation & ~TIMER_SLOT_MASK) | (slot & TIMER_SLOT_MASK);
-  }
-
-  /** Starts the reliable remove claim held until CHM and retirement publication complete. */
-  public boolean beginPending(int flags) {
-    if (flags != PENDING_REMOVE) {
-      throw new IllegalArgumentException("invalid pending flags: " + flags);
-    }
-    int spins = 0;
-    while (true) {
-      int current = pendingFlags;
-      if ((current & PENDING_CLAIMED) != 0) {
-        if (spins++ < 64) {
-          Thread.onSpinWait();
-        } else {
-          spins = 0;
-          LockSupport.parkNanos(this, 1_000L);
-        }
-        continue;
-      }
-      if (PENDING.compareAndSet(
-          this, current, current | PENDING_CLAIMED | (flags << PENDING_CLAIM_SHIFT))) {
-        return true;
-      }
-    }
   }
 
   /** Attempts a reliable-removal claim once; callers must not wait for another producer. */

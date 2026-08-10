@@ -129,7 +129,7 @@ public class EncodedWriteTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void pendingByteWatermarkDoesNotMakeEncodedWritesWaitForMaintenance() {
+  public void rejectedEncodedWritesSkipAdmissionWithoutWaitingForMaintenance() {
     final int keys = 4_096;
     try (OffHeapCache<byte[], byte[]> cache =
         (OffHeapCache<byte[], byte[]>)
@@ -146,14 +146,10 @@ public class EncodedWriteTest {
         key[1] = (byte) (i >>> 8);
         encoded[i] = EncodedKey.copyOf(key);
       }
-      long waitCount = cache.stats().getMaintenanceWaitCount();
       int accepted = 0;
       boolean rejected = false;
       outer:
       for (int i = 0; i < 20_000; i += 64) {
-        while (cache.mutationBacklogExceeds()) {
-          Thread.yield();
-        }
         for (int offset = 0; offset < 64; offset++) {
           int write = i + offset;
           if (!cache.putEncoded(encoded[write & (keys - 1)], value)) {
@@ -168,7 +164,6 @@ public class EncodedWriteTest {
       assertTrue(accepted > 0);
       assertTrue(rejected || accepted >= 20_000);
       assertTrue(!stats.getMaintenanceUnhealthy());
-      assertEquals(stats.getMaintenanceWaitCount(), waitCount);
     }
   }
 }

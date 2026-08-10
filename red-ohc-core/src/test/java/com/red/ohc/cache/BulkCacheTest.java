@@ -1,7 +1,11 @@
 package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotSame;
+import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.expectThrows;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -95,6 +99,237 @@ public class BulkCacheTest {
                 assertTrue(cache.getDirect("inner", inner -> assertEquals(inner.length(), 11)));
                 assertEquals(outer.length(), 11);
               }));
+    }
+  }
+
+  @Test
+  public void directValueKeepsItsBufferAcrossNestedDeserialization() {
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("outer", "outer-value"));
+      assertTrue(cache.put("inner", "inner-value"));
+      cache.flushAsync().join();
+
+      assertTrue(
+          cache.getDirect(
+              "outer",
+              outer -> {
+                assertEquals(cache.get("inner"), "inner-value");
+                ByteBuffer buffer = outer.asReadOnlyByteBuffer();
+                assertEquals(buffer.get(0), (byte) 'o');
+              }));
+    }
+  }
+
+  @Test
+  public void directValueExposesReadOnlyNativeBufferAndInvalidatesItAfterCallback() {
+    AtomicReference<com.red.ohc.api.ValueView> viewRef = new AtomicReference<>();
+    AtomicReference<ByteBuffer> bufferRef = new AtomicReference<>();
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("key", "value"));
+      cache.flushAsync().join();
+
+      assertTrue(
+          cache.getDirect(
+              "key",
+              view -> {
+                ByteBuffer buffer = view.asReadOnlyByteBuffer();
+                viewRef.set(view);
+                bufferRef.set(buffer);
+                assertTrue(buffer.isDirect());
+                assertTrue(buffer.isReadOnly());
+                assertFalse(buffer.hasArray());
+                assertEquals(buffer.position(), 0);
+                assertEquals(buffer.limit(), 5);
+                assertEquals(buffer.get(0), (byte) 'v');
+                ByteBuffer slice = buffer.slice();
+                ByteBuffer duplicate = buffer.duplicate();
+                assertTrue(slice.isDirect());
+                assertTrue(slice.isReadOnly());
+                assertEquals(slice.get(0), (byte) 'v');
+                assertEquals(duplicate.get(0), (byte) 'v');
+                expectThrows(java.nio.ReadOnlyBufferException.class, () -> buffer.put((byte) 1));
+              }));
+
+      assertEquals(bufferRef.get().limit(), 0);
+      expectThrows(java.nio.BufferUnderflowException.class, bufferRef.get()::get);
+      expectThrows(IllegalStateException.class, () -> viewRef.get().length());
+      expectThrows(IllegalStateException.class, () -> viewRef.get().asReadOnlyByteBuffer());
+      expectThrows(IllegalStateException.class, () -> viewRef.get().getByte(0));
+      expectThrows(
+          IllegalStateException.class, () -> viewRef.get().copyTo(new byte[5], 0));
+    }
+  }
+
+  @Test
+  public void directValueReusesAndReinitializesTheNativeBufferShell() {
+    AtomicReference<ByteBuffer> first = new AtomicReference<>();
+    AtomicReference<ByteBuffer> second = new AtomicReference<>();
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("key", "value"));
+      cache.flushAsync().join();
+
+      assertTrue(
+          cache.getDirect(
+              "key",
+              view -> {
+                first.set(view.asReadOnlyByteBuffer());
+                first.get().position(2);
+                first.get().order(java.nio.ByteOrder.LITTLE_ENDIAN);
+              }));
+      assertTrue(
+          cache.getDirect(
+              "key",
+              view -> {
+                second.set(view.asReadOnlyByteBuffer());
+                assertSame(second.get(), first.get());
+                assertEquals(second.get().position(), 0);
+                assertEquals(second.get().limit(), 5);
+                assertEquals(second.get().order(), java.nio.ByteOrder.BIG_ENDIAN);
+              }));
+    }
+  }
+
+  @Test
+  public void directValueHandlesAnEmptySerializedPayloadWithoutNativeAccess() {
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("empty", ""));
+      cache.flushAsync().join();
+
+      assertTrue(
+          cache.getDirect(
+              "empty",
+              view -> {
+                ByteBuffer buffer = view.asReadOnlyByteBuffer();
+                assertTrue(buffer.isDirect());
+                assertTrue(buffer.isReadOnly());
+                assertEquals(buffer.position(), 0);
+                assertEquals(buffer.limit(), 0);
+                expectThrows(java.nio.BufferUnderflowException.class, buffer::get);
+                expectThrows(IndexOutOfBoundsException.class, () -> view.getByte(0));
+              }));
+    }
+  }
+
+  @Test
+  public void nestedDirectValuesUseIndependentNativeBufferDepths() {
+    AtomicReference<ByteBuffer> outer = new AtomicReference<>();
+    AtomicReference<ByteBuffer> inner = new AtomicReference<>();
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("outer", "outer-value"));
+      assertTrue(cache.put("inner", "inner-value"));
+      cache.flushAsync().join();
+
+      assertTrue(
+          cache.getDirect(
+              "outer",
+              outerView -> {
+                outer.set(outerView.asReadOnlyByteBuffer());
+                assertTrue(
+                    cache.getDirect(
+                        "inner",
+                        innerView -> {
+                          inner.set(innerView.asReadOnlyByteBuffer());
+                          assertNotSame(inner.get(), outer.get());
+                          assertEquals(outer.get().get(0), (byte) 'o');
+                        }));
+                assertEquals(outer.get().get(0), (byte) 'o');
+              }));
+
+      assertEquals(outer.get().limit(), 0);
+      assertEquals(inner.get().limit(), 0);
+    }
+  }
+
+  @Test
+  public void directAllRebindsTheBorrowedBufferForEachCallbackAndCleansUpOnFailure() {
+    RuntimeException failure = new RuntimeException("direct-all buffer failure");
+    AtomicReference<ByteBuffer> first = new AtomicReference<>();
+    AtomicReference<ByteBuffer> last = new AtomicReference<>();
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("first", "first-value"));
+      assertTrue(cache.put("second", "second-value"));
+      cache.flushAsync().join();
+
+      RuntimeException actual =
+          expectThrows(
+              RuntimeException.class,
+              () ->
+                  cache.getDirectAll(
+                      Arrays.asList("first", "second"),
+                      (key, view) -> {
+                        ByteBuffer current = view.asReadOnlyByteBuffer();
+                        if (first.compareAndSet(null, current)) {
+                          assertEquals(current.limit(), 11);
+                          return;
+                        }
+                        assertSame(current, first.get());
+                        assertEquals(current.limit(), 12);
+                        last.set(current);
+                        throw failure;
+                      }));
+
+      assertSame(actual, failure);
+      assertEquals(last.get().limit(), 0);
+      assertTrue(cache.getDirect("first", view -> assertEquals(view.length(), 11)));
+    }
+  }
+
+  @Test
+  public void directValueBufferIsInvalidatedWhenConsumerThrows() {
+    RuntimeException failure = new RuntimeException("buffer consumer failure");
+    AtomicReference<ByteBuffer> bufferRef = new AtomicReference<>();
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("key", "value"));
+      cache.flushAsync().join();
+
+      RuntimeException actual =
+          expectThrows(
+              RuntimeException.class,
+              () ->
+                  cache.getDirect(
+                      "key",
+                      view -> {
+                        bufferRef.set(view.asReadOnlyByteBuffer());
+                        throw failure;
+                      }));
+      assertSame(actual, failure);
+      assertEquals(bufferRef.get().limit(), 0);
+      assertTrue(cache.getDirect("key", view -> assertEquals(view.length(), 5)));
     }
   }
 
@@ -733,9 +968,6 @@ public class BulkCacheTest {
       }
       assertEquals(cache.putAll(values), values.size());
       assertEquals(cache.get("repair-paused-2049"), "value-2049");
-      OHCacheStats stats = cache.stats();
-      assertEquals(stats.getMaintenanceAssistCount(), 0L);
-      assertEquals(stats.getMaintenanceWaitCount(), 0L);
     } finally {
       release.countDown();
       holder.join(2_000L);

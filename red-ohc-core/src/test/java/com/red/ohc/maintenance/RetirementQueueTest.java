@@ -227,24 +227,4 @@ public class RetirementQueueTest {
     }
   }
 
-  @Test
-  public void queuedReservationsExposeCapacityAndTheSevenEighthsBackpressureWatermark() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    RetirementQueue queue = new RetirementQueue(memory, 1, 8);
-    RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
-    try {
-      assertEquals(queue.capacityRecords(), 8L);
-      assertTrue(queue.reserve(reservation, 7));
-      assertEquals(queue.queuedRecords(), 7L);
-      assertTrue(queue.exceedsHighWatermark());
-      assertFalse(
-          queue.reserve(new RetirementQueue.Reservation(), 2),
-          "a producer must reject before it can overwrite an unretired FIFO record");
-      queue.cancel(reservation);
-    } finally {
-      queue.freeAll();
-      queue.close();
-      memory.closeArenas();
-    }
-  }
 }

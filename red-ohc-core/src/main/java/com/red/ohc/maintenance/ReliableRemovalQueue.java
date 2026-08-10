@@ -28,24 +28,6 @@ public final class ReliableRemovalQueue {
     this.mask = capacity - 1;
   }
 
-  public boolean reserve(Reservation reservation) {
-    if (reservation.active()) {
-      throw new IllegalStateException("reservation is active");
-    }
-    while (true) {
-      long start = producer.get();
-      Slot slot = slots[(int) start & mask];
-      if (slot.sequence != start) {
-        return false;
-      }
-      if (producer.compareAndSet(start, start + 1L)) {
-        reservation.sequence = start;
-        reservation.slot = slot;
-        return true;
-      }
-    }
-  }
-
   /** Attempts one producer-side slot reservation without spinning on a contended slot. */
   public boolean tryReserve(Reservation reservation) {
     if (reservation.active()) {

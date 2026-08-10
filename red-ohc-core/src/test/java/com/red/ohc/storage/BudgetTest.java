@@ -1,7 +1,17 @@
 package com.red.ohc.storage;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
+
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
 
@@ -11,11 +21,11 @@ public class BudgetTest {
     Budget budget = new Budget(64L);
     Budget.Lease lease = budget.leaseForCurrentThread();
 
-    assertTrue(budget.reserve(lease, 32L));
+    assertTrue(budget.tryReserve(lease, 32L));
     budget.refund(lease, 32L);
 
-    assertTrue(budget.reserve(lease, 32L));
-    assertTrue(budget.reserve(lease, 32L));
+    assertTrue(budget.tryReserve(lease, 32L));
+    assertTrue(budget.tryReserve(lease, 32L));
   }
 
   @Test
@@ -43,7 +53,7 @@ public class BudgetTest {
         executor.submit(
             () -> {
               Budget.Lease lease = budget.leaseForCurrentThread();
-              assertTrue(budget.reserve(lease, 64L));
+              assertTrue(budget.tryReserve(lease, 64L));
               return lease;
             });
     Budget.Lease lease = future.get(1L, java.util.concurrent.TimeUnit.SECONDS);
@@ -61,11 +71,11 @@ public class BudgetTest {
     Budget budget = new Budget(64L);
     Budget.Lease lease = budget.leaseForCurrentThread();
 
-    assertTrue(budget.reserve(lease, 32L));
+    assertTrue(budget.tryReserve(lease, 32L));
     budget.refund(lease, 32L);
 
     assertTrue(
-        budget.reserve(lease, 64L),
+        budget.tryReserve(lease, 64L),
         "the first allocation was fully refunded, so the full budget is admissible again");
   }
 
@@ -74,9 +84,9 @@ public class BudgetTest {
     Budget budget = new Budget(128L);
     Budget.Lease lease = budget.leaseForCurrentThread();
 
-    assertTrue(budget.reserve(lease, 1L), "the first allocation retains a local refill remainder");
+    assertTrue(budget.tryReserve(lease, 1L), "the first allocation retains a local refill remainder");
     assertTrue(
-        budget.reserve(lease, 121L),
+        budget.tryReserve(lease, 121L),
         "global free bytes plus the caller's partial lease credit still fit below capacity");
   }
 
@@ -85,10 +95,10 @@ public class BudgetTest {
     Budget budget = new Budget(1 << 20);
     Budget.Lease lease = budget.leaseForCurrentThread();
 
-    assertTrue(budget.reserve(lease, 8L));
+    assertTrue(budget.tryReserve(lease, 8L));
     long afterFirst = lease.credit();
     assertTrue(afterFirst > 0L, "the first small reservation should retain a local lease");
-    assertTrue(budget.reserve(lease, 8L));
+    assertTrue(budget.tryReserve(lease, 8L));
     assertTrue(lease.credit() < afterFirst);
 
     budget.refund(lease, 8L);
@@ -103,8 +113,8 @@ public class BudgetTest {
     Budget budget = new Budget(32L);
     Budget.Lease lease = budget.leaseForCurrentThread();
 
-    assertTrue(budget.reserve(lease, 16L));
-    assertTrue(budget.reserve(lease, 16L));
+    assertTrue(budget.tryReserve(lease, 16L));
+    assertTrue(budget.tryReserve(lease, 16L));
     assertEquals(budget.reserved(), 32L);
     assertTrue(lease.credit() >= 0L);
 
@@ -119,7 +129,7 @@ public class BudgetTest {
     Budget.Lease lease = budget.leaseForCurrentThread();
 
     assertTrue(lease.tryActivate());
-    assertTrue(budget.reserve(lease, 64L));
+    assertTrue(budget.tryReserve(lease, 64L));
     long activeCredit = lease.credit();
     budget.reclaimIdleLeases();
     assertEquals(
@@ -131,5 +141,76 @@ public class BudgetTest {
     budget.reclaimIdleLeases();
     assertEquals(
         lease.credit(), 0L, "an idle lease must return unused credit to the global budget");
+    assertTrue(lease.tryActivate(), "a lease must be activatable after reclaim returns it to IDLE");
+    lease.deactivate();
   }
+
+  @Test(timeOut = 2_000L)
+  public void activationReturnsBoundedlyWhileReclaimRemainsInProgress() throws Exception {
+    Budget budget = new Budget(1 << 20);
+    Budget.Lease lease = budget.leaseForCurrentThread();
+    AtomicInteger state = leaseState(lease);
+    state.set(2); // Budget.Lease.RECLAIMING
+
+    long started = System.nanoTime();
+    assertFalse(lease.tryActivate());
+    long elapsedNanos = System.nanoTime() - started;
+
+    assertTrue(
+        elapsedNanos < java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(100L),
+        "persistent reclaim must not make writer admission wait");
+    assertEquals(state.get(), 2, "bounded failure must not claim a lease still being reclaimed");
+
+    state.set(0); // Budget.Lease.IDLE
+    assertTrue(lease.tryActivate(), "the lease must become usable after reclaim completes");
+    lease.deactivate();
+    assertEquals(state.get(), 0, "deactivation must return the lease to IDLE");
+  }
+
+  @Test(timeOut = 10_000L)
+  public void globalReservationDoesNotRejectOnlyBecauseOfCasContention() throws Exception {
+    int threads = 64;
+    long bytes = 64L << 10;
+    Budget budget = new Budget(threads * bytes);
+    ExecutorService executor = Executors.newFixedThreadPool(threads);
+    CountDownLatch ready = new CountDownLatch(threads);
+    CountDownLatch start = new CountDownLatch(1);
+    AtomicInteger failures = new AtomicInteger();
+    List<Future<?>> futures = new ArrayList<>(threads);
+    try {
+      for (int index = 0; index < threads; index++) {
+        futures.add(
+            executor.submit(
+                () -> {
+                  Budget.Lease lease = budget.leaseForCurrentThread();
+                  ready.countDown();
+                  start.await();
+                  for (int attempt = 0; attempt < 1_000; attempt++) {
+                    if (!budget.tryReserve(lease, bytes)) {
+                      failures.incrementAndGet();
+                    } else {
+                      budget.release(bytes);
+                    }
+                  }
+                  return null;
+                }));
+      }
+      assertTrue(ready.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+      start.countDown();
+      for (Future<?> future : futures) {
+        future.get();
+      }
+      assertEquals(failures.get(), 0, "CAS contention must not become an admission failure");
+    } finally {
+      start.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  private static AtomicInteger leaseState(Budget.Lease lease) throws Exception {
+    Field stateField = lease.getClass().getDeclaredField("state");
+    stateField.setAccessible(true);
+    return (AtomicInteger) stateField.get(lease);
+  }
+
 }

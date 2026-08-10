@@ -1481,12 +1481,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return nativeHardLimit;
   }
 
-  public boolean mutationBacklogExceeds() {
-    return worker.mutationBacklogExceeds()
-        || worker.retirementBacklogExceeds()
-        || budget.reserved() > residentHardLimit - residentHardLimit / 8L;
-  }
-
   ConcurrentHashMap<Entry, Entry> dataForTest() {
     return data;
   }
@@ -1526,11 +1520,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         snapshot.retirementQueueCapacity,
         snapshot.wakeSignals,
         snapshot.mergedWakeSignals,
-        snapshot.assistCount,
-        snapshot.assistWork,
-        snapshot.waitCount,
-        snapshot.waitNanos,
-        snapshot.progressVersion,
         snapshot.nonBlockingPutFailures,
         snapshot.nonBlockingReplaceFailures,
         snapshot.nonBlockingRemoveFailures,

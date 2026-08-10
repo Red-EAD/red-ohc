@@ -25,24 +25,11 @@ public final class EntryMappingStateTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void reliableRemovalClaimBlocksAConcurrentRemovalUntilReleased() throws Exception {
+  public void reliableRemovalClaimFailsImmediatelyWhenAnotherRemovalOwnsTheEntry() {
     Entry entry = new Entry(0L, 1, 7, 0L);
-    assertTrue(entry.beginPending(Entry.PENDING_REMOVE));
-    ExecutorService executor = Executors.newSingleThreadExecutor();
-    try {
-      Future<Boolean> second =
-          executor.submit(
-              () -> {
-                entry.beginPending(Entry.PENDING_REMOVE);
-                entry.completePendingClaim();
-                return true;
-              });
-      Thread.sleep(5L);
-      entry.completePendingClaim();
-      assertTrue(second.get(1L, TimeUnit.SECONDS));
-    } finally {
-      executor.shutdownNow();
-    }
+    assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
+    assertFalse(entry.tryBeginPending(Entry.PENDING_REMOVE));
+    entry.completePendingClaim();
   }
 
   @Test
@@ -50,7 +37,7 @@ public final class EntryMappingStateTest {
     Entry entry = new Entry(0L, 1, 7, 0L);
 
     assertEquals(entry.mutationVersion(), 0L);
-    assertTrue(entry.beginPending(Entry.PENDING_REMOVE));
+    assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
     entry.completePendingClaim();
     assertEquals(entry.mutationVersion(), 1L);
     assertEquals(

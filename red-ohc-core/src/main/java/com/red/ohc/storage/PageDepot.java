@@ -5,15 +5,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Bounded cache-owned pool of fully empty 64KiB pages shared by all allocator stripes. */
 final class PageDepot {
-  private static final int MAX_IDLE_PAGES = 128;
-
   private final NativeMemory.Memory memory;
+  private final int maxIdlePages;
   private final ConcurrentLinkedQueue<WriterArena.Page>[] pages;
   private final AtomicInteger idlePages = new AtomicInteger();
 
   @SuppressWarnings("unchecked")
-  PageDepot(NativeMemory.Memory memory) {
+  PageDepot(NativeMemory.Memory memory, int maxIdlePages) {
     this.memory = memory;
+    this.maxIdlePages = maxIdlePages;
     this.pages = new ConcurrentLinkedQueue[SizeClasses.count()];
     for (int index = 0; index < pages.length; index++) {
       pages[index] = new ConcurrentLinkedQueue<>();
@@ -38,7 +38,7 @@ final class PageDepot {
     if (!page.moveToDepot()) {
       return;
     }
-    if (idlePages.incrementAndGet() <= MAX_IDLE_PAGES) {
+    if (idlePages.incrementAndGet() <= maxIdlePages) {
       pages[page.sizeClass].offer(page);
       return;
     }

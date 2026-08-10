@@ -26,7 +26,7 @@ import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
 
-/** Sustained producer throughput, throttled only when a shard reaches its queue watermark. */
+/** Sustained producer throughput with non-blocking write admission. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Warmup(iterations = 10, time = 10)
@@ -104,20 +104,10 @@ public class OHCWriteSustainedBenchmark {
   }
 
   private void write(WriteCursor cursor) {
-    while (cache.mutationBacklogExceeds()) {
-      Thread.yield();
-    }
     for (int i = 0; i < BATCH_SIZE; i++) {
       int index = cursor.next();
       if (!cache.putEncoded(keys[index], values[index])) {
-        OHCacheStats stats = cache.stats();
-        throw new IllegalStateException(
-            "OHC encoded write rejected: unhealthy="
-                + stats.getMaintenanceUnhealthy()
-                + ", queue="
-                + stats.getMaintenanceQueueDepth()
-                + ", retired="
-                + stats.getRetirementQueueDepth());
+        throw new IllegalStateException("OHC sustained write rejected");
       }
     }
   }

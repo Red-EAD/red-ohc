@@ -310,10 +310,6 @@ public final class RetirementQueue {
     return capacityRecords;
   }
 
-  public boolean exceedsHighWatermark() {
-    return queuedRecords() >= capacityRecords - capacityRecords / 8L;
-  }
-
   /** Called only after the close gate has stopped writers and all readers are quiescent. */
   public void freeAll() {
     for (Stripe stripe : stripes) {

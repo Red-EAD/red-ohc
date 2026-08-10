@@ -112,7 +112,7 @@ public class WriterArenaTest {
     try {
       WriterArena arena = arena(memory, 0);
       long bytes = 32_752L;
-      int pages = 129;
+      int pages = memory.pooledPageLimit() + 1;
       List<Long> entries = new ArrayList<>(pages * 2);
       for (int index = 0; index < pages * 2; index++) {
         entries.add(arena.allocate(bytes));
@@ -123,7 +123,7 @@ public class WriterArenaTest {
 
       Assert.assertEquals(
           memory.allocated(),
-          128L * SizeClasses.PAGE_BYTES,
+          (long) memory.pooledPageLimit() * SizeClasses.PAGE_BYTES,
           "only the bounded shared idle-page reserve may remain physically allocated");
     } finally {
       memory.closeArenas();
@@ -205,17 +205,17 @@ public class WriterArenaTest {
 
   @Test
   public void pooledPageLimitFallsBackToDirectAllocationForSmallEntries() {
+    long hardLimit = 512L * SizeClasses.PAGE_BYTES + WriterArena.directAllocationBytes(32_752L);
     NativeMemory.Memory memory =
-        new NativeMemory.Memory(
-            AllocatorType.JNA,
-            (long) NativeMemory.Memory.pooledPageLimit() * SizeClasses.PAGE_BYTES
-                + WriterArena.directAllocationBytes(32_752L));
-    List<Long> entries = new ArrayList<>(NativeMemory.Memory.pooledPageLimit() + 1);
+        new NativeMemory.Memory(AllocatorType.JNA, hardLimit);
+    int pooledPageLimit = memory.pooledPageLimit();
+    Assert.assertTrue(pooledPageLimit > 128, "the page pool must exceed the legacy global cap");
+    List<Long> entries = new ArrayList<>(pooledPageLimit + 1);
     long bytes = 32_752L;
     try {
       int entriesPerPage =
           SizeClasses.PAGE_BYTES / SizeClasses.slotBytes(SizeClasses.indexForEntry(bytes));
-      int total = NativeMemory.Memory.pooledPageLimit() * entriesPerPage + 1;
+      int total = pooledPageLimit * entriesPerPage + 1;
       for (int i = 0; i < total; i++) {
         entries.add(memory.newWriterArena().allocate(bytes));
       }
@@ -224,8 +224,24 @@ public class WriterArenaTest {
       }
       Assert.assertEquals(
           memory.allocated(),
-          (long) NativeMemory.Memory.pooledPageLimit() * SizeClasses.PAGE_BYTES,
+          (long) pooledPageLimit * SizeClasses.PAGE_BYTES,
           "small allocations must use direct fallback once pooled pages hit their hard cap");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void subPageHardLimitUsesDirectFallbackWithoutAllocatingAPage() {
+    long bytes = 112L;
+    long hardLimit = WriterArena.directAllocationBytes(bytes);
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA, hardLimit);
+    try {
+      Assert.assertEquals(memory.pooledPageLimit(), 0);
+      long entry = memory.newWriterArena().allocate(bytes);
+      Assert.assertEquals(memory.allocated(), hardLimit);
+      memory.releaseEntry(entry, bytes);
+      Assert.assertEquals(memory.allocated(), 0L);
     } finally {
       memory.closeArenas();
     }

@@ -1,7 +1,5 @@
 package com.red.ohc.maintenance;
 
-import java.util.IdentityHashMap;
-
 import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 
 import com.red.ohc.api.Eviction;
@@ -34,7 +32,6 @@ public final class MaintenancePolicy {
   private final EntryDeque window = new EntryDeque();
   private final EntryDeque probation = new EntryDeque();
   private final EntryDeque protectedQueue = new EntryDeque();
-  private final IdentityHashMap<Entry, Long> byteWeights = new IdentityHashMap<>();
   private final Long2LongLinkedOpenHashMap ghost;
   private final long ghostMaximum;
   private final long smallMaximum;
@@ -96,7 +93,7 @@ public final class MaintenancePolicy {
     entry.policyWeight = weightOf(entry);
     weightedSize += entry.policyWeight;
     long bytes = byteWeightOf(entry);
-    byteWeights.put(entry, bytes);
+    entry.policyByteWeight = bytes;
     liveBytes += bytes;
     switch (eviction) {
       case S3_FIFO:
@@ -176,6 +173,8 @@ public final class MaintenancePolicy {
   private void remove(Entry entry, boolean eviction, long keyHash64, boolean hashProvided) {
     int state = entry.policyState();
     if (state == Entry.POLICY_NONE) {
+      entry.policyWeight = 0L;
+      entry.policyByteWeight = 0L;
       return;
     }
     switch (state) {
@@ -209,10 +208,10 @@ public final class MaintenancePolicy {
       default:
     }
     weightedSize -= entry.policyWeight;
-    Long removedByteWeight = byteWeights.remove(entry);
-    liveBytes -= removedByteWeight == null ? byteWeightOf(entry) : removedByteWeight;
+    liveBytes -= entry.policyByteWeight;
     entry.policyState(Entry.POLICY_NONE);
     entry.policyWeight = 0L;
+    entry.policyByteWeight = 0L;
     entry.policyAccessCount(0);
     if (eviction) {
       evictions++;
@@ -491,9 +490,8 @@ public final class MaintenancePolicy {
     long updated = weightOf(entry);
     long updatedBytes = byteWeightOf(entry);
     long delta = updated - entry.policyWeight;
-    Long previousBytes = byteWeights.get(entry);
-    long byteDelta = updatedBytes - (previousBytes == null ? updatedBytes : previousBytes);
-    if (previousBytes != null && delta == 0L && byteDelta == 0L) {
+    long byteDelta = updatedBytes - entry.policyByteWeight;
+    if (delta == 0L && byteDelta == 0L) {
       return;
     }
     weightedSize += delta;
@@ -517,7 +515,7 @@ public final class MaintenancePolicy {
       default:
     }
     entry.policyWeight = updated;
-    byteWeights.put(entry, updatedBytes);
+    entry.policyByteWeight = updatedBytes;
   }
 
   private void addGhost(Entry entry, long fingerprint) {

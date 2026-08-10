@@ -1,6 +1,7 @@
 package com.red.ohc.maintenance;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertSame;
 
@@ -9,11 +10,15 @@ import java.nio.charset.StandardCharsets;
 
 import org.testng.annotations.Test;
 
+import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.index.Entry;
+import com.red.ohc.storage.NativeMemory;
+import com.red.ohc.storage.ValueBlock;
+import com.red.ohc.storage.WriterArena;
 
 public class MaintenancePolicyTest {
   private static final CacheSerializer<String> STRING =
@@ -142,5 +147,85 @@ public class MaintenancePolicyTest {
         policy.selectVictim(1).entry,
         small,
         "S3-FIFO evicts Small at >= quota, rather than taking a Main victim early");
+  }
+
+  @Test
+  public void storesPrimitiveByteWeightAndRemovesItWithTheEntry() throws Exception {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.LRU, 1_024L);
+    Entry entry = new Entry(0L, 1, 7, 0L);
+    long expected = WriterArena.allocationWeight(entry.keyAllocationLength());
+
+    policy.add(entry);
+
+    assertEquals(entry.policyByteWeight, expected);
+    assertEquals(policy.usedBytes(), expected);
+    assertEquals(policy.usedWeight(), expected);
+
+    policy.remove(entry, false);
+
+    assertEquals(entry.policyByteWeight, 0L);
+    assertEquals(entry.policyWeight, 0L);
+    assertEquals(policy.usedBytes(), 0L);
+    assertEquals(policy.usedWeight(), 0L);
+
+    for (java.lang.reflect.Field field : MaintenancePolicy.class.getDeclaredFields()) {
+      assertFalse(
+          field.getName().equals("byteWeights"),
+          "per-entry byte weights must not be retained in an IdentityHashMap");
+    }
+  }
+
+  @Test
+  public void updatesByteWeightAndKeepsCountBoundedPolicyWeightAtOne() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    long value = 0L;
+    try {
+      Entry entry = new Entry(0L, 1, 8, 0L);
+      MaintenancePolicy bytePolicy = new MaintenancePolicy(Eviction.W_TINY_LFU, 1_024L);
+      bytePolicy.add(entry);
+      long keyWeight = WriterArena.allocationWeight(entry.keyAllocationLength());
+
+      value = memory.allocate(ValueBlock.allocationLength(32));
+      ValueBlock.initialize(value, 0L, 32);
+      entry.valueAddress = value;
+      bytePolicy.add(entry);
+
+      long expected =
+          keyWeight
+              + WriterArena.allocationWeight(ValueBlock.allocationLength(32));
+      assertEquals(entry.policyByteWeight, expected);
+      assertEquals(bytePolicy.usedBytes(), expected);
+      assertEquals(bytePolicy.usedWeight(), expected);
+
+      MaintenancePolicy countPolicy = new MaintenancePolicy(Eviction.S3_FIFO, 16L, true);
+      Entry countEntry = new Entry(0L, 1, 9, 0L);
+      countPolicy.add(countEntry);
+      assertEquals(countEntry.policyWeight, 1L);
+      assertEquals(countPolicy.usedWeight(), 1L);
+      assertEquals(countPolicy.usedBytes(), keyWeight);
+      countPolicy.remove(countEntry, false);
+      assertEquals(countPolicy.usedWeight(), 0L);
+      assertEquals(countPolicy.usedBytes(), 0L);
+    } finally {
+      if (value != 0L) {
+        memory.free(value, ValueBlock.allocationLength(32));
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void removeClearsPolicyMetadataFromAnAlreadyUnlinkedEntry() {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.LRU, 1_024L);
+    Entry entry = new Entry(0L, 1, 10, 0L);
+    entry.policyWeight = 7L;
+    entry.policyByteWeight = 256L;
+
+    policy.remove(entry, false);
+
+    assertEquals(entry.policyWeight, 0L);
+    assertEquals(entry.policyByteWeight, 0L);
+    assertEquals(policy.usedWeight(), 0L);
+    assertEquals(policy.usedBytes(), 0L);
   }
 }

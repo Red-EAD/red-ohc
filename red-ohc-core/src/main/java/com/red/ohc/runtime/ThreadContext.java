@@ -147,26 +147,37 @@ public final class ThreadContext {
   }
 
   public DirectValueView pushDirectView(long address, int length) {
-    if (directViewDepth == directViews.length) {
-      DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
-      System.arraycopy(directViews, 0, expanded, 0, directViews.length);
-      directViews = expanded;
+    ByteBuffer buffer = readOnlyValueBuffer(address, length);
+    try {
+      if (directViewDepth == directViews.length) {
+        DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
+        System.arraycopy(directViews, 0, expanded, 0, directViews.length);
+        directViews = expanded;
+      }
+      DirectValueView view = directViews[directViewDepth];
+      if (view == null) {
+        view = new DirectValueView();
+        directViews[directViewDepth] = view;
+      }
+      directViewDepth++;
+      view.reset(address, length, buffer);
+      return view;
+    } catch (Throwable failure) {
+      releaseReadOnlyValueBuffer();
+      throw failure;
     }
-    DirectValueView view = directViews[directViewDepth];
-    if (view == null) {
-      view = new DirectValueView();
-      directViews[directViewDepth] = view;
-    }
-    directViewDepth++;
-    view.reset(address, length);
-    return view;
   }
 
   public void popDirectView() {
     if (directViewDepth <= 0) {
       throw new IllegalStateException("direct view is not entered");
     }
-    directViews[--directViewDepth].reset(0L, 0);
+    DirectValueView view = directViews[--directViewDepth];
+    try {
+      view.reset(0L, 0, null);
+    } finally {
+      releaseReadOnlyValueBuffer();
+    }
   }
 
   /** Acquires per-depth duplicate tracking without retaining a huge collection's table. */

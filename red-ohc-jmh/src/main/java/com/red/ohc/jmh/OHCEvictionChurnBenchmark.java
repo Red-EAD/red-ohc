@@ -30,8 +30,7 @@ import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
 /**
- * Stable 120%-working-set insertion churn. Producers are throttled only at OHC's documented backlog
- * watermark, so the measured rate is one that the actor can sustain without rejects.
+ * Stable 120%-working-set insertion churn using non-blocking producer admission.
  */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
@@ -81,9 +80,6 @@ public class OHCEvictionChurnBenchmark {
       keys[index] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, index));
       values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
       if (index < CAPACITY_ENTRIES) {
-        while (cache.mutationBacklogExceeds()) {
-          Thread.yield();
-        }
         if (!cache.putEncoded(keys[index], values[index])) {
           OHCacheStats stats = cache.stats();
           throw new IllegalStateException(
@@ -137,15 +133,10 @@ public class OHCEvictionChurnBenchmark {
   }
 
   private void churn(Cursor cursor) {
-    while (cache.mutationBacklogExceeds()) {
-      Thread.yield();
-    }
     for (int index = 0; index < BATCH_SIZE; index++) {
       int slot = cursor.next();
       if (!cache.putEncoded(keys[slot], values[slot])) {
-        OHCacheStats stats = cache.stats();
-        throw new IllegalStateException(
-            "OHC eviction churn rejected: unhealthy=" + stats.getMaintenanceUnhealthy());
+        throw new IllegalStateException("OHC eviction churn write rejected");
       }
     }
   }

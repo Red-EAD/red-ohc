@@ -32,11 +32,6 @@ public final class OHCacheStats {
   private long retirementQueueCapacity;
   private long wakeSignals;
   private long mergedWakeSignals;
-  private long maintenanceAssistCount;
-  private long maintenanceAssistWork;
-  private long maintenanceWaitCount;
-  private long maintenanceWaitNanos;
-  private long maintenanceProgressVersion;
   private long nonBlockingPutFailureCount;
   private long nonBlockingReplaceFailureCount;
   private long nonBlockingRemoveFailureCount;
@@ -81,97 +76,6 @@ public final class OHCacheStats {
       long retirementQueueCapacity,
       long wakeSignals,
       long mergedWakeSignals,
-      long maintenanceAssistCount,
-      long maintenanceAssistWork,
-      long maintenanceWaitCount,
-      long maintenanceWaitNanos,
-      long maintenanceProgressVersion) {
-    this(
-        readHits,
-        readMisses,
-        readAccessDropped,
-        mutationAccepted,
-        mutationApplied,
-        maintenanceQueueDepth,
-        maintenanceQueueCapacity,
-        maintenanceLoopNanos,
-        maintenanceUnhealthy,
-        logicalExpired,
-        physicalExpired,
-        ttlLagMillis,
-        ttlBacklog,
-        evictionCount,
-        evictionScanCount,
-        evictionLockedSkips,
-        retiredEntries,
-        size,
-        liveWeight,
-        residentWeight,
-        retiredWeight,
-        nativeAllocatedBytes,
-        timerHeapBytes,
-        sketchHeapBytes,
-        ghostHeapBytes,
-        retirementQueueNativeBytes,
-        retirementQueueDepth,
-        retirementQueueCapacity,
-        wakeSignals,
-        mergedWakeSignals,
-        maintenanceAssistCount,
-        maintenanceAssistWork,
-        maintenanceWaitCount,
-        maintenanceWaitNanos,
-        maintenanceProgressVersion,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L);
-  }
-
-  public OHCacheStats(
-      long readHits,
-      long readMisses,
-      long readAccessDropped,
-      long mutationAccepted,
-      long mutationApplied,
-      long maintenanceQueueDepth,
-      long maintenanceQueueCapacity,
-      long maintenanceLoopNanos,
-      boolean maintenanceUnhealthy,
-      long logicalExpired,
-      long physicalExpired,
-      long ttlLagMillis,
-      long ttlBacklog,
-      long evictionCount,
-      long evictionScanCount,
-      long evictionLockedSkips,
-      long retiredEntries,
-      long size,
-      long liveWeight,
-      long residentWeight,
-      long retiredWeight,
-      long nativeAllocatedBytes,
-      long timerHeapBytes,
-      long sketchHeapBytes,
-      long ghostHeapBytes,
-      long retirementQueueNativeBytes,
-      long retirementQueueDepth,
-      long retirementQueueCapacity,
-      long wakeSignals,
-      long mergedWakeSignals,
-      long maintenanceAssistCount,
-      long maintenanceAssistWork,
-      long maintenanceWaitCount,
-      long maintenanceWaitNanos,
-      long maintenanceProgressVersion,
       long nonBlockingPutFailureCount,
       long nonBlockingReplaceFailureCount,
       long nonBlockingRemoveFailureCount,
@@ -214,11 +118,6 @@ public final class OHCacheStats {
     this.retirementQueueCapacity = retirementQueueCapacity;
     this.wakeSignals = wakeSignals;
     this.mergedWakeSignals = mergedWakeSignals;
-    this.maintenanceAssistCount = maintenanceAssistCount;
-    this.maintenanceAssistWork = maintenanceAssistWork;
-    this.maintenanceWaitCount = maintenanceWaitCount;
-    this.maintenanceWaitNanos = maintenanceWaitNanos;
-    this.maintenanceProgressVersion = maintenanceProgressVersion;
     this.nonBlockingPutFailureCount = nonBlockingPutFailureCount;
     this.nonBlockingReplaceFailureCount = nonBlockingReplaceFailureCount;
     this.nonBlockingRemoveFailureCount = nonBlockingRemoveFailureCount;
@@ -353,26 +252,6 @@ public final class OHCacheStats {
     return mergedWakeSignals;
   }
 
-  public long getMaintenanceAssistCount() {
-    return maintenanceAssistCount;
-  }
-
-  public long getMaintenanceAssistWork() {
-    return maintenanceAssistWork;
-  }
-
-  public long getMaintenanceWaitCount() {
-    return maintenanceWaitCount;
-  }
-
-  public long getMaintenanceWaitNanos() {
-    return maintenanceWaitNanos;
-  }
-
-  public long getMaintenanceProgressVersion() {
-    return maintenanceProgressVersion;
-  }
-
   public long getNonBlockingPutFailureCount() {
     return nonBlockingPutFailureCount;
   }
@@ -419,8 +298,5 @@ public final class OHCacheStats {
 
   public long getAsyncMutationRejectedCount() {
     return asyncMutationRejectedCount;
-  }
-  void setSize(long size) {
-    this.size = size;
   }
 }

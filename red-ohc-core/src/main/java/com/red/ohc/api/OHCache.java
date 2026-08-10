@@ -26,10 +26,18 @@ public interface OHCache<K, V> extends AutoCloseable {
 
   int removeAll(Collection<? extends K> keys);
 
-  /** Reads a live value without deserialization while the callback is running. */
+  /**
+   * Reads a live value without deserialization and invokes the consumer synchronously on the
+   * calling thread. The callback-scoped {@link ValueView} and any direct buffer obtained from it
+   * must not escape the callback.
+   */
   boolean getDirect(K key, DirectValueConsumer consumer);
 
-  /** Reads live values without deserialization, invoking the callback once per hit. */
+  /**
+   * Reads live values without deserialization and invokes the consumer synchronously on the
+   * calling thread once per unique hit. Each callback-scoped {@link ValueView} and direct buffer
+   * must not escape its callback.
+   */
   int getDirectAll(Collection<? extends K> keys, DirectEntryConsumer<K> consumer);
 
   /**

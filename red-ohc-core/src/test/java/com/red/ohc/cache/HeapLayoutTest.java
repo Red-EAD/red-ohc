@@ -11,7 +11,8 @@ public class HeapLayoutTest {
   @Test
   public void entryMetadataStaysWithinTheSmallHeapBudget() {
     long bytes = ClassLayout.parseClass(Entry.class).instanceSize();
-    // The weakValue reference adds one aligned reference slot to the previous 96-byte Entry.
-    assertTrue(bytes <= 104L, "Entry metadata grew to " + bytes + " bytes");
+    // The weakValue reference and primitive policy byte weight add two aligned slots to the
+    // previous 96-byte Entry; this remains substantially smaller than a per-entry boxed map.
+    assertTrue(bytes <= 112L, "Entry metadata grew to " + bytes + " bytes");
   }
 }

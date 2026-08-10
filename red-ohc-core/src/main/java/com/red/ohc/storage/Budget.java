@@ -35,38 +35,6 @@ public final class Budget {
     return lease;
   }
 
-  public boolean reserve(Lease lease, long bytes) {
-    if (lease == null || lease.owner != this) {
-      throw new IllegalArgumentException("foreign budget lease");
-    }
-    if (bytes <= 0L || bytes > capacity) {
-      return false;
-    }
-    long credit = lease.credit;
-    if (credit >= bytes) {
-      lease.credit = credit - bytes;
-      return true;
-    }
-    long needed = bytes - credit;
-    long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
-    while (true) {
-      long free = available.get();
-      if (free < needed) {
-        reclaimDeadLeases();
-        free = available.get();
-        if (free < needed) {
-          return false;
-        }
-      }
-      long grant = Math.min(free, request);
-      if (!available.compareAndSet(free, free - grant)) {
-        continue;
-      }
-      lease.credit = credit + grant - bytes;
-      return true;
-    }
-  }
-
   /**
    * Attempts one producer-side reservation without reclaiming another writer's lease or waiting
    * for the maintenance actor.
@@ -84,17 +52,19 @@ public final class Budget {
       return true;
     }
     long needed = bytes - credit;
-    long free = available.get();
-    if (free < needed) {
-      return false;
+    while (true) {
+      long free = available.get();
+      if (free < needed) {
+        return false;
+      }
+      long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
+      long grant = Math.min(free, request);
+      if (available.compareAndSet(free, free - grant)) {
+        lease.credit = credit + grant - bytes;
+        return true;
+      }
+      Thread.onSpinWait();
     }
-    long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
-    long grant = Math.min(free, request);
-    if (!available.compareAndSet(free, free - grant)) {
-      return false;
-    }
-    lease.credit = credit + grant - bytes;
-    return true;
   }
 
   public void refund(Lease lease, long bytes) {
@@ -207,9 +177,21 @@ public final class Budget {
       return credit;
     }
 
-    /** Attempts to activate this lease once; a concurrent maintenance reclaim is a write miss. */
+    private static final int MAX_ACTIVATION_ATTEMPTS = 4;
+
+    /** Activates this lease with a bounded retry across a maintenance reclaim. */
     public boolean tryActivate() {
-      return state.compareAndSet(IDLE, ACTIVE);
+      for (int attempt = 0; attempt < MAX_ACTIVATION_ATTEMPTS; attempt++) {
+        int current = state.get();
+        if (current == ACTIVE) {
+          return false;
+        }
+        if (current == IDLE && state.compareAndSet(IDLE, ACTIVE)) {
+          return true;
+        }
+        Thread.onSpinWait();
+      }
+      return false;
     }
 
     public void deactivate() {

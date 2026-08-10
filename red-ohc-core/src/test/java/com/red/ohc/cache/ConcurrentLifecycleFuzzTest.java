@@ -22,8 +22,8 @@ import com.red.ohc.api.OHCacheStats;
 
 /**
  * Exercises the public cache with a full logical-CPU mix of mapping changes and expiry. This is
- * deliberately a liveness/allocator regression: normal writes are retried at the documented
- * watermark, while remove/get are allowed to observe the cache's weakly-consistent state.
+ * deliberately a liveness/allocator regression: writes use the cache's non-blocking admission,
+ * while remove/get are allowed to observe the cache's weakly-consistent state.
  */
 public final class ConcurrentLifecycleFuzzTest {
   private static final int KEYS = 8_192;
@@ -194,9 +194,6 @@ public final class ConcurrentLifecycleFuzzTest {
 
   private static void putBestEffort(
       OffHeapCache<Integer, Integer> cache, int key, int value, long expireAtMillis) {
-    while (cache.mutationBacklogExceeds()) {
-      Thread.yield();
-    }
     if (expireAtMillis == 0L) {
       cache.put(key, value);
     } else {

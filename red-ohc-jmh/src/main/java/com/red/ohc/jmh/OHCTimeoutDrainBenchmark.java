@@ -88,9 +88,6 @@ public class OHCTimeoutDrainBenchmark {
                 .ttlJitterPercent(0d)
                 .build();
     for (int index = 0; index < entries; index++) {
-      while (cache.mutationBacklogExceeds()) {
-        Thread.yield();
-      }
       if (!cache.putEncoded(keys[index], values[index])) {
         OHCacheStats stats = cache.stats();
         throw new IllegalStateException(

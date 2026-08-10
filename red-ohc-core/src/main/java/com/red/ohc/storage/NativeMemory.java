@@ -60,7 +60,9 @@ public final class NativeMemory {
     private final AtomicReferenceArray<AtomicReferenceArray<WriterArena.Page>> pageChunks =
         new AtomicReferenceArray<>(PAGE_CHUNK_COUNT);
     private final PageDepot pageDepot;
-    private static final int MAX_POOLED_PAGES = 128;
+    private static final int MIN_POOLED_PAGES = 512;
+    private static final int MAX_POOLED_PAGES = 2_048;
+    private final int pooledPageLimit;
     private final AtomicInteger pooledPageCount = new AtomicInteger();
 
     public Memory(AllocatorType type) {
@@ -73,7 +75,6 @@ public final class NativeMemory {
       }
       this.allocator = new NativeAllocator(type);
       this.hardLimit = hardLimit;
-      this.pageDepot = new PageDepot(this);
       int stripeCount = 1;
       int target = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
       while (stripeCount < target && stripeCount < (1 << 30)) {
@@ -84,6 +85,10 @@ public final class NativeMemory {
         arenas[index] = new WriterArena(this, index + 1);
       }
       this.stripeMask = stripeCount - 1;
+      long targetPages = Math.max(MIN_POOLED_PAGES, Math.min(MAX_POOLED_PAGES, (long) stripeCount * 8L));
+      long physicalPageLimit = hardLimit / SizeClasses.PAGE_BYTES;
+      this.pooledPageLimit = (int) Math.min(targetPages, physicalPageLimit);
+      this.pageDepot = new PageDepot(this, pooledPageLimit);
     }
 
     public long allocate(long bytes) {
@@ -131,8 +136,8 @@ public final class NativeMemory {
       return entryAllocations.get();
     }
 
-    public static int pooledPageLimit() {
-      return MAX_POOLED_PAGES;
+    int pooledPageLimit() {
+      return pooledPageLimit;
     }
 
     public long allocateEntryPage() {
@@ -215,7 +220,7 @@ public final class NativeMemory {
       }
       while (true) {
         int current = pooledPageCount.get();
-        if (current >= MAX_POOLED_PAGES) {
+        if (current >= pooledPageLimit) {
           return null;
         }
         if (pooledPageCount.compareAndSet(current, current + 1)) {

@@ -8,11 +8,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -84,7 +82,6 @@ public final class MaintenanceEventLoop
   private final AtomicBoolean allocationPressureRequested = new AtomicBoolean();
   private final ConcurrentLinkedQueue<Entry>[] repairQueues;
   private final int repairShardMask;
-  private final long repairCapacity;
   private int repairShardCursor;
   private final AtomicLong[] repairDebts;
   private final ConcurrentLinkedQueue<AsyncMutationTask> asyncMutations =
@@ -110,19 +107,9 @@ public final class MaintenanceEventLoop
   private final Thread thread;
   private final WakeGate wakeGate = new WakeGate();
 
-  /** Cold-path owner for actor state and writer assistance. */
+  /** Cold-path owner for actor state. */
   private final ReentrantLock ownerLock = new ReentrantLock();
 
-  /** Separate wait channel for writers blocked on resource progress; never held by the actor. */
-  private final ReentrantLock progressLock = new ReentrantLock();
-
-  private final Condition progressChanged = progressLock.newCondition();
-  private final AtomicLong progressVersion = new AtomicLong();
-  private final AtomicInteger waitingWriters = new AtomicInteger();
-  private final AtomicLong assistCount = new AtomicLong();
-  private final AtomicLong assistWork = new AtomicLong();
-  private final AtomicLong waitCount = new AtomicLong();
-  private final AtomicLong waitNanos = new AtomicLong();
   private final AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
   private final AtomicReference<FlushRequest> flushRequest = new AtomicReference<>();
   private volatile boolean closing;
@@ -304,13 +291,11 @@ public final class MaintenanceEventLoop
     }
     @SuppressWarnings("unchecked")
     ConcurrentLinkedQueue<Entry>[] repairQueues = new ConcurrentLinkedQueue[shardCount];
-    int repairQueueCapacity = Math.max(1_024, queueCapacity / shardCount);
     for (int i = 0; i < shardCount; i++) {
       repairQueues[i] = new ConcurrentLinkedQueue<>();
     }
     this.repairQueues = repairQueues;
     this.repairShardMask = shardCount - 1;
-    this.repairCapacity = (long) shardCount * repairQueueCapacity;
     this.repairDebts = new AtomicLong[shardCount];
     for (int i = 0; i < shardCount; i++) {
       this.repairDebts[i] = new AtomicLong();
@@ -332,14 +317,12 @@ public final class MaintenanceEventLoop
   public void stop() {
     stopping = true;
     signal();
-    signalProgressAll();
     // A close must not wait for the bounded producer-batch grace period.
     LockSupport.unpark(thread);
   }
 
   public void beginClosing() {
     closing = true;
-    signalProgressAll();
   }
 
   public void join(long timeoutMillis) throws InterruptedException {
@@ -378,30 +361,6 @@ public final class MaintenanceEventLoop
 
   public long queueCapacity() {
     return queueCapacity;
-  }
-
-  public boolean mutationBacklogExceeds() {
-    // A full advisory queue is expected under burst load and must not add writer backpressure.
-    // Only unrecoverable repair debt is a write-admission high watermark.
-    return repairDebt() >= repairCapacity;
-  }
-
-  /**
-   * Re-enables bounded writer backpressure only after the advisory repair backlog reaches its high
-   * watermark. Ordinary hints never call this method.
-   */
-  public void awaitMutationAdmission() {
-    while (mutationAdmissionBlocked()) {
-      throwIfUnavailable();
-      requestMaintenance();
-      if (!assistMaintenance()) {
-        awaitMaintenanceProgress();
-      }
-    }
-  }
-
-  private boolean mutationAdmissionBlocked() {
-    return repairDebt() >= repairCapacity;
   }
 
   public long retiredBytes() {
@@ -446,10 +405,6 @@ public final class MaintenanceEventLoop
 
   public long retirementQueueCapacity() {
     return retirements.capacityRecords();
-  }
-
-  public boolean retirementBacklogExceeds() {
-    return retirements.exceedsHighWatermark();
   }
 
   public long repairQueueDepth() {
@@ -525,9 +480,6 @@ public final class MaintenanceEventLoop
       // transition to wake the actor after its final reader leaves.
       LockSupport.unpark(thread);
     }
-    if (waitingWriters.get() != 0) {
-      signalProgress();
-    }
   }
 
   public void recordHit() {
@@ -593,90 +545,6 @@ public final class MaintenanceEventLoop
     }
   }
 
-  /** Run one bounded pass on a writer when the asynchronous actor is behind. */
-  public boolean assistMaintenance() {
-    if (!ownerLock.tryLock()) {
-      return false;
-    }
-    try {
-      throwIfUnavailable();
-      assistCount.incrementAndGet();
-      int work = maintenancePass(true);
-      if (work != 0) {
-        assistWork.addAndGet(work);
-        signalProgressLocked();
-        return true;
-      }
-      return false;
-    } catch (RuntimeException failure) {
-      if (!(failure instanceof IllegalStateException && closing && terminalFailure.get() == null)) {
-        recordTerminalFailure(failure);
-      }
-      throw failure;
-    } catch (Error failure) {
-      recordTerminalFailure(failure);
-      throw failure;
-    } finally {
-      finishActorRetirementBatch();
-      ownerLock.unlock();
-    }
-  }
-
-  /** Waits for a maintenance generation after the caller's single bounded assist. */
-  public void awaitMaintenanceProgress() {
-    long started = System.nanoTime();
-    throwIfUnavailable();
-    if (!thread.isAlive()) {
-      return;
-    }
-    boolean interrupted = false;
-    long observed = progressVersion.get();
-    progressLock.lock();
-    try {
-      waitingWriters.incrementAndGet();
-      waitCount.incrementAndGet();
-      try {
-        while (progressVersion.get() == observed
-            && terminalFailure.get() == null
-            && !closing
-            && !stopping) {
-          try {
-            progressChanged.await();
-          } catch (InterruptedException error) {
-            interrupted = true;
-            break;
-          }
-        }
-      } finally {
-        waitingWriters.decrementAndGet();
-      }
-    } finally {
-      progressLock.unlock();
-    }
-    if (interrupted || Thread.interrupted()) {
-      Thread.currentThread().interrupt();
-      throw new com.red.ohc.api.CacheWriteInterruptedException(
-          new InterruptedException("maintenance progress wait interrupted"));
-    }
-    waitNanos.addAndGet(System.nanoTime() - started);
-  }
-
-  public long assistCount() {
-    return assistCount.get();
-  }
-
-  public long assistWork() {
-    return assistWork.get();
-  }
-
-  public long waitCount() {
-    return waitCount.get();
-  }
-
-  public long waitNanos() {
-    return waitNanos.get();
-  }
-
   public void recordTerminalFailure(Throwable failure) {
     if (failure == null) {
       throw new NullPointerException("failure");
@@ -697,11 +565,6 @@ public final class MaintenanceEventLoop
       request.future.completeExceptionally(unavailable);
     }
     rejectAsyncTasks(pending, unavailable);
-    if (ownerLock.isHeldByCurrentThread()) {
-      signalProgressAllLocked();
-    } else {
-      signalProgressAll();
-    }
     signal();
   }
 
@@ -760,7 +623,7 @@ public final class MaintenanceEventLoop
     }
     // A marker owns exactly one repair-queue item. Subsequent coalesced mutations only
     // update the Entry flags; enqueueing duplicates would consume the bounded shard queue
-    // without adding repair debt and could make a writer wait for work that is already queued.
+    // without adding repair debt or useful maintenance work.
     if (firstRepair) {
       enqueueRepair(entry, shard);
     }
@@ -965,11 +828,6 @@ public final class MaintenanceEventLoop
         retirementQueueCapacity(),
         wakeUnparks.get(),
         wakeGate.mergedTransitions(),
-        assistCount.get(),
-        assistWork.get(),
-        waitCount.get(),
-        waitNanos.get(),
-        progressVersion.get(),
         nonBlockingPutFailures.get(),
         nonBlockingReplaceFailures.get(),
         nonBlockingRemoveFailures.get(),
@@ -1019,11 +877,8 @@ public final class MaintenanceEventLoop
       ownerLock.lock();
       try {
         long started = ticker.nanos();
-        work = maintenancePass(false);
+        work = maintenancePass();
         maintenanceLoopNanos.set(ticker.nanos() - started);
-        if (work != 0) {
-          signalProgressLocked();
-        }
       } catch (Throwable failure) {
         recordTerminalFailure(failure);
         work = 0;
@@ -1039,23 +894,11 @@ public final class MaintenanceEventLoop
   }
 
   /** Must be called while ownerLock is held. */
-  private int maintenancePass(boolean forceEpoch) {
+  private int maintenancePass() {
     if (sampleClockIfDue()) {
       budget.reclaimDeadLeases();
     }
     int work = 0;
-    if (forceEpoch) {
-      // Pressure assist follows the fixed progress order: seal, advance epoch, reclaim.
-      if (retirements.hasReadyHint()) {
-        work += sealRetirements(1024);
-      }
-      if (forceAdvanceEpoch()) {
-        work++;
-      }
-      if (retirements.hasPendingReclaim()) {
-        work += reclaim(1024);
-      }
-    }
     boolean mutationsPending =
         !queue.isEmpty() || repairNeeded.get() || !deferredMutations.isEmpty();
     if (mutationsPending) {
@@ -1077,19 +920,15 @@ public final class MaintenanceEventLoop
       work += drainAccesses(4096);
     }
     // Expiry/eviction runs after mutation repair so actor policy never observes a stale
-    // pointer or pending flag. Pressure assist still seals/reclaims again below.
+    // pointer or pending flag.
     if (wheel.hasPending()) {
       work += wheel.advance(nowMillis, 1_024, this);
     }
     if (retirements.hasReadyHint()) {
       work += sealRetirements(1024);
     }
-    if (forceEpoch) {
-      work += forceAdvanceEpoch() ? 1 : 0;
-    } else {
-      if (advanceEpochIfDue(nowNanos)) {
-        work++;
-      }
+    if (advanceEpochIfDue(nowNanos)) {
+      work++;
     }
     if (retirements.hasPendingReclaim()) {
       work += reclaim(1024);
@@ -1099,16 +938,6 @@ public final class MaintenanceEventLoop
         work += evictIfNeeded(64);
       } finally {
         finishActorRetirementBatch();
-      }
-    }
-    if (forceEpoch) {
-      // A mutation/eviction pass can publish more retirement records. Close the pressure
-      // pass by sealing and reclaiming once more before trimming native pages.
-      if (retirements.hasReadyHint()) {
-        work += sealRetirements(1024);
-      }
-      if (retirements.hasPendingReclaim()) {
-        work += reclaim(1024);
       }
     }
     if (allocationPressureRequested.getAndSet(false)) {
@@ -1379,7 +1208,7 @@ public final class MaintenanceEventLoop
 
   private void processEntry(Entry entry) {
     int flags = entry.takePending();
-    // beginPending() holds this claim from reservation through pointer publication. It is
+    // tryBeginPending() holds this claim from reservation through pointer publication. It is
     // stronger than observing the writer mutex: a racing actor can never clear the merged
     // flags after a writer started but before the writer publishes its new value pointer.
     if (flags == Entry.PENDING_BUSY) {
@@ -1943,9 +1772,8 @@ public final class MaintenanceEventLoop
     if (retirements.reserve(actorRetirement, Math.max(records, batchRecords))) {
       return true;
     }
-    // Actor eviction/timeout is allowed to make bounded progress before deferring. The
-    // normal writer path performs the same sequence through assistMaintenance(); keeping it
-    // here prevents a full retirement ring from becoming an actor-only dead zone.
+    // Actor eviction/timeout is allowed to make bounded progress before deferring so a full
+    // retirement ring does not become an actor-only dead zone.
     if (retirements.hasReadyHint()) {
       sealRetirements(1024);
     }
@@ -1971,28 +1799,6 @@ public final class MaintenanceEventLoop
       wakeUnparks.incrementAndGet();
       LockSupport.unpark(thread);
     }
-  }
-
-  private void signalProgress() {
-    progressLock.lock();
-    try {
-      progressVersion.incrementAndGet();
-      progressChanged.signalAll();
-    } finally {
-      progressLock.unlock();
-    }
-  }
-
-  private void signalProgressAll() {
-    signalProgress();
-  }
-
-  private void signalProgressLocked() {
-    signalProgress();
-  }
-
-  private void signalProgressAllLocked() {
-    signalProgress();
   }
 
   private static int stripeCount() {
@@ -2075,11 +1881,6 @@ public final class MaintenanceEventLoop
     public final long retirementQueueCapacity;
     public final long wakeSignals;
     public final long mergedWakeSignals;
-    public final long assistCount;
-    public final long assistWork;
-    public final long waitCount;
-    public final long waitNanos;
-    public final long progressVersion;
     public final long nonBlockingPutFailures;
     public final long nonBlockingReplaceFailures;
     public final long nonBlockingRemoveFailures;
@@ -2123,11 +1924,6 @@ public final class MaintenanceEventLoop
         long retirementQueueCapacity,
         long wakeSignals,
         long mergedWakeSignals,
-        long assistCount,
-        long assistWork,
-        long waitCount,
-        long waitNanos,
-        long progressVersion,
         long nonBlockingPutFailures,
         long nonBlockingReplaceFailures,
         long nonBlockingRemoveFailures,
@@ -2169,11 +1965,6 @@ public final class MaintenanceEventLoop
       this.retirementQueueCapacity = retirementQueueCapacity;
       this.wakeSignals = wakeSignals;
       this.mergedWakeSignals = mergedWakeSignals;
-      this.assistCount = assistCount;
-      this.assistWork = assistWork;
-      this.waitCount = waitCount;
-      this.waitNanos = waitNanos;
-      this.progressVersion = progressVersion;
       this.nonBlockingPutFailures = nonBlockingPutFailures;
       this.nonBlockingReplaceFailures = nonBlockingReplaceFailures;
       this.nonBlockingRemoveFailures = nonBlockingRemoveFailures;
