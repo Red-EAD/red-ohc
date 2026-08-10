@@ -16,6 +16,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.jctools.queues.MpscArrayQueue;
 
 import com.red.ohc.api.Eviction;
+import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
@@ -32,6 +33,11 @@ import com.red.ohc.storage.ValueBlock;
  */
 public final class MaintenanceEventLoop
     implements Runnable, TimerWheel.TimerConsumer, AccessConsumer {
+  @FunctionalInterface
+  public interface EvictionNotifier {
+    void notify(Entry entry, long valueAddress, RemovalCause cause);
+  }
+
   private static final long EPOCH_ADVANCE_INTERVAL_NANOS = 1_000_000L;
 
   /**
@@ -61,6 +67,7 @@ public final class MaintenanceEventLoop
   private final Budget budget;
   private final Ticker ticker;
   private final long capacity;
+  private final EvictionNotifier evictionNotifier;
   private final int queueCapacity;
   private final MpscArrayQueue<Entry> queue;
 
@@ -186,6 +193,28 @@ public final class MaintenanceEventLoop
         ticker,
         capacity,
         eviction,
+        null,
+        readers,
+        ChmSizing.maintenanceQueueCapacity(0L, capacity, capacity));
+  }
+
+  public MaintenanceEventLoop(
+      ConcurrentHashMap<Entry, Entry> data,
+      NativeMemory.Memory memory,
+      Budget budget,
+      Ticker ticker,
+      long capacity,
+      Eviction eviction,
+      EvictionNotifier evictionNotifier,
+      ReaderRegistry readers) {
+    this(
+        data,
+        memory,
+        budget,
+        ticker,
+        capacity,
+        eviction,
+        evictionNotifier,
         readers,
         ChmSizing.maintenanceQueueCapacity(0L, capacity, capacity));
   }
@@ -199,11 +228,25 @@ public final class MaintenanceEventLoop
       Eviction eviction,
       ReaderRegistry readers,
       int queueCapacity) {
+    this(data, memory, budget, ticker, capacity, eviction, null, readers, queueCapacity);
+  }
+
+  public MaintenanceEventLoop(
+      ConcurrentHashMap<Entry, Entry> data,
+      NativeMemory.Memory memory,
+      Budget budget,
+      Ticker ticker,
+      long capacity,
+      Eviction eviction,
+      EvictionNotifier evictionNotifier,
+      ReaderRegistry readers,
+      int queueCapacity) {
     this.data = data;
     this.memory = memory;
     this.budget = budget;
     this.ticker = ticker;
     this.capacity = capacity;
+    this.evictionNotifier = evictionNotifier;
     if (Integer.bitCount(queueCapacity) != 1 || queueCapacity < 1_024) {
       throw new IllegalArgumentException("queueCapacity must be a power of two >= 1024");
     }
@@ -695,9 +738,18 @@ public final class MaintenanceEventLoop
   /** Completes a removal and optionally defers the wake to the surrounding public batch call. */
   public void publishRemoval(
       com.red.ohc.runtime.ThreadContext context, Entry entry, boolean wake) {
+    publishRemoval(context, entry, wake, 0L, null);
+  }
+
+  public void publishRemoval(
+      com.red.ohc.runtime.ThreadContext context,
+      Entry entry,
+      boolean wake,
+      long valueAddress,
+      RemovalCause cause) {
     try {
       entry.completePendingClaim();
-      reliableRemovals.commit(context.reliableRemoval, entry);
+      reliableRemovals.commit(context.reliableRemoval, entry, valueAddress, cause);
       if (wake) {
         signal();
       }
@@ -1066,8 +1118,14 @@ public final class MaintenanceEventLoop
   private int drainReliableRemovals(int limit) {
     int work = 0;
     while (work < limit && reliableRemovals.hasCommittedHead()) {
-      Entry entry = reliableRemovals.poll();
+      ReliableRemovalQueue.Notification notification =
+          evictionNotifier == null ? null : reliableRemovals.pollNotification();
+      Entry entry = notification == null ? reliableRemovals.poll() : notification.entry;
       if (entry != null) {
+        if (notification != null && notification.cause != null) {
+          evictionNotifier.notify(
+              entry, notification.valueAddress, notification.cause);
+        }
         processEntry(entry);
         work++;
       } else {
@@ -1447,7 +1505,8 @@ public final class MaintenanceEventLoop
     if (expiry > 0L) {
       updateMax(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
     }
-    if (removeFromMap(entry, false, expectedGeneration, expectedValueAddress)) {
+    if (removeFromMap(
+        entry, false, expectedGeneration, expectedValueAddress, RemovalCause.EXPIRED)) {
       physicalExpired.incrementAndGet();
     } else {
       if (entry.valueAddress == expectedValueAddress && isCurrent(entry)) {
@@ -1477,7 +1536,13 @@ public final class MaintenanceEventLoop
       long victimHash = victim.keyHash64();
       long expectedGeneration = victim.generation();
       long expectedValueAddress = victim.valueAddress;
-      if (!removeFromMap(victim, true, expectedGeneration, expectedValueAddress, victimHash)
+      if (!removeFromMap(
+              victim,
+              true,
+              expectedGeneration,
+              expectedValueAddress,
+              victimHash,
+              RemovalCause.SIZE)
           && (victim.valueAddress == 0L || !isCurrent(victim))) {
         policy.remove(victim, false);
         policyDirty = true;
@@ -1511,7 +1576,18 @@ public final class MaintenanceEventLoop
 
   public boolean removeFromMap(
       Entry entry, boolean eviction, long expectedGeneration, long expectedValueAddress) {
-    return removeFromMap(entry, eviction, expectedGeneration, expectedValueAddress, 0L, false);
+    return removeFromMap(
+        entry, eviction, expectedGeneration, expectedValueAddress, 0L, false, null);
+  }
+
+  private boolean removeFromMap(
+      Entry entry,
+      boolean eviction,
+      long expectedGeneration,
+      long expectedValueAddress,
+      RemovalCause cause) {
+    return removeFromMap(
+        entry, eviction, expectedGeneration, expectedValueAddress, 0L, false, cause);
   }
 
   private boolean removeFromMap(
@@ -1521,7 +1597,7 @@ public final class MaintenanceEventLoop
       long expectedValueAddress,
       long evictionHash) {
     return removeFromMap(
-        entry, eviction, expectedGeneration, expectedValueAddress, evictionHash, true);
+        entry, eviction, expectedGeneration, expectedValueAddress, evictionHash, true, null);
   }
 
   private boolean removeFromMap(
@@ -1530,7 +1606,19 @@ public final class MaintenanceEventLoop
       long expectedGeneration,
       long expectedValueAddress,
       long evictionHash,
-      boolean hashProvided) {
+      RemovalCause cause) {
+    return removeFromMap(
+        entry, eviction, expectedGeneration, expectedValueAddress, evictionHash, true, cause);
+  }
+
+  private boolean removeFromMap(
+      Entry entry,
+      boolean eviction,
+      long expectedGeneration,
+      long expectedValueAddress,
+      long evictionHash,
+      boolean hashProvided,
+      RemovalCause cause) {
     if (expectedValueAddress == 0L) {
       return false;
     }
@@ -1570,6 +1658,9 @@ public final class MaintenanceEventLoop
       policy.remove(entry, eviction);
     }
     policyDirty = true;
+    if (cause != null && evictionNotifier != null) {
+      evictionNotifier.notify(entry, value, cause);
+    }
     retireEntryBlocks(entry, value);
     if (eviction) {
       evicted.incrementAndGet();

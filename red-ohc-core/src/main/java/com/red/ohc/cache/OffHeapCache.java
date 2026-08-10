@@ -26,8 +26,10 @@ import com.red.ohc.api.DirectEntryConsumer;
 import com.red.ohc.api.DirectValueConsumer;
 import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.Eviction;
+import com.red.ohc.api.EvictionListener;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.OHCacheStats;
+import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.codec.KeyEncoder;
 import com.red.ohc.codec.LookupKey;
@@ -53,6 +55,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   final ConcurrentHashMap<Entry, Entry> data;
   private final CacheSerializer<K> keySerializer;
   private final CacheSerializer<V> valueSerializer;
+  private final EvictionListener<K, V> evictionListener;
   private final Ticker ticker;
   private final long defaultTtlMillis;
   private final double ttlJitterPercent;
@@ -66,6 +69,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final Budget budget;
   private final ReaderRegistry readers = new ReaderRegistry();
   private final ThreadLocal<ThreadContext> contexts;
+  private final ThreadLocal<ThreadContext> evictionContexts;
   private final MaintenanceEventLoop worker;
   private final ReaderGuard readerGuard;
   private final ConcurrentHashMap<EncodedKey, CompletableFuture<V>> loadFlights =
@@ -86,12 +90,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       AllocatorType allocatorType,
       Ticker ticker,
       Eviction eviction,
+      EvictionListener<K, V> evictionListener,
       long capacity,
       long maxEntrySize,
       long expectedEntries) {
     ThreadContext.verifyNativeByteBufferSupported();
     this.keySerializer = keySerializer;
     this.valueSerializer = valueSerializer;
+    this.evictionListener = evictionListener;
     this.ticker = ticker;
     this.defaultTtlMillis = defaultTtlMillis;
     this.ttlJitterPercent = ttlJitterPercent;
@@ -125,6 +131,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         ThreadLocal.withInitial(
             () ->
                 new ThreadContext(memory.writerForCurrentThread(), budget.leaseForCurrentThread()));
+    this.evictionContexts = ThreadLocal.withInitial(() -> new ThreadContext(null, null));
     this.worker =
         new MaintenanceEventLoop(
             data,
@@ -133,10 +140,94 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             ticker,
             capacity,
             eviction,
+            evictionListener == null ? null : this::notifyEviction,
             readers,
             ChmSizing.maintenanceQueueCapacity(expectedEntries, capacity, maxEntrySize));
     this.readerGuard = new ReaderGuard(worker, this::isClosing);
     worker.start();
+  }
+
+  private void notifyEviction(Entry entry, long valueAddress, RemovalCause cause) {
+    EvictionListener<K, V> listener = evictionListener;
+    if (listener == null) {
+      return;
+    }
+    LazySupplier<K> key = null;
+    LazySupplier<V> value = null;
+    try {
+      ThreadContext context = evictionContexts.get();
+      key =
+          new LazySupplier<>(
+              () ->
+                  deserialize(
+                      context, keySerializer, entry.nativeKeyBytesAddress(), entry.keyLength()));
+      int valueLength = ValueBlock.length(valueAddress);
+      value =
+          new LazySupplier<>(
+              () ->
+                  deserialize(
+                      context,
+                      valueSerializer,
+                      ValueBlock.payloadAddress(valueAddress),
+                      valueLength));
+      listener.onEviction(key, value, cause);
+    } catch (Throwable ignored) {
+      // Listener and lazy-deserialization failures must not prevent native retirement.
+    } finally {
+      if (key != null) {
+        key.invalidate();
+      }
+      if (value != null) {
+        value.invalidate();
+      }
+    }
+  }
+
+  private static <T> T deserialize(
+      ThreadContext context, CacheSerializer<T> serializer, long address, int length) {
+    ByteBuffer buffer = context.readOnlyValueBuffer(address, length);
+    try {
+      return serializer.deserialize(buffer);
+    } finally {
+      context.releaseReadOnlyValueBuffer();
+    }
+  }
+
+  private static final class LazySupplier<T> implements java.util.function.Supplier<T> {
+    private java.util.function.Supplier<T> delegate;
+    private T value;
+    private Throwable failure;
+    private boolean resolved;
+    private boolean active = true;
+
+    private LazySupplier(java.util.function.Supplier<T> delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public synchronized T get() {
+      if (!active) {
+        throw new IllegalStateException("eviction supplier is no longer valid");
+      }
+      if (!resolved) {
+        try {
+          value = delegate.get();
+        } catch (Throwable failure) {
+          this.failure = failure;
+        } finally {
+          resolved = true;
+        }
+      }
+      if (failure != null) {
+        OffHeapCache.<RuntimeException>throwUnchecked(failure);
+      }
+      return value;
+    }
+
+    private synchronized void invalidate() {
+      active = false;
+      delegate = null;
+    }
   }
 
   @Override
@@ -985,7 +1076,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         worker.retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
         entry.finishWriter();
         writerHeld = false;
-        worker.publishRemoval(context, entry);
+        worker.publishRemoval(context, entry, true, value, RemovalCause.EXPIRED);
         removalPrepared = false;
         worker.afterWrite(context);
         return 1;

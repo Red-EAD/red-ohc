@@ -2,6 +2,7 @@ package com.red.ohc.maintenance;
 
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.red.ohc.api.RemovalCause;
 import com.red.ohc.index.Entry;
 
 /**
@@ -46,14 +47,18 @@ public final class ReliableRemovalQueue {
   }
 
   public void commit(Reservation reservation, Entry entry) {
-    publish(reservation, entry);
+    publish(reservation, entry, 0L, null);
+  }
+
+  void commit(Reservation reservation, Entry entry, long valueAddress, RemovalCause cause) {
+    publish(reservation, entry, valueAddress, cause);
   }
 
   public void cancel(Reservation reservation) {
     if (!reservation.active()) {
       return;
     }
-    publish(reservation, null);
+    publish(reservation, null, 0L, null);
   }
 
   /**
@@ -87,6 +92,17 @@ public final class ReliableRemovalQueue {
     return entry;
   }
 
+  Notification pollNotification() {
+    Slot slot = head();
+    if (slot == null || slot.value == null) {
+      return null;
+    }
+    Entry entry = slot.value;
+    Notification notification = new Notification(entry, slot.valueAddress, slot.cause);
+    finish(slot);
+    return notification;
+  }
+
   public boolean pollTombstone() {
     Slot slot = head();
     if (slot == null || slot.value != null) {
@@ -105,11 +121,14 @@ public final class ReliableRemovalQueue {
     return head() != null;
   }
 
-  private void publish(Reservation reservation, Entry entry) {
+  private void publish(
+      Reservation reservation, Entry entry, long valueAddress, RemovalCause cause) {
     if (!reservation.active()) {
       throw new IllegalStateException("missing reservation");
     }
     Slot slot = reservation.slot;
+    slot.valueAddress = valueAddress;
+    slot.cause = cause;
     slot.value = entry;
     slot.sequence = reservation.sequence + 1L;
     reservation.clear();
@@ -122,8 +141,22 @@ public final class ReliableRemovalQueue {
 
   private void finish(Slot slot) {
     slot.value = null;
+    slot.valueAddress = 0L;
+    slot.cause = null;
     slot.sequence = consumer + slots.length;
     consumer++;
+  }
+
+  static final class Notification {
+    final Entry entry;
+    final long valueAddress;
+    final RemovalCause cause;
+
+    private Notification(Entry entry, long valueAddress, RemovalCause cause) {
+      this.entry = entry;
+      this.valueAddress = valueAddress;
+      this.cause = cause;
+    }
   }
 
   public static final class Reservation {
@@ -143,5 +176,7 @@ public final class ReliableRemovalQueue {
   private static final class Slot {
     volatile long sequence;
     volatile Entry value;
+    long valueAddress;
+    RemovalCause cause;
   }
 }
