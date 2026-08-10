@@ -45,6 +45,8 @@ public final class MaintenanceStatsTest {
       cache.flushAsync().join();
 
       OHCacheStats stats = cache.stats();
+      assertEquals(stats.getReadHits(), stats.readHits);
+      assertEquals(stats.getNativeAllocatedBytes(), stats.nativeAllocatedBytes);
       assertTrue(stats.liveWeight > 0L);
       assertTrue(stats.residentWeight >= stats.liveWeight);
       assertTrue(stats.retiredWeight >= 0L);

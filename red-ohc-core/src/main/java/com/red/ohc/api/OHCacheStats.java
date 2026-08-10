@@ -107,4 +107,140 @@ public final class OHCacheStats {
     this.maintenanceWaitNanos = maintenanceWaitNanos;
     this.maintenanceProgressVersion = maintenanceProgressVersion;
   }
+
+  public long getReadHits() {
+    return readHits;
+  }
+
+  public long getReadMisses() {
+    return readMisses;
+  }
+
+  public long getReadAccessDropped() {
+    return readAccessDropped;
+  }
+
+  public long getMutationAccepted() {
+    return mutationAccepted;
+  }
+
+  public long getMutationApplied() {
+    return mutationApplied;
+  }
+
+  public long getMaintenanceQueueDepth() {
+    return maintenanceQueueDepth;
+  }
+
+  public long getMaintenanceQueueCapacity() {
+    return maintenanceQueueCapacity;
+  }
+
+  public long getMaintenanceLoopNanos() {
+    return maintenanceLoopNanos;
+  }
+
+  public boolean getMaintenanceUnhealthy() {
+    return maintenanceUnhealthy;
+  }
+
+  public long getLogicalExpired() {
+    return logicalExpired;
+  }
+
+  public long getPhysicalExpired() {
+    return physicalExpired;
+  }
+
+  public long getTtlLagMillis() {
+    return ttlLagMillis;
+  }
+
+  public long getTtlBacklog() {
+    return ttlBacklog;
+  }
+
+  public long getEvictionCount() {
+    return evictionCount;
+  }
+
+  public long getEvictionScanCount() {
+    return evictionScanCount;
+  }
+
+  public long getEvictionLockedSkips() {
+    return evictionLockedSkips;
+  }
+
+  public long getRetiredEntries() {
+    return retiredEntries;
+  }
+
+  public long getLiveWeight() {
+    return liveWeight;
+  }
+
+  public long getResidentWeight() {
+    return residentWeight;
+  }
+
+  public long getRetiredWeight() {
+    return retiredWeight;
+  }
+
+  public long getNativeAllocatedBytes() {
+    return nativeAllocatedBytes;
+  }
+
+  public long getTimerHeapBytes() {
+    return timerHeapBytes;
+  }
+
+  public long getSketchHeapBytes() {
+    return sketchHeapBytes;
+  }
+
+  public long getGhostHeapBytes() {
+    return ghostHeapBytes;
+  }
+
+  public long getRetirementQueueNativeBytes() {
+    return retirementQueueNativeBytes;
+  }
+
+  public long getRetirementQueueDepth() {
+    return retirementQueueDepth;
+  }
+
+  public long getRetirementQueueCapacity() {
+    return retirementQueueCapacity;
+  }
+
+  public long getWakeSignals() {
+    return wakeSignals;
+  }
+
+  public long getMergedWakeSignals() {
+    return mergedWakeSignals;
+  }
+
+  public long getMaintenanceAssistCount() {
+    return maintenanceAssistCount;
+  }
+
+  public long getMaintenanceAssistWork() {
+    return maintenanceAssistWork;
+  }
+
+  public long getMaintenanceWaitCount() {
+    return maintenanceWaitCount;
+  }
+
+  public long getMaintenanceWaitNanos() {
+    return maintenanceWaitNanos;
+  }
+
+  public long getMaintenanceProgressVersion() {
+    return maintenanceProgressVersion;
+  }
 }
