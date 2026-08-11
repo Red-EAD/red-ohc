@@ -1,6 +1,5 @@
 package com.red.ohc.maintenance;
 
-import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
@@ -30,9 +29,5 @@ public class WakeGateTest {
     assertFalse(gate.finishIdle(), "the racing signal must keep the actor required");
     assertTrue(
         gate.isRequired(), "the required state is re-established before the next park attempt");
-    assertEquals(
-        gate.mergedTransitions(),
-        1L,
-        "merged-wake telemetry is actor-owned and must not increment on every producer signal");
   }
 }

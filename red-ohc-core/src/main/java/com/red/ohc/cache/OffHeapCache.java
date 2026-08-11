@@ -318,7 +318,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (!accepted) {
       return;
     }
-    worker.recordAccepted();
     worker.afterWrite(context);
   }
 
@@ -407,7 +406,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return result > 0;
     }
     if (data.mappingCount() >= maxSizeHighWatermark) {
-      worker.requestMaintenance();
       return false;
     }
     Entry candidate =
@@ -917,7 +915,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       }
     } finally {
       if (accepted != 0) {
-        worker.recordAccepted(accepted);
         worker.afterWrite(context);
       }
       exitWriter(context);
@@ -1118,7 +1115,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       exit(context);
     }
     if (winner == null) {
-      worker.recordAccepted();
       worker.publishMutation(candidate, Entry.PENDING_ADD);
       worker.afterWrite(context);
       return true;
@@ -1312,7 +1308,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         worker.publishMutation(entry, Entry.PENDING_UPDATE);
       }
       worker.afterWrite(context);
-      worker.recordAccepted();
       return true;
     } catch (NativeMemory.AllocationLimitException pressure) {
       worker.recordNativeAllocationFailure();
@@ -1492,20 +1487,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return new OHCacheStats(
         snapshot.hits,
         snapshot.misses,
-        snapshot.accessDropped,
-        snapshot.accepted,
-        snapshot.applied,
         snapshot.queueDepth,
         snapshot.queueCapacity,
-        snapshot.maintenanceLoopNanos,
         snapshot.unhealthy,
-        snapshot.logicalExpired,
         snapshot.physicalExpired,
         snapshot.timeoutLagMillis,
         snapshot.ttlBacklog,
         snapshot.evicted,
-        snapshot.evictionScans,
-        snapshot.evictionLockedSkips,
         snapshot.retiredEntries,
         size(),
         snapshot.liveWeight,
@@ -1518,8 +1506,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         snapshot.ledgerBytes,
         snapshot.retirementQueueDepth,
         snapshot.retirementQueueCapacity,
-        snapshot.wakeSignals,
-        snapshot.mergedWakeSignals,
         snapshot.nonBlockingPutFailures,
         snapshot.nonBlockingReplaceFailures,
         snapshot.nonBlockingRemoveFailures,
@@ -1529,7 +1515,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         snapshot.nativeAllocationFailures,
         snapshot.repairQueueDepth,
         snapshot.asyncMutationQueueDepth,
-        snapshot.asyncMutationCompletedCount,
         snapshot.asyncMutationFailedCount,
         snapshot.asyncMutationRejectedCount);
   }
@@ -1643,7 +1628,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalArgumentException("entry allocation exceeds cache capacity");
     }
     worker.throwIfUnavailable();
-    return budget.tryReserve(context.budgetLease(), weight);
+    if (budget.tryReserve(context.budgetLease(), weight)) {
+      return true;
+    }
+    worker.requestBudgetPressure();
+    return false;
   }
 
   @SuppressWarnings("unchecked")

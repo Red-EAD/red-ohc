@@ -14,9 +14,6 @@ public final class WakeGate {
 
   private final AtomicInteger state = new AtomicInteger(IDLE);
 
-  /** Actor-owned observation of coalesced producer signals while an idle arm was in flight. */
-  private volatile long mergedTransitions;
-
   /** Returns true only for the idle-to-required transition. */
   public boolean signal() {
     while (true) {
@@ -53,7 +50,6 @@ public final class WakeGate {
       }
       if (current == PROCESSING_TO_REQUIRED) {
         if (state.compareAndSet(PROCESSING_TO_REQUIRED, REQUIRED)) {
-          mergedTransitions++;
           return false;
         }
       } else {
@@ -89,9 +85,5 @@ public final class WakeGate {
 
   public boolean isRequired() {
     return state.get() != IDLE;
-  }
-
-  public long mergedTransitions() {
-    return mergedTransitions;
   }
 }

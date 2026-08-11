@@ -51,8 +51,8 @@ public final class MaintenanceStatsTest {
       assertTrue(stats.getRetiredWeight() >= 0L);
       assertTrue(stats.getNativeAllocatedBytes() >= stats.getResidentWeight());
       assertTrue(stats.getTtlBacklog() >= 0L);
-      assertEquals(stats.getEvictionLockedSkips(), 0L);
-      assertTrue(stats.getMergedWakeSignals() >= 0L);
+      assertEquals(stats.getMaintenanceQueueDepth(), 0L);
+      assertEquals(stats.getRetirementQueueDepth(), 0L);
     }
   }
 }

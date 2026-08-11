@@ -345,7 +345,7 @@ public final class EvictionListenerTest {
       Future<?> eviction =
           callers.submit(
               () -> {
-                assertTrue(cache.put("two", "value-two"));
+                putEventually(cache, "two", "value-two");
                 cache.flushAsync().join();
               });
       assertTrue(callbackEntered.await(2L, TimeUnit.SECONDS), "eviction callback did not start");
@@ -370,6 +370,15 @@ public final class EvictionListenerTest {
     cache.flushAsync().join();
     assertTrue(cache.put("two", "value-two"));
     cache.flushAsync().join();
+  }
+
+  private static void putEventually(
+      OffHeapCache<String, String> cache, String key, String value) {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+    while (!cache.put(key, value) && System.nanoTime() < deadline) {
+      Thread.yield();
+    }
+    assertEquals(cache.get(key), value, "budget pressure did not restore write admission");
   }
 
   private static OffHeapCache<String, String> newSmallCache(

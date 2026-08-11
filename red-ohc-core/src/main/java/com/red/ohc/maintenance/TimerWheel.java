@@ -106,8 +106,11 @@ public final class TimerWheel {
     if (expiryLimit <= 0) {
       return 0;
     }
-    promoteOverflow();
     long target = Math.max(tick, nowMillis / TICK_MILLIS);
+    if (pendingExpirySlot < 0 && target == tick) {
+      return 0;
+    }
+    promoteOverflow();
     long steps = Math.min(4096L, target - tick);
     int work = 0;
     if (pendingExpirySlot >= 0) {

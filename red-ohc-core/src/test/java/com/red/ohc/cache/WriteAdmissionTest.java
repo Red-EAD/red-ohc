@@ -121,6 +121,56 @@ public class WriteAdmissionTest {
     }
   }
 
+  @Test(timeOut = 10_000L)
+  public void failedBudgetReservationTriggersIdleLeaseReclaim() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(4 << 10)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    int leaseCount = 1;
+    java.util.concurrent.ExecutorService holders =
+        java.util.concurrent.Executors.newFixedThreadPool(leaseCount);
+    java.util.concurrent.CountDownLatch ready =
+        new java.util.concurrent.CountDownLatch(leaseCount);
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    AtomicInteger accepted = new AtomicInteger();
+    try {
+      for (int index = 0; index < leaseCount; index++) {
+        final int key = index;
+        holders.submit(
+            () -> {
+              if (cache.put("holder-" + key, "value")) {
+                accepted.incrementAndGet();
+              }
+              ready.countDown();
+              release.await();
+              return null;
+            });
+      }
+      assertTrue(ready.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+      assertEquals(accepted.get(), leaseCount);
+      assertFalse(
+          cache.put("pressure", "first-attempt"),
+          "idle writer leases must retain all refill credit before budget pressure");
+
+      boolean recovered = false;
+      long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2L);
+      while (!recovered && System.nanoTime() < deadline) {
+        recovered = cache.put("pressure", "recovered");
+        Thread.yield();
+      }
+      assertTrue(recovered, "budget pressure must reclaim idle lease credit");
+      assertEquals(cache.get("pressure"), "recovered");
+    } finally {
+      release.countDown();
+      holders.shutdownNow();
+      holders.awaitTermination(2L, java.util.concurrent.TimeUnit.SECONDS);
+      cache.close();
+    }
+  }
+
   @Test
   public void failedWriterLeaseActivationReturnsWithoutSettingCloseMarker() throws Exception {
     OffHeapCache<String, String> cache =

@@ -244,10 +244,6 @@ public final class ThreadContext {
     return ++readSequence;
   }
 
-  public void dropped() {
-    slot.localAccessDropped++;
-  }
-
   public void beginBulkRead() {
     if (bulkReadDepth == 0) {
       bulkReadChanged = false;
@@ -258,8 +254,8 @@ public final class ThreadContext {
   public void bulkHit(Entry entry) {
     slot.localHits++;
     readSequence++;
-    if ((++accessSequence & 15L) == 0L && !slot.access.offer(entry, entry.generation())) {
-      slot.localAccessDropped++;
+    if ((++accessSequence & 15L) == 0L) {
+      slot.access.offer(entry, entry.generation());
     }
     bulkReadChanged = true;
   }
@@ -294,7 +290,6 @@ public final class ThreadContext {
       return;
     }
     if (!slot.access.offer(entry, entry.generation())) {
-      dropped();
       return;
     }
     MaintenanceEventLoop loop = maintenance;
@@ -342,7 +337,6 @@ public final class ThreadContext {
   public void publish() {
     slot.publishedHits = slot.localHits;
     slot.publishedMisses = slot.localMisses;
-    slot.publishedAccessDropped = slot.localAccessDropped;
   }
 
   /**

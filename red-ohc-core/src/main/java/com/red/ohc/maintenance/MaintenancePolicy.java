@@ -45,7 +45,7 @@ public final class MaintenancePolicy {
   private long windowWeight;
   private long probationWeight;
   private long protectedWeight;
-  private long evictions;
+  private volatile long evictions;
   private long ghostHits;
   private long ghostWeight;
   private long hitsInSample;

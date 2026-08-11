@@ -10,17 +10,14 @@ public final class ReaderSlot {
 
   public long localHits;
   public long localMisses;
-  public long localAccessDropped;
   public volatile long publishedHits;
   public volatile long publishedMisses;
-  public volatile long publishedAccessDropped;
 
   /** Producer-to-maintenance hint; the CAS closes the actor-clear/producer-offer wake window. */
   private final AtomicBoolean accessPending = new AtomicBoolean();
 
   public long consumedHits;
   public long consumedMisses;
-  public long consumedAccessDropped;
   public final AccessRing access = new AccessRing();
 
   public boolean markAccessPending() {

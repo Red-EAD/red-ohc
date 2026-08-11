@@ -10,9 +10,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 import org.jctools.queues.MpscArrayQueue;
@@ -80,6 +78,7 @@ public final class MaintenanceEventLoop
   private final AtomicBoolean repairNeeded = new AtomicBoolean();
   private final AtomicLong repairVersion = new AtomicLong();
   private final AtomicBoolean allocationPressureRequested = new AtomicBoolean();
+  private final AtomicBoolean budgetPressureRequested = new AtomicBoolean();
   private final ConcurrentLinkedQueue<Entry>[] repairQueues;
   private final int repairShardMask;
   private int repairShardCursor;
@@ -89,7 +88,6 @@ public final class MaintenanceEventLoop
   /** Linearizes async sequence assignment with queue publication for the flush barrier. */
   private final Object asyncSubmissionLock = new Object();
   private final AtomicLong asyncSubmitted = new AtomicLong();
-  private final AtomicLong asyncCompleted = new AtomicLong();
   private final AtomicLong asyncFailed = new AtomicLong();
   private final AtomicLong asyncRejected = new AtomicLong();
   private volatile long asyncCompletedSequence;
@@ -106,9 +104,6 @@ public final class MaintenanceEventLoop
   private final MaintenancePolicy policy;
   private final Thread thread;
   private final WakeGate wakeGate = new WakeGate();
-
-  /** Cold-path owner for actor state. */
-  private final ReentrantLock ownerLock = new ReentrantLock();
 
   private final AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
   private final AtomicReference<FlushRequest> flushRequest = new AtomicReference<>();
@@ -143,21 +138,10 @@ public final class MaintenanceEventLoop
 
   private long nowNanos;
   private int clockSampleCountdown;
-  private final AtomicLong hits = new AtomicLong();
-  private final AtomicLong misses = new AtomicLong();
-  private final AtomicLong accessDropped = new AtomicLong();
-
-  /** A write-path statistic: striped so successful puts do not serialize on one cache line. */
-  private final LongAdder accepted = new LongAdder();
-
-  private final AtomicLong applied = new AtomicLong();
-  private final AtomicLong evicted = new AtomicLong();
-  private final AtomicLong logicalExpired = new AtomicLong();
-  private final AtomicLong physicalExpired = new AtomicLong();
-  private final AtomicLong timeoutLagMillis = new AtomicLong();
-  private final AtomicLong maintenanceLoopNanos = new AtomicLong();
-  private final AtomicLong evictionScans = new AtomicLong();
-  private final AtomicLong evictionLockedSkips = new AtomicLong();
+  private volatile long hits;
+  private volatile long misses;
+  private volatile long physicalExpired;
+  private volatile long timeoutLagMillis;
   private final AtomicLong nonBlockingPutFailures = new AtomicLong();
   private final AtomicLong nonBlockingReplaceFailures = new AtomicLong();
   private final AtomicLong nonBlockingRemoveFailures = new AtomicLong();
@@ -166,13 +150,7 @@ public final class MaintenanceEventLoop
   private final AtomicLong reliableRemovalAdmissionFailures = new AtomicLong();
   private final AtomicLong nativeAllocationFailures = new AtomicLong();
 
-  /** Updated only on the rare idle-to-required wake transition, never on a merged put. */
-  private final AtomicLong wakeUnparks = new AtomicLong();
-
   private final AtomicBoolean unhealthy = new AtomicBoolean();
-
-  /** A writer-blocked eviction remains part of the control-plane flush barrier. */
-  private boolean evictionBlockedOnWriter;
 
   private long evictionRetryNanos = Long.MAX_VALUE;
   private long evictionRetryBackoffNanos = 1_000L;
@@ -371,10 +349,6 @@ public final class MaintenanceEventLoop
     return retirements.retiredEntries();
   }
 
-  public long oldestRetireEpoch() {
-    return retirements.oldestEpoch();
-  }
-
   public long timerBytes() {
     return wheel.bytes();
   }
@@ -389,10 +363,6 @@ public final class MaintenanceEventLoop
 
   public long ttlBacklog() {
     return wheel.scheduled();
-  }
-
-  public long policyEvictions() {
-    return policy.evictions();
   }
 
   public long ledgerBytes() {
@@ -413,10 +383,6 @@ public final class MaintenanceEventLoop
 
   public long asyncMutationQueueDepth() {
     return asyncMutations.size();
-  }
-
-  public long asyncMutationCompletedCount() {
-    return asyncCompleted.get();
   }
 
   public long asyncMutationFailedCount() {
@@ -469,8 +435,9 @@ public final class MaintenanceEventLoop
 
   /** Reader-side access publication is the only reader activity that needs to wake the actor. */
   public void signalAccess(ReaderSlot slot) {
-    accessHint.set(true);
-    signal();
+    if (accessHint.compareAndSet(false, true)) {
+      signal();
+    }
   }
 
   /** ReaderGuard calls this only after an active read becomes quiescent during close. */
@@ -479,28 +446,6 @@ public final class MaintenanceEventLoop
       // shutdownAndFree parks outside WakeGate, so this must not rely on a REQUIRED gate
       // transition to wake the actor after its final reader leaves.
       LockSupport.unpark(thread);
-    }
-  }
-
-  public void recordHit() {
-    hits.incrementAndGet();
-  }
-
-  public void recordMiss() {
-    misses.incrementAndGet();
-  }
-
-  public void recordDropped() {
-    accessDropped.incrementAndGet();
-  }
-
-  public void recordAccepted() {
-    accepted.increment();
-  }
-
-  public void recordAccepted(int count) {
-    if (count > 0) {
-      accepted.add(count);
     }
   }
 
@@ -670,8 +615,16 @@ public final class MaintenanceEventLoop
 
   /** Page trimming is requested only after a native allocation-limit failure. */
   public void requestAllocationPressure() {
-    allocationPressureRequested.set(true);
-    signal();
+    if (allocationPressureRequested.compareAndSet(false, true)) {
+      signal();
+    }
+  }
+
+  /** Idle writer credit is reclaimed only after a budget reservation failure. */
+  public void requestBudgetPressure() {
+    if (budgetPressureRequested.compareAndSet(false, true)) {
+      signal();
+    }
   }
 
   /**
@@ -793,25 +746,16 @@ public final class MaintenanceEventLoop
 
   public Snapshot snapshot() {
     return new Snapshot(
-        hits.get(),
-        misses.get(),
-        accessDropped.get(),
-        accepted.sum(),
-        applied.get(),
-        evicted.get(),
-        logicalExpired.get(),
-        physicalExpired.get(),
-        maintenanceLoopNanos.get(),
+        hits,
+        misses,
+        policy.evictions(),
+        physicalExpired,
         publishedLiveWeight,
-        timeoutLagMillis.get(),
+        timeoutLagMillis,
         unhealthy.get(),
         queueDepth(),
         retiredEntries(),
         retiredBytes(),
-        oldestRetireEpoch(),
-        policyEvictions(),
-        evictionScans.get(),
-        evictionLockedSkips.get(),
         timerBytes(),
         ttlBacklog(),
         sketchBytes(),
@@ -820,8 +764,6 @@ public final class MaintenanceEventLoop
         queueCapacity,
         retirementQueueDepth(),
         retirementQueueCapacity(),
-        wakeUnparks.get(),
-        wakeGate.mergedTransitions(),
         nonBlockingPutFailures.get(),
         nonBlockingReplaceFailures.get(),
         nonBlockingRemoveFailures.get(),
@@ -831,7 +773,6 @@ public final class MaintenanceEventLoop
         nativeAllocationFailures.get(),
         repairQueueDepth(),
         asyncMutationQueueDepth(),
-        asyncMutationCompletedCount(),
         asyncMutationFailedCount(),
         asyncMutationRejectedCount());
   }
@@ -868,17 +809,13 @@ public final class MaintenanceEventLoop
       }
 
       int work;
-      ownerLock.lock();
       try {
-        long started = ticker.nanos();
         work = maintenancePass();
-        maintenanceLoopNanos.set(ticker.nanos() - started);
       } catch (Throwable failure) {
         recordTerminalFailure(failure);
         work = 0;
       } finally {
         finishActorRetirementBatch();
-        ownerLock.unlock();
       }
       if (!hasImmediateSourceWork()) {
         parkUntilWorkOrTimer(work != 0 && !stopping);
@@ -887,12 +824,13 @@ public final class MaintenanceEventLoop
     shutdownAndFree();
   }
 
-  /** Must be called while ownerLock is held. */
   private int maintenancePass() {
-    if (sampleClockIfDue()) {
-      budget.reclaimDeadLeases();
-    }
+    sampleClockIfDue();
     int work = 0;
+    if (budgetPressureRequested.get() && budgetPressureRequested.getAndSet(false)) {
+      budget.reclaimIdleLeases();
+      work++;
+    }
     boolean mutationsPending =
         !queue.isEmpty() || repairNeeded.get() || !deferredMutations.isEmpty();
     if (mutationsPending) {
@@ -927,14 +865,14 @@ public final class MaintenanceEventLoop
     if (retirements.hasPendingReclaim()) {
       work += reclaim(1024);
     }
-    if (!stopping && (evictionRetryNanos == Long.MAX_VALUE || evictionWorkDue())) {
+    if (!stopping && evictionWorkDue()) {
       try {
         work += evictIfNeeded(64);
       } finally {
         finishActorRetirementBatch();
       }
     }
-    if (allocationPressureRequested.getAndSet(false)) {
+    if (allocationPressureRequested.get() && allocationPressureRequested.getAndSet(false)) {
       work += memory.trimIdlePages() > 0L ? 1 : 0;
     }
     work += drainAsyncMutations(ASYNC_MUTATION_BATCH);
@@ -970,6 +908,7 @@ public final class MaintenanceEventLoop
         || !queue.isEmpty()
         || repairNeeded.get()
         || allocationPressureRequested.get()
+        || budgetPressureRequested.get()
         || accessHint.get()
         || !asyncMutations.isEmpty()
         || flushNeedsImmediatePass()
@@ -988,9 +927,11 @@ public final class MaintenanceEventLoop
     if (batchGrace) {
       parked = true;
       try {
-        long timerDelay = nextParkDelayNanos();
-        LockSupport.parkNanos(this, Math.min(WRITE_BATCH_GRACE_NANOS, timerDelay));
-        if (timerDelay != Long.MAX_VALUE) {
+        long wheelDelay = wheel.nextDelayNanos(nowMillis);
+        long timerDelay = nextParkDelayNanos(wheelDelay);
+        long parkDelay = Math.min(WRITE_BATCH_GRACE_NANOS, timerDelay);
+        LockSupport.parkNanos(this, parkDelay);
+        if (timerDelay <= parkDelay) {
           clockRefreshRequested = true;
         }
       } finally {
@@ -1012,13 +953,7 @@ public final class MaintenanceEventLoop
     // A producer that published before idleGeneration changed is caught by this final
     // actor-owned scan. A later producer observes the new generation and changes the gate
     // to PROCESSING_TO_REQUIRED, so neither side can strand a completed retirement record.
-    ownerLock.lock();
-    int sealed;
-    try {
-      sealed = sealRetirements(1024);
-    } finally {
-      ownerLock.unlock();
-    }
+    int sealed = sealRetirements(1024);
     if (sealed != 0) {
       wakeGate.requireProcessing();
       return;
@@ -1028,17 +963,13 @@ public final class MaintenanceEventLoop
     }
     parked = true;
     try {
-      long delay = nextParkDelayNanos();
-      if (retirements.hasPendingReclaim()) {
-        delay = Math.min(delay, epochAdvanceDelayNanos(ticker.nanos()));
-      }
+      long wheelDelay = wheel.nextDelayNanos(nowMillis);
+      long delay = nextParkDelayNanos(wheelDelay);
       if (delay == Long.MAX_VALUE) {
         LockSupport.park(this);
       } else {
         LockSupport.parkNanos(this, delay);
-        // The cached actor clock is only a throughput optimisation. Once a timed
-        // deadline wakes the actor, it must be refreshed before calculating the next
-        // wheel advance; otherwise the same deadline can be slept repeatedly.
+        // A finite park is always bounded by real timer, retry, or QSBR work.
         clockRefreshRequested = true;
       }
     } finally {
@@ -1048,6 +979,9 @@ public final class MaintenanceEventLoop
   }
 
   private void completeFlushIfIdle() {
+    if (flushRequest.get() == null) {
+      return;
+    }
     FlushRequest completed;
     synchronized (asyncSubmissionLock) {
       FlushRequest request = flushRequest.get();
@@ -1069,6 +1003,7 @@ public final class MaintenanceEventLoop
           || repairNeeded.get()
           || asyncCompletedSequence < request.sequence
           || allocationPressureRequested.get()
+          || budgetPressureRequested.get()
           || accessHint.get()
           || retirements.hasReadyHint()
           || retirements.hasPendingReclaim()
@@ -1084,6 +1019,9 @@ public final class MaintenanceEventLoop
   }
 
   private int drainAsyncMutations(int limit) {
+    if (asyncMutations.isEmpty()) {
+      return 0;
+    }
     int work = 0;
     while (work < limit) {
       FlushRequest barrier = flushRequest.get();
@@ -1098,7 +1036,6 @@ public final class MaintenanceEventLoop
       } else {
         try {
           task.action.run();
-          asyncCompleted.incrementAndGet();
         } catch (Throwable failure) {
           asyncFailed.incrementAndGet();
           task.reject.accept(failure);
@@ -1318,7 +1255,6 @@ public final class MaintenanceEventLoop
     } else {
       wheel.remove(entry);
     }
-    applied.incrementAndGet();
     if (!entry.markAppliedVersion(version)) {
       republishMutation(entry, flags);
     }
@@ -1381,15 +1317,14 @@ public final class MaintenanceEventLoop
     return true;
   }
 
-  private boolean sampleClockIfDue() {
+  private void sampleClockIfDue() {
     if (!clockRefreshRequested && clockSampleCountdown-- > 0) {
-      return false;
+      return;
     }
     clockRefreshRequested = false;
     nowNanos = ticker.nanos();
     nowMillis = ticker.currentTimeMillis();
     clockSampleCountdown = CLOCK_SAMPLE_INTERVAL_PASSES - 1;
-    return true;
   }
 
   /** A QSBR epoch deadline is real work; an idle cache with no retirements still parks forever. */
@@ -1407,38 +1342,37 @@ public final class MaintenanceEventLoop
     return elapsed >= EPOCH_ADVANCE_INTERVAL_NANOS ? 0L : EPOCH_ADVANCE_INTERVAL_NANOS - elapsed;
   }
 
-  private long nextParkDelayNanos() {
-    ownerLock.lock();
-    try {
-      long delay = wheel.nextDelayNanos(nowMillis);
-      if (deferredMutationRetryNanos != Long.MAX_VALUE) {
-        long retryDelay = deferredMutationRetryNanos - ticker.nanos();
-        if (retryDelay <= 0L) {
-          delay = 1L;
-        } else {
-          delay = Math.min(delay, retryDelay);
-        }
-      }
-      if (policy.usedWeight() <= capacity || evictionRetryNanos == Long.MAX_VALUE) {
-        return delay;
-      }
-      long evictionDelay = evictionRetryNanos - ticker.nanos();
-      return evictionDelay <= 0L ? 1L : Math.min(delay, evictionDelay);
-    } finally {
-      ownerLock.unlock();
+  private long nextParkDelayNanos(long wheelDelay) {
+    boolean evictionDeadline =
+        policy.usedWeight() > capacity && evictionRetryNanos != Long.MAX_VALUE;
+    boolean epochDeadline = retirements.hasPendingReclaim();
+    if (deferredMutationRetryNanos == Long.MAX_VALUE && !evictionDeadline && !epochDeadline) {
+      return wheelDelay;
     }
+    long monotonicNow = ticker.nanos();
+    long delay = wheelDelay;
+    if (deferredMutationRetryNanos != Long.MAX_VALUE) {
+      delay = Math.min(delay, deadlineDelayNanos(deferredMutationRetryNanos, monotonicNow));
+    }
+    if (evictionDeadline) {
+      delay = Math.min(delay, deadlineDelayNanos(evictionRetryNanos, monotonicNow));
+    }
+    if (epochDeadline) {
+      delay = Math.min(delay, epochAdvanceDelayNanos(monotonicNow));
+    }
+    return delay;
   }
 
   private boolean evictionWorkDue() {
-    ownerLock.lock();
-    try {
-      if (policy.usedWeight() <= capacity) {
-        return false;
-      }
-      return evictionRetryNanos <= ticker.nanos();
-    } finally {
-      ownerLock.unlock();
+    if (policy.usedWeight() <= capacity) {
+      return false;
     }
+    return evictionRetryNanos == Long.MAX_VALUE || evictionRetryNanos <= ticker.nanos();
+  }
+
+  private static long deadlineDelayNanos(long deadline, long now) {
+    long delay = deadline - now;
+    return delay <= 0L ? 1L : delay;
   }
 
   private void scheduleEvictionRetry() {
@@ -1465,18 +1399,13 @@ public final class MaintenanceEventLoop
       slot.clearAccessPending();
       long hitDelta = slot.publishedHits - slot.consumedHits;
       long missDelta = slot.publishedMisses - slot.consumedMisses;
-      long droppedDelta = slot.publishedAccessDropped - slot.consumedAccessDropped;
       if (hitDelta != 0L) {
-        hits.addAndGet(hitDelta);
+        hits += hitDelta;
         slot.consumedHits += hitDelta;
       }
       if (missDelta != 0L) {
-        misses.addAndGet(missDelta);
+        misses += missDelta;
         slot.consumedMisses += missDelta;
-      }
-      if (droppedDelta != 0L) {
-        accessDropped.addAndGet(droppedDelta);
-        slot.consumedAccessDropped += droppedDelta;
       }
       while (work < limit && slot.access.poll(this)) {
         work++;
@@ -1528,14 +1457,13 @@ public final class MaintenanceEventLoop
         || !ValueBlock.expired(address, nowMillis)) {
       return;
     }
-    logicalExpired.incrementAndGet();
     long expiry = ValueBlock.expireAtMillis(address);
     if (expiry > 0L) {
-      updateMax(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
+      timeoutLagMillis = Math.max(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
     }
     if (removeFromMap(
         entry, false, expectedGeneration, expectedValueAddress, RemovalCause.EXPIRED)) {
-      physicalExpired.incrementAndGet();
+      physicalExpired++;
     } else {
       if (entry.valueAddress == expectedValueAddress && isCurrent(entry)) {
         wheel.add(entry, ValueBlock.expireAtMillis(address));
@@ -1548,7 +1476,6 @@ public final class MaintenanceEventLoop
     int scans = 0;
     long target = capacity;
     boolean scanExhausted = false;
-    evictionBlockedOnWriter = false;
     while (work < limit && scans < limit && policy.usedWeight() > target) {
       MaintenancePolicy.Selection selection = policy.selectVictim(limit - scans);
       int selectionScans = policy.lastVictimScanCount();
@@ -1578,8 +1505,6 @@ public final class MaintenanceEventLoop
       } else {
         if (victim.valueAddress != 0L && isCurrent(victim) && victim.isWriterLocked()) {
           policy.skipLocked(victim);
-          evictionLockedSkips.incrementAndGet();
-          evictionBlockedOnWriter = true;
           scheduleEvictionRetry();
         } else {
           scheduleEvictionRetry();
@@ -1587,11 +1512,7 @@ public final class MaintenanceEventLoop
         }
       }
     }
-    if (scans != 0) {
-      evictionScans.addAndGet(scans);
-    }
     if (policy.usedWeight() <= target) {
-      evictionBlockedOnWriter = false;
       evictionRetryNanos = Long.MAX_VALUE;
       evictionRetryBackoffNanos = 1_000L;
     } else {
@@ -1676,9 +1597,6 @@ public final class MaintenanceEventLoop
       evictionNotifier.notify(entry, value, cause);
     }
     retireEntryBlocks(entry, value);
-    if (eviction) {
-      evicted.incrementAndGet();
-    }
     return true;
   }
 
@@ -1795,7 +1713,6 @@ public final class MaintenanceEventLoop
 
   private void signal() {
     if (wakeGate.signal()) {
-      wakeUnparks.incrementAndGet();
       LockSupport.unpark(thread);
     }
   }
@@ -1817,15 +1734,6 @@ public final class MaintenanceEventLoop
       records <<= 1;
     }
     return records;
-  }
-
-  private static void updateMax(AtomicLong target, long value) {
-    while (true) {
-      long current = target.get();
-      if (value <= current || target.compareAndSet(current, value)) {
-        return;
-      }
-    }
   }
 
   private static final class AsyncMutationTask {
@@ -1853,23 +1761,14 @@ public final class MaintenanceEventLoop
   public static final class Snapshot {
     public final long hits;
     public final long misses;
-    public final long accessDropped;
-    public final long accepted;
-    public final long applied;
     public final long evicted;
-    public final long logicalExpired;
     public final long physicalExpired;
-    public final long maintenanceLoopNanos;
     public final long liveWeight;
     public final long timeoutLagMillis;
     public final boolean unhealthy;
     public final long queueDepth;
     public final long retiredEntries;
     public final long retiredBytes;
-    public final long oldestRetireEpoch;
-    public final long policyEvictions;
-    public final long evictionScans;
-    public final long evictionLockedSkips;
     public final long timerBytes;
     public final long ttlBacklog;
     public final long sketchBytes;
@@ -1878,8 +1777,6 @@ public final class MaintenanceEventLoop
     public final long queueCapacity;
     public final long retirementQueueDepth;
     public final long retirementQueueCapacity;
-    public final long wakeSignals;
-    public final long mergedWakeSignals;
     public final long nonBlockingPutFailures;
     public final long nonBlockingReplaceFailures;
     public final long nonBlockingRemoveFailures;
@@ -1889,30 +1786,20 @@ public final class MaintenanceEventLoop
     public final long nativeAllocationFailures;
     public final long repairQueueDepth;
     public final long asyncMutationQueueDepth;
-    public final long asyncMutationCompletedCount;
     public final long asyncMutationFailedCount;
     public final long asyncMutationRejectedCount;
 
     Snapshot(
         long hits,
         long misses,
-        long accessDropped,
-        long accepted,
-        long applied,
         long evicted,
-        long logicalExpired,
         long physicalExpired,
-        long maintenanceLoopNanos,
         long liveWeight,
         long timeoutLagMillis,
         boolean unhealthy,
         long queueDepth,
         long retiredEntries,
         long retiredBytes,
-        long oldestRetireEpoch,
-        long policyEvictions,
-        long evictionScans,
-        long evictionLockedSkips,
         long timerBytes,
         long ttlBacklog,
         long sketchBytes,
@@ -1921,8 +1808,6 @@ public final class MaintenanceEventLoop
         long queueCapacity,
         long retirementQueueDepth,
         long retirementQueueCapacity,
-        long wakeSignals,
-        long mergedWakeSignals,
         long nonBlockingPutFailures,
         long nonBlockingReplaceFailures,
         long nonBlockingRemoveFailures,
@@ -1932,28 +1817,18 @@ public final class MaintenanceEventLoop
         long nativeAllocationFailures,
         long repairQueueDepth,
         long asyncMutationQueueDepth,
-        long asyncMutationCompletedCount,
         long asyncMutationFailedCount,
         long asyncMutationRejectedCount) {
       this.hits = hits;
       this.misses = misses;
-      this.accessDropped = accessDropped;
-      this.accepted = accepted;
-      this.applied = applied;
       this.evicted = evicted;
-      this.logicalExpired = logicalExpired;
       this.physicalExpired = physicalExpired;
-      this.maintenanceLoopNanos = maintenanceLoopNanos;
       this.liveWeight = liveWeight;
       this.timeoutLagMillis = timeoutLagMillis;
       this.unhealthy = unhealthy;
       this.queueDepth = queueDepth;
       this.retiredEntries = retiredEntries;
       this.retiredBytes = retiredBytes;
-      this.oldestRetireEpoch = oldestRetireEpoch;
-      this.policyEvictions = policyEvictions;
-      this.evictionScans = evictionScans;
-      this.evictionLockedSkips = evictionLockedSkips;
       this.timerBytes = timerBytes;
       this.ttlBacklog = ttlBacklog;
       this.sketchBytes = sketchBytes;
@@ -1962,8 +1837,6 @@ public final class MaintenanceEventLoop
       this.queueCapacity = queueCapacity;
       this.retirementQueueDepth = retirementQueueDepth;
       this.retirementQueueCapacity = retirementQueueCapacity;
-      this.wakeSignals = wakeSignals;
-      this.mergedWakeSignals = mergedWakeSignals;
       this.nonBlockingPutFailures = nonBlockingPutFailures;
       this.nonBlockingReplaceFailures = nonBlockingReplaceFailures;
       this.nonBlockingRemoveFailures = nonBlockingRemoveFailures;
@@ -1973,7 +1846,6 @@ public final class MaintenanceEventLoop
       this.nativeAllocationFailures = nativeAllocationFailures;
       this.repairQueueDepth = repairQueueDepth;
       this.asyncMutationQueueDepth = asyncMutationQueueDepth;
-      this.asyncMutationCompletedCount = asyncMutationCompletedCount;
       this.asyncMutationFailedCount = asyncMutationFailedCount;
       this.asyncMutationRejectedCount = asyncMutationRejectedCount;
     }

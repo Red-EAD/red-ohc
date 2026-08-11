@@ -15,7 +15,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.testng.annotations.Test;
 
@@ -24,6 +23,8 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
+import com.red.ohc.index.Entry;
+import com.red.ohc.maintenance.MaintenanceEventLoop;
 
 public final class MaxSizeTest {
   private static final CacheSerializer<String> STRING =
@@ -189,25 +190,10 @@ public final class MaxSizeTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    ReentrantLock ownerLock = ownerLock(cache);
-    CountDownLatch locked = new CountDownLatch(1);
+    CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    Thread holder =
-        new Thread(
-            () -> {
-              ownerLock.lock();
-              try {
-                locked.countDown();
-                release.await();
-              } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-              } finally {
-                ownerLock.unlock();
-              }
-            });
-    holder.start();
+    pauseMaintenance(cache, paused, release);
     try {
-      assertTrue(locked.await(2L, TimeUnit.SECONDS));
       assertTrue(cache.put("one", "value-one"));
       assertTrue(cache.put("two", "value-two"));
       assertFalse(cache.put("three", "value-three"));
@@ -216,13 +202,44 @@ public final class MaxSizeTest {
       assertEquals(cache.get("one"), "replacement");
     } finally {
       release.countDown();
-      holder.join(2_000L);
       try {
         cache.flushAsync().join();
         assertEquals(cache.size(), 1L);
       } finally {
         cache.close();
       }
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void highWaterRejectionDoesNotWakeTheIdleActor() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(1)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    MaintenanceEventLoop worker = worker(cache);
+    Entry first = new Entry(0L, 0, 101, 0L);
+    Entry second = new Entry(0L, 0, 102, 0L);
+    try {
+      waitUntilParked(worker);
+      cache.dataForTest().put(first, first);
+      cache.dataForTest().put(second, second);
+      long generation = idleGeneration(worker);
+
+      assertFalse(cache.put("rejected", "value"));
+      Thread.sleep(20L);
+
+      assertTrue(worker.isParked(), "a rejected write did not create maintenance work");
+      assertEquals(
+          idleGeneration(worker),
+          generation,
+          "a rejected write must not send a stateless maintenance signal");
+    } finally {
+      cache.dataForTest().remove(first, first);
+      cache.dataForTest().remove(second, second);
+      cache.close();
     }
   }
 
@@ -265,13 +282,48 @@ public final class MaxSizeTest {
     assertTrue(false, "put admission did not succeed for " + key);
   }
 
-  private static ReentrantLock ownerLock(OffHeapCache<?, ?> cache) throws Exception {
+  private static void pauseMaintenance(
+      OffHeapCache<?, ?> cache, CountDownLatch paused, CountDownLatch release) throws Exception {
+    MaintenanceEventLoop worker = worker(cache);
+    assertTrue(
+        worker.submitAsyncMutation(
+            () -> {
+              paused.countDown();
+              await(release);
+            },
+            failure -> {
+              throw new AssertionError(failure);
+            }));
+    assertTrue(paused.await(2L, TimeUnit.SECONDS), "maintenance actor did not pause");
+  }
+
+  private static MaintenanceEventLoop worker(OffHeapCache<?, ?> cache) throws Exception {
     Field workerField = OffHeapCache.class.getDeclaredField("worker");
     workerField.setAccessible(true);
-    Object worker = workerField.get(cache);
-    Field ownerField = worker.getClass().getDeclaredField("ownerLock");
-    ownerField.setAccessible(true);
-    return (ReentrantLock) ownerField.get(worker);
+    return (MaintenanceEventLoop) workerField.get(cache);
+  }
+
+  private static long idleGeneration(MaintenanceEventLoop worker) throws Exception {
+    Field field = MaintenanceEventLoop.class.getDeclaredField("idleGeneration");
+    field.setAccessible(true);
+    return field.getLong(worker);
+  }
+
+  private static void waitUntilParked(MaintenanceEventLoop worker) throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+    while (!worker.isParked() && System.nanoTime() < deadline) {
+      Thread.sleep(1L);
+    }
+    assertTrue(worker.isParked(), "maintenance actor did not park");
+  }
+
+  private static void await(CountDownLatch latch) {
+    try {
+      latch.await();
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(interrupted);
+    }
   }
 
   private static final class MutableTicker implements Ticker {

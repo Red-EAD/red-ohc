@@ -27,13 +27,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.OHCacheStats;
+import com.red.ohc.maintenance.MaintenanceEventLoop;
 
 public class BulkCacheTest {
   private static final CacheSerializer<String> STRING =
@@ -997,22 +997,9 @@ public class BulkCacheTest {
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
-    ReentrantLock ownerLock = ownerLock(cache);
-    CountDownLatch locked = new CountDownLatch(1);
+    CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    Thread holder =
-        new Thread(
-            () -> {
-              ownerLock.lock();
-              try {
-                locked.countDown();
-                await(release);
-              } finally {
-                ownerLock.unlock();
-              }
-            });
-    holder.start();
-    assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+    pauseMaintenance(cache, actorPaused, release);
     try {
       Map<String, String> values = new LinkedHashMap<>();
       for (int index = 0; index < 1_025; index++) {
@@ -1025,7 +1012,6 @@ public class BulkCacheTest {
           "CHM/value publication must not wait for advisory maintenance");
     } finally {
       release.countDown();
-      holder.join(2_000L);
       cache.flushAsync().join();
       cache.close();
     }
@@ -1042,22 +1028,9 @@ public class BulkCacheTest {
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
-    ReentrantLock ownerLock = ownerLock(cache);
-    CountDownLatch locked = new CountDownLatch(1);
+    CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    Thread holder =
-        new Thread(
-            () -> {
-              ownerLock.lock();
-              try {
-                locked.countDown();
-                await(release);
-              } finally {
-                ownerLock.unlock();
-              }
-            });
-    holder.start();
-    assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+    pauseMaintenance(cache, actorPaused, release);
     try {
       for (int index = 0; index < 1_024; index++) {
         assertTrue(cache.put("single-paused-" + index, "value-" + index));
@@ -1072,7 +1045,6 @@ public class BulkCacheTest {
           "a full advisory queue must not delay synchronous CHM publication");
     } finally {
       release.countDown();
-      holder.join(2_000L);
       cache.flushAsync().join();
       cache.close();
     }
@@ -1088,22 +1060,9 @@ public class BulkCacheTest {
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
-    ReentrantLock ownerLock = ownerLock(cache);
-    CountDownLatch locked = new CountDownLatch(1);
+    CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    Thread holder =
-        new Thread(
-            () -> {
-              ownerLock.lock();
-              try {
-                locked.countDown();
-                await(release);
-              } finally {
-                ownerLock.unlock();
-              }
-            });
-    holder.start();
-    assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+    pauseMaintenance(cache, actorPaused, release);
     try {
       Map<String, String> values = new LinkedHashMap<>();
       for (int index = 0; index < 2_050; index++) {
@@ -1113,7 +1072,6 @@ public class BulkCacheTest {
       assertEquals(cache.get("repair-paused-2049"), "value-2049");
     } finally {
       release.countDown();
-      holder.join(2_000L);
       cache.flushAsync().join();
       cache.close();
     }
@@ -1129,22 +1087,9 @@ public class BulkCacheTest {
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
-    ReentrantLock ownerLock = ownerLock(cache);
-    CountDownLatch locked = new CountDownLatch(1);
+    CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    Thread holder =
-        new Thread(
-            () -> {
-              ownerLock.lock();
-              try {
-                locked.countDown();
-                await(release);
-              } finally {
-                ownerLock.unlock();
-              }
-            });
-    holder.start();
-    assertTrue(locked.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+    pauseMaintenance(cache, actorPaused, release);
     try {
       Map<String, String> values = new LinkedHashMap<>();
       for (int index = 0; index < 1_025; index++) {
@@ -1162,7 +1107,6 @@ public class BulkCacheTest {
           "the old native value must be recorded even when the UPDATE hint is dropped");
     } finally {
       release.countDown();
-      holder.join(2_000L);
       cache.flushAsync().join();
       cache.close();
     }
@@ -1385,13 +1329,23 @@ public class BulkCacheTest {
     return ((ThreadLocal<com.red.ohc.runtime.ThreadContext>) field.get(cache)).get();
   }
 
-  private static ReentrantLock ownerLock(OffHeapCache<?, ?> cache) throws Exception {
+  private static void pauseMaintenance(
+      OffHeapCache<?, ?> cache, CountDownLatch paused, CountDownLatch release) throws Exception {
     Field workerField = OffHeapCache.class.getDeclaredField("worker");
     workerField.setAccessible(true);
-    Object worker = workerField.get(cache);
-    Field ownerField = worker.getClass().getDeclaredField("ownerLock");
-    ownerField.setAccessible(true);
-    return (ReentrantLock) ownerField.get(worker);
+    MaintenanceEventLoop worker = (MaintenanceEventLoop) workerField.get(cache);
+    assertTrue(
+        worker.submitAsyncMutation(
+            () -> {
+              paused.countDown();
+              await(release);
+            },
+            failure -> {
+              throw new AssertionError(failure);
+            }));
+    assertTrue(
+        paused.await(2L, java.util.concurrent.TimeUnit.SECONDS),
+        "maintenance actor did not pause");
   }
 
   private static void await(CountDownLatch latch) {

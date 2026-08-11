@@ -103,8 +103,6 @@ public final class ConcurrentLifecycleFuzzTest {
               + cache.capacity()
               + ", evictions="
               + stats.getEvictionCount()
-              + ", scans="
-              + stats.getEvictionScanCount()
               + ", size="
               + cache.size()
               + ", queue="

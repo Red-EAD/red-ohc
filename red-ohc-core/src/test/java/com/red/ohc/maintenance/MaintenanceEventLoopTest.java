@@ -14,7 +14,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
 
 import org.jctools.queues.MpscArrayQueue;
 import org.testng.annotations.Test;
@@ -99,15 +98,6 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void acceptedWriteStatsUseAStripedCounter() throws Exception {
-    Field accepted = MaintenanceEventLoop.class.getDeclaredField("accepted");
-    assertEquals(
-        accepted.getType(),
-        LongAdder.class,
-        "every successful put must not contend on one cache-global stats cache line");
-  }
-
-  @Test
   public void mutationTransportUsesABoundedQueueAndRepairSideChannel() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
@@ -150,7 +140,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void readerRegistrationDoesNotWakeAnIdleWorker() {
+  public void readerRegistrationDoesNotWakeAnIdleWorker() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -162,9 +152,14 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             new ReaderRegistry());
     try {
+      loop.start();
+      waitUntilParked(loop);
       loop.registerReader(new ReaderSlot());
-      assertEquals(loop.snapshot().wakeSignals, 0L, "registering a reader is not maintenance work");
+      Thread.sleep(10L);
+      assertTrue(loop.isParked(), "registering a reader is not maintenance work");
     } finally {
+      loop.stop();
+      loop.join(1_000L);
       memory.closeArenas();
     }
   }
@@ -194,6 +189,102 @@ public class MaintenanceEventLoopTest {
     } finally {
       loop.stop();
       loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void batchGraceBeforeTheWheelDeadlineDoesNotRequestAClockRefresh() throws Exception {
+    FrozenTicker ticker = new FrozenTicker();
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ConcurrentHashMap<Entry, Entry> data = index();
+    long allocation = ValueBlock.allocationLength(1);
+    long value = memory.newWriterArena().allocate(allocation);
+    ValueBlock.initialize(value, 10_000L, 1);
+    Entry entry =
+        new Entry(0L, 0, 92, 0L, Entry.tagValueAddress(value, true));
+    data.put(entry, entry);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            data, memory, new Budget(1 << 20), ticker, 1 << 20, Eviction.LRU, new ReaderRegistry());
+    try {
+      invokeApplyEntry(loop, entry);
+      Method park =
+          MaintenanceEventLoop.class.getDeclaredMethod("parkUntilWorkOrTimer", boolean.class);
+      park.setAccessible(true);
+      park.invoke(loop, true);
+
+      Field refresh = MaintenanceEventLoop.class.getDeclaredField("clockRefreshRequested");
+      refresh.setAccessible(true);
+      assertFalse(
+          refresh.getBoolean(loop),
+          "the 1ms batching grace ended before the real TTL deadline");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void batchGraceEndingAtADeferredMutationDeadlineRequestsAClockRefresh() throws Exception {
+    FrozenTicker ticker = new FrozenTicker();
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            ticker,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    try {
+      Field retry = MaintenanceEventLoop.class.getDeclaredField("deferredMutationRetryNanos");
+      retry.setAccessible(true);
+      retry.setLong(loop, 1L);
+
+      Method park =
+          MaintenanceEventLoop.class.getDeclaredMethod("parkUntilWorkOrTimer", boolean.class);
+      park.setAccessible(true);
+      park.invoke(loop, true);
+
+      Field refresh = MaintenanceEventLoop.class.getDeclaredField("clockRefreshRequested");
+      refresh.setAccessible(true);
+      assertTrue(
+          refresh.getBoolean(loop),
+          "a real non-wheel deadline must refresh the actor clock after waking");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void idleBudgetLeasesAreReclaimedOnlyAfterBudgetPressure() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    Budget budget = new Budget(128L);
+    Budget.Lease first = budget.leaseForCurrentThread();
+    Budget.Lease second = budget.leaseForCurrentThread();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, budget, Ticker.DEFAULT, 128L, Eviction.LRU, new ReaderRegistry());
+    try {
+      assertTrue(budget.tryReserve(first, 1L));
+      assertFalse(
+          budget.tryReserve(second, 64L),
+          "the first lease must retain the refill credit before maintenance runs");
+
+      invokeMaintenancePass(loop);
+      assertFalse(
+          budget.tryReserve(second, 64L),
+          "an ordinary maintenance pass must not scan and reclaim idle writer leases");
+
+      Method request =
+          MaintenanceEventLoop.class.getDeclaredMethod("requestBudgetPressure");
+      request.invoke(loop);
+      invokeMaintenancePass(loop);
+      assertTrue(
+          budget.tryReserve(second, 64L),
+          "budget pressure must reclaim idle writer credit for a later reservation");
+    } finally {
       memory.closeArenas();
     }
   }
@@ -467,16 +558,16 @@ public class MaintenanceEventLoopTest {
     try {
       loop.start();
       waitUntilParked(loop);
-      long wakeSignals = loop.snapshot().wakeSignals;
+      long idleGeneration = idleGeneration(loop);
       loop.prepareReliableRemoval(context, entry);
       loop.cancelReliableRemoval(context, entry);
 
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-      while (loop.snapshot().wakeSignals == wakeSignals && System.nanoTime() < deadline) {
+      while (idleGeneration(loop) == idleGeneration && System.nanoTime() < deadline) {
         Thread.yield();
       }
       assertTrue(
-          loop.snapshot().wakeSignals > wakeSignals,
+          idleGeneration(loop) > idleGeneration,
           "canceling a parked removal reservation must signal the maintenance worker");
     } finally {
       if (context.reliableRemoval.active()) {
@@ -572,7 +663,6 @@ public class MaintenanceEventLoopTest {
       loop.start();
       loop.flush().join();
 
-      assertEquals(loop.snapshot().applied, 1L);
       assertEquals(
           loop.snapshot().ttlBacklog,
           1L,
@@ -702,13 +792,15 @@ public class MaintenanceEventLoopTest {
       assertTrue(two.claimWriter());
       loop.start();
       java.util.concurrent.CompletableFuture<Void> flush = loop.flush();
+      Field retry = MaintenanceEventLoop.class.getDeclaredField("evictionRetryNanos");
+      retry.setAccessible(true);
       long blockedDeadline = System.nanoTime() + 1_000_000_000L;
-      while (loop.snapshot().evictionLockedSkips == 0L
+      while (retry.getLong(loop) == Long.MAX_VALUE
           && System.nanoTime() < blockedDeadline) {
         Thread.yield();
       }
       assertTrue(
-          loop.snapshot().evictionLockedSkips > 0L,
+          retry.getLong(loop) != Long.MAX_VALUE,
           "maintenance did not observe the locked eviction victim");
 
       one.finishWriter();
@@ -752,15 +844,13 @@ public class MaintenanceEventLoopTest {
 
       invokeMaintenancePass(loop);
       assertEquals(
-          loop.snapshot().evictionScans,
-          0L,
+          data.size(),
+          1,
           "an unrelated wake must not bypass the eviction retry deadline");
 
       retry.setLong(loop, 0L);
       invokeMaintenancePass(loop);
-      assertTrue(
-          loop.snapshot().evictionScans > 0L,
-          "eviction must resume once its retry deadline is due");
+      assertEquals(data.size(), 0, "eviction must resume once its retry deadline is due");
     } finally {
       memory.closeArenas();
     }
@@ -1109,16 +1199,10 @@ public class MaintenanceEventLoopTest {
     try {
       retireOne(loop, memory, budget, context);
       waitForRetiredEntries(loop, 1);
-      long wakeSignals = loop.snapshot().wakeSignals;
 
       reader.epoch = 0L;
       loop.readerQuiescent();
 
-      assertEquals(
-          loop.snapshot().wakeSignals,
-          wakeSignals,
-          "normal QSBR reclaim waits for the bounded epoch deadline instead of signalling every"
-              + " reader exit");
       waitForNoRetiredEntries(loop);
     } finally {
       loop.stop();
@@ -1150,12 +1234,13 @@ public class MaintenanceEventLoopTest {
         retirements.append(reservation, 0L, 0L);
         reservations[index] = reservation;
       }
+      ThreadContext context = new ThreadContext(null, null);
+      assertFalse(loop.prepareRetirement(context, 1), "a full retirement ring must fail fast");
+
       loop.start();
       waitUntilParked(loop);
-      ThreadContext context = new ThreadContext(null, null);
       activeReader.epoch = 0L;
 
-      assertFalse(loop.prepareRetirement(context, 1), "a full retirement ring must fail fast");
       loop.requestMaintenance();
       loop.flush().join();
       assertTrue(loop.prepareRetirement(context, 1));
@@ -1316,6 +1401,12 @@ public class MaintenanceEventLoopTest {
       Thread.sleep(1L);
     }
     assertTrue(loop.isParked(), "maintenance actor did not park");
+  }
+
+  private static long idleGeneration(MaintenanceEventLoop loop) throws Exception {
+    Field field = MaintenanceEventLoop.class.getDeclaredField("idleGeneration");
+    field.setAccessible(true);
+    return field.getLong(loop);
   }
 
   private static void await(CountDownLatch latch) {

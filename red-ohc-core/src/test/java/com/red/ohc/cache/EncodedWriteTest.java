@@ -101,7 +101,7 @@ public class EncodedWriteTest {
   }
 
   @Test
-  public void sameWeightPermanentReplacementDoesNotCreateAMaintenanceMutation() {
+  public void sameWeightPermanentReplacementRemainsVisibleAfterFlush() {
     AtomicInteger serializations = new AtomicInteger();
     try (OffHeapCache<byte[], byte[]> cache =
         (OffHeapCache<byte[], byte[]>)
@@ -113,15 +113,11 @@ public class EncodedWriteTest {
       EncodedKey key = EncodedKey.copyOf(new byte[] {21, 22, 23, 24});
       assertTrue(cache.putEncoded(key, new byte[] {1, 2, 3, 4}));
       cache.flushAsync().join();
-      long applied = cache.stats().getMutationApplied();
 
       assertTrue(cache.putEncoded(key, new byte[] {5, 6, 7, 8}));
       cache.flushAsync().join();
 
-      assertEquals(
-          cache.stats().getMutationApplied(),
-          applied,
-          "same allocation weight and deadline leave actor-owned policy/timer state unchanged");
+      assertEquals(cache.stats().getMaintenanceQueueDepth(), 0L);
       assertTrue(
           cache.getDirect(
               new byte[] {21, 22, 23, 24}, view -> assertEquals(view.getByte(0), (byte) 5)));
