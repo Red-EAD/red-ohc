@@ -34,6 +34,28 @@ public class DirectReadAllocationTest {
       };
 
   @Test
+  public void primitiveLongMatchesTheBigEndianByteBufferView() {
+    byte[] key = new byte[] {1, 2, 3, 4};
+    byte[] value = new byte[] {1, 2, 3, 4, 5, 6, 7, 8};
+    try (OHCache<byte[], byte[]> cache =
+        OHCacheBuilder.<byte[], byte[]>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(BYTES)
+            .valueSerializer(BYTES)
+            .build()) {
+      assertTrue(cache.put(key, value));
+
+      assertTrue(
+          cache.getDirect(
+              key,
+              view -> {
+                assertEquals(view.getLong(0), 0x0102030405060708L);
+                assertEquals(view.getLong(0), view.asReadOnlyByteBuffer().getLong(0));
+              }));
+    }
+  }
+
+  @Test
   public void steadyDirectHitHasNoCacheSideThreadAllocation() {
     com.sun.management.ThreadMXBean bean =
         (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();

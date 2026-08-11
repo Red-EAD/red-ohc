@@ -1,11 +1,15 @@
 package com.red.ohc.runtime;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 import com.red.ohc.api.ValueView;
 import com.red.ohc.storage.NativeMemory;
 
 public final class DirectValueView implements ValueView {
+  private static final boolean LITTLE_ENDIAN =
+      ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+
   private long address;
   private int length;
   private ByteBuffer byteBuffer;
@@ -33,7 +37,8 @@ public final class DirectValueView implements ValueView {
   public long getLong(int offset) {
     ensureActive();
     check(offset, 8);
-    return NativeMemory.getLong(address + offset);
+    long value = NativeMemory.getLong(address + offset);
+    return LITTLE_ENDIAN ? Long.reverseBytes(value) : value;
   }
 
   @Override

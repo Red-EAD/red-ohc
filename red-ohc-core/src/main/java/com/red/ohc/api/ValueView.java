@@ -14,6 +14,10 @@ public interface ValueView {
 
   byte getByte(int offset);
 
+  /**
+   * Reads eight bytes in {@link java.nio.ByteOrder#BIG_ENDIAN} order, matching {@code
+   * asReadOnlyByteBuffer().getLong(offset)}.
+   */
   long getLong(int offset);
 
   void copyTo(byte[] target, int targetOffset);
