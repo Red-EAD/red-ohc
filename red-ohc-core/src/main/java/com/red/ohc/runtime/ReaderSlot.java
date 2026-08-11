@@ -18,7 +18,8 @@ public final class ReaderSlot {
 
   public long consumedHits;
   public long consumedMisses;
-  public final AccessRing access = new AccessRing();
+  /** Lazily allocated after the first sampled access. */
+  public volatile AccessRing access;
 
   public boolean markAccessPending() {
     return accessPending.compareAndSet(false, true);

@@ -68,7 +68,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final Budget budget;
   private final ReaderRegistry readers = new ReaderRegistry();
   private final ThreadLocal<ThreadContext> contexts;
-  private final ThreadLocal<ThreadContext> evictionContexts;
+  private final ThreadContext evictionContexts;
   private final MaintenanceEventLoop worker;
   private final ReaderGuard readerGuard;
   private final ConcurrentHashMap<EncodedKey, CompletableFuture<V>> loadFlights = new ConcurrentHashMap<>();
@@ -139,7 +139,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.memory = new NativeMemory.Memory(allocatorType, nativeHardLimit);
     this.budget = new Budget(residentHardLimit, memory.writerStripeCount());
     this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null));
-    this.evictionContexts = ThreadLocal.withInitial(() -> new ThreadContext(null));
+    this.evictionContexts = evictionListener == null ? null : new ThreadContext(null);
     this.worker =
         new MaintenanceEventLoop(
             data,
@@ -164,7 +164,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     LazySupplier<K> key = null;
     LazySupplier<V> value = null;
     try {
-      ThreadContext context = evictionContexts.get();
+      ThreadContext context = evictionContexts;
       key =
           new LazySupplier<>(
               () ->
@@ -1651,6 +1651,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       context.markRegistered();
       worker.registerReader(context.slot);
     }
+    if (context.isWriterEntered()) {
+      return null;
+    }
     context.slot.writerActive = true;
     boolean activated = false;
     boolean admitted = false;
@@ -1672,9 +1675,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return null;
     } finally {
       if (!admitted) {
-        context.slot.writerActive = false;
         if (activated) {
           context.exitWriter();
+        }
+        if (!context.isWriterEntered()) {
+          context.slot.writerActive = false;
         }
       }
     }

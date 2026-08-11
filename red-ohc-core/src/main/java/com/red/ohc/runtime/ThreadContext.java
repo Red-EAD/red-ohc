@@ -18,40 +18,44 @@ public final class ThreadContext {
   public ByteBuffer keyBuffer = ByteBuffer.wrap(keyBytes);
   public final LookupKey lookupKey = new LookupKey();
   public final ReaderSlot slot = new ReaderSlot();
-  private DirectValueView[] directViews = new DirectValueView[4];
+  private DirectValueView[] directViews;
   private int directViewDepth;
   private int readerDepth;
   private ByteBuffer writableValueBuffer;
-  private ByteBuffer[] readOnlyValueBuffers = new ByteBuffer[4];
+  private ByteBuffer[] readOnlyValueBuffers;
   private int readOnlyValueDepth;
-  private Set<Entry>[] bulkEntrySets = new Set[2];
-  private int[] bulkEntrySetCapacities = new int[2];
-  private boolean[] reusableBulkEntrySets = new boolean[2];
+  private Set<Entry>[] bulkEntrySets;
+  private int[] bulkEntrySetCapacities;
+  private boolean[] reusableBulkEntrySets;
   private int bulkEntrySetDepth;
 
-  /**
-   * Reusable native-retirement reservation; it is active only across one writer critical section.
-   */
-  public final RetirementQueue.Reservation retirement = new RetirementQueue.Reservation();
-
-  public final ReliableRemovalQueue.Reservation reliableRemoval =
-      new ReliableRemovalQueue.Reservation();
-  private WriterArena writerArena;
-  private boolean writerEntered;
+  private WriterState writerState;
   private long readSequence;
   private long accessSequence;
   private MaintenanceEventLoop maintenance;
   private int bulkReadDepth;
   private boolean bulkReadChanged;
-  private boolean retirementPublished;
-
-  /** Last actor idle generation this writer has already signalled. */
-  private long maintenanceWakeGeneration = Long.MIN_VALUE;
 
   boolean registered;
 
   public ThreadContext(WriterArena writerArena) {
-    this.writerArena = writerArena;
+    if (writerArena != null) {
+      this.writerState = new WriterState(writerArena);
+    }
+  }
+
+  private static final class WriterState {
+    private final RetirementQueue.Reservation retirement = new RetirementQueue.Reservation();
+    private final ReliableRemovalQueue.Reservation reliableRemoval =
+        new ReliableRemovalQueue.Reservation();
+    private WriterArena writerArena;
+    private boolean writerEntered;
+    private boolean retirementPublished;
+    private long maintenanceWakeGeneration = Long.MIN_VALUE;
+
+    private WriterState(WriterArena writerArena) {
+      this.writerArena = writerArena;
+    }
   }
 
   public static void verifyNativeByteBufferSupported() {
@@ -83,6 +87,9 @@ public final class ThreadContext {
 
   /** Reuses read-only native views while preserving nested deserialize calls by depth. */
   public ByteBuffer readOnlyValueBuffer(long address, int length) {
+    if (readOnlyValueBuffers == null) {
+      readOnlyValueBuffers = new ByteBuffer[4];
+    }
     if (readOnlyValueDepth == readOnlyValueBuffers.length) {
       ByteBuffer[] expanded = new ByteBuffer[readOnlyValueBuffers.length << 1];
       System.arraycopy(readOnlyValueBuffers, 0, expanded, 0, readOnlyValueBuffers.length);
@@ -112,39 +119,60 @@ public final class ThreadContext {
   }
 
   public WriterArena writer() {
-    return writerArena;
+    WriterState state = writerState;
+    if (state == null || state.writerArena == null) {
+      throw new IllegalStateException("writer resources are not bound");
+    }
+    return state.writerArena;
   }
 
   public boolean hasWriterResources() {
-    return writerArena != null;
+    WriterState state = writerState;
+    return state != null && state.writerArena != null;
   }
 
   public void bindWriterResources(WriterArena writerArena) {
     if (writerArena == null) {
       throw new IllegalArgumentException("writer arena is required");
     }
-    if (this.writerArena != null) {
-      if (this.writerArena != writerArena) {
+    WriterState state = ensureWriterState();
+    if (state.writerArena != null) {
+      if (state.writerArena != writerArena) {
         throw new IllegalStateException("writer resources are already bound");
       }
       return;
     }
-    this.writerArena = writerArena;
+    state.writerArena = writerArena;
   }
 
   public boolean tryEnterWriter() {
-    if (writerEntered) {
+    WriterState state = ensureWriterState();
+    if (state.writerEntered) {
       return false;
     }
-    writerEntered = true;
+    state.writerEntered = true;
     return true;
   }
 
   public void exitWriter() {
-    if (!writerEntered) {
+    WriterState state = writerState;
+    if (state == null || !state.writerEntered) {
       throw new IllegalStateException("writer is not entered");
     }
-    writerEntered = false;
+    state.writerEntered = false;
+  }
+
+  public boolean isWriterEntered() {
+    WriterState state = writerState;
+    return state != null && state.writerEntered;
+  }
+
+  public RetirementQueue.Reservation retirement() {
+    return ensureWriterState().retirement;
+  }
+
+  public ReliableRemovalQueue.Reservation reliableRemoval() {
+    return ensureWriterState().reliableRemoval;
   }
 
   public boolean isRegistered() {
@@ -169,6 +197,9 @@ public final class ThreadContext {
   public DirectValueView pushDirectView(long address, int length) {
     ByteBuffer buffer = readOnlyValueBuffer(address, length);
     try {
+      if (directViews == null) {
+        directViews = new DirectValueView[4];
+      }
       if (directViewDepth == directViews.length) {
         DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
         System.arraycopy(directViews, 0, expanded, 0, directViews.length);
@@ -238,6 +269,11 @@ public final class ThreadContext {
   }
 
   private void ensureBulkEntryDepth() {
+    if (bulkEntrySets == null) {
+      bulkEntrySets = new Set[2];
+      bulkEntrySetCapacities = new int[2];
+      reusableBulkEntrySets = new boolean[2];
+    }
     if (bulkEntrySetDepth < bulkEntrySets.length) {
       return;
     }
@@ -278,7 +314,7 @@ public final class ThreadContext {
     slot.localHits++;
     readSequence++;
     if ((++accessSequence & 15L) == 0L) {
-      slot.access.offer(entry, entry.generation());
+      accessRing().offer(entry, entry.generation());
     }
     bulkReadChanged = true;
   }
@@ -312,7 +348,7 @@ public final class ThreadContext {
     if ((++accessSequence & 15L) != 0L) {
       return;
     }
-    if (!slot.access.offer(entry, entry.generation())) {
+    if (!accessRing().offer(entry, entry.generation())) {
       return;
     }
     MaintenanceEventLoop loop = maintenance;
@@ -348,12 +384,16 @@ public final class ThreadContext {
   }
 
   public void markRetirementPublished() {
-    retirementPublished = true;
+    ensureWriterState().retirementPublished = true;
   }
 
   public boolean consumeRetirementPublished() {
-    boolean published = retirementPublished;
-    retirementPublished = false;
+    WriterState state = writerState;
+    if (state == null) {
+      return false;
+    }
+    boolean published = state.retirementPublished;
+    state.retirementPublished = false;
     return published;
   }
 
@@ -368,11 +408,30 @@ public final class ThreadContext {
    * replacement traffic while retaining the park-before-publish handshake.
    */
   public boolean needsMaintenanceWake(long idleGeneration) {
-    if (maintenanceWakeGeneration == idleGeneration) {
+    WriterState state = ensureWriterState();
+    if (state.maintenanceWakeGeneration == idleGeneration) {
       return false;
     }
-    maintenanceWakeGeneration = idleGeneration;
+    state.maintenanceWakeGeneration = idleGeneration;
     return true;
+  }
+
+  private AccessRing accessRing() {
+    AccessRing ring = slot.access;
+    if (ring == null) {
+      ring = new AccessRing();
+      slot.access = ring;
+    }
+    return ring;
+  }
+
+  private WriterState ensureWriterState() {
+    WriterState state = writerState;
+    if (state == null) {
+      state = new WriterState(null);
+      writerState = state;
+    }
+    return state;
   }
 
   private static int round(int value) {

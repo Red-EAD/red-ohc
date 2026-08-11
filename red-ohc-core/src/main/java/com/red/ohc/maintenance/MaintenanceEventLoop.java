@@ -21,6 +21,7 @@ import com.red.ohc.api.Ticker;
 import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
 import com.red.ohc.runtime.AccessConsumer;
+import com.red.ohc.runtime.AccessRing;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.Budget;
@@ -586,7 +587,7 @@ public final class MaintenanceEventLoop
   /** Publishes a pre-reserved block to the cache-owned native retirement transport. */
   public void retireValue(
       com.red.ohc.runtime.ThreadContext context, long address, long allocation) {
-    retirements.append(context.retirement, address, allocation);
+    retirements.append(context.retirement(), address, allocation);
     context.markRetirementPublished();
   }
 
@@ -631,7 +632,7 @@ public final class MaintenanceEventLoop
    * Reserves native retirement records before an index mutation publishes a replacement or removal.
    */
   public boolean prepareRetirement(com.red.ohc.runtime.ThreadContext context, int records) {
-    return retirements.tryReserve(context.retirement, records);
+    return retirements.tryReserve(context.retirement(), records);
   }
 
   /**
@@ -643,28 +644,28 @@ public final class MaintenanceEventLoop
       throw new NullPointerException("context/entry");
     }
     throwIfUnavailable();
-    if (!reliableRemovals.tryReserve(context.reliableRemoval)) {
+    if (!reliableRemovals.tryReserve(context.reliableRemoval())) {
       return false;
     }
     try {
-      if (!retirements.tryReserve(context.retirement, 2)) {
-        reliableRemovals.cancel(context.reliableRemoval);
+      if (!retirements.tryReserve(context.retirement(), 2)) {
+        reliableRemovals.cancel(context.reliableRemoval());
         signal();
         return false;
       }
       if (!reserveMutation(entry, Entry.PENDING_REMOVE)) {
-        retirements.cancel(context.retirement);
-        reliableRemovals.cancel(context.reliableRemoval);
+        retirements.cancel(context.retirement());
+        reliableRemovals.cancel(context.reliableRemoval());
         signal();
         return false;
       }
       return true;
     } catch (Throwable failure) {
-      if (context.retirement.active()) {
-        retirements.cancel(context.retirement);
+      if (context.retirement().active()) {
+        retirements.cancel(context.retirement());
       }
-      if (context.reliableRemoval.active()) {
-        reliableRemovals.cancel(context.reliableRemoval);
+      if (context.reliableRemoval().active()) {
+        reliableRemovals.cancel(context.reliableRemoval());
       }
       signal();
       throw failure;
@@ -686,7 +687,7 @@ public final class MaintenanceEventLoop
       long valueAllocation,
       RemovalCause cause) {
     entry.completePendingClaim();
-    reliableRemovals.commit(context.reliableRemoval, entry, valueAddress, cause);
+    reliableRemovals.commit(context.reliableRemoval(), entry, valueAddress, cause);
     retireValue(context, valueAddress, valueAllocation);
     retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
     if (wake) {
@@ -697,17 +698,17 @@ public final class MaintenanceEventLoop
   public void cancelReliableRemoval(
       com.red.ohc.runtime.ThreadContext context, Entry entry) {
     entry.cancelPendingClaimIfPresent();
-    if (context.retirement.active()) {
-      retirements.cancel(context.retirement);
+    if (context.retirement().active()) {
+      retirements.cancel(context.retirement());
     }
-    if (context.reliableRemoval.active()) {
-      reliableRemovals.cancel(context.reliableRemoval);
+    if (context.reliableRemoval().active()) {
+      reliableRemovals.cancel(context.reliableRemoval());
       signal();
     }
   }
 
   public void cancelRetirement(com.red.ohc.runtime.ThreadContext context) {
-    retirements.cancel(context.retirement);
+    retirements.cancel(context.retirement());
   }
 
   /** Control-plane barrier; callers share one pending barrier and never enter the hint queue. */
@@ -1430,7 +1431,11 @@ public final class MaintenanceEventLoop
       if (slot == null) {
         continue;
       }
-      if (!slot.hasAccessPending() && slot.access.isEmpty()) {
+      AccessRing access = slot.access;
+      if (access == null && !slot.hasAccessPending()) {
+        continue;
+      }
+      if (access != null && !slot.hasAccessPending() && access.isEmpty()) {
         continue;
       }
       // Clear before reading the counters/ring. A producer racing after this point either
@@ -1446,13 +1451,15 @@ public final class MaintenanceEventLoop
         misses += missDelta;
         slot.consumedMisses += missDelta;
       }
-      while (work < limit && slot.access.poll(this)) {
-        work++;
+      if (access != null) {
+        while (work < limit && access.poll(this)) {
+          work++;
+        }
       }
       if (work >= limit) {
         // The original hint may cover more than one bounded batch. Keep the hint live
         // until the ring is actually empty instead of relying on a future read to wake us.
-        if (!slot.access.isEmpty()) {
+        if (access != null && !access.isEmpty()) {
           slot.markAccessPending();
           accessHint.set(true);
         }

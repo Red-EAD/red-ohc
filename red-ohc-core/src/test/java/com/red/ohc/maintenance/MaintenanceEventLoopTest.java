@@ -630,7 +630,7 @@ public class MaintenanceEventLoopTest {
           idleGeneration(loop) > idleGeneration,
           "canceling a parked removal reservation must signal the maintenance worker");
     } finally {
-      if (context.reliableRemoval.active()) {
+      if (context.reliableRemoval().active()) {
         loop.cancelReliableRemoval(context, entry);
       }
       loop.stop();
@@ -1304,7 +1304,7 @@ public class MaintenanceEventLoopTest {
       loop.flush().join();
       assertTrue(loop.prepareRetirement(context, 1));
       loop.retireValue(context, 0L, 0L);
-      assertFalse(context.retirement.active(), "the one-record reservation must be published");
+      assertFalse(context.retirement().active(), "the one-record reservation must be published");
     } finally {
       activeReader.epoch = 0L;
       loop.stop();
