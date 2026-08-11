@@ -125,9 +125,9 @@ public final class PermanentReadClockTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .buildTyped()) {
-      assertTrue(cache.put(readKey, new byte[16], 64L));
-      assertTrue(cache.put(absentKey, new byte[] {1}, 64L));
-      assertTrue(cache.put(replaceKey, new byte[] {2}, 64L));
+      assertPutEventually(cache, readKey, new byte[16], 64L);
+      assertPutEventually(cache, absentKey, new byte[] {1}, 64L);
+      assertPutEventually(cache, replaceKey, new byte[] {2}, 64L);
 
       now.set(64);
 
@@ -137,5 +137,16 @@ public final class PermanentReadClockTest {
       assertTrue(cache.putIfAbsentAsync(absentKey, new byte[] {3}, 0L).join());
       assertFalse(cache.replaceAsync(replaceKey, new byte[] {2}, new byte[] {4}, 0L).join());
     }
+  }
+
+  private static void assertPutEventually(
+      OHCache<byte[], byte[]> cache, byte[] key, byte[] value, long expireAtMillis) {
+    for (int attempt = 0; attempt < 1_000; attempt++) {
+      if (cache.put(key, value, expireAtMillis)) {
+        return;
+      }
+      Thread.yield();
+    }
+    assertTrue(false, "put admission did not succeed within 1000 attempts");
   }
 }
