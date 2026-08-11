@@ -47,6 +47,12 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
+  /**
+   * Selects a weakly consistent entry-count bound. Maintenance evicts asynchronously toward this
+   * size; new keys are rejected without waiting once the cache reaches a small bounded overshoot
+   * watermark. This mode does not impose an independent native-byte limit and is mutually
+   * exclusive with {@link #capacity(long)}.
+   */
   public OHCacheBuilder<K, V> maxSize(long maxSize) {
     if (maxSize <= 0L) {
       throw new IllegalArgumentException("maxSize must be positive");

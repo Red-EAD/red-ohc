@@ -62,7 +62,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final long closeTimeoutMillis;
   private final long capacity;
   private final long byteCapacity;
-    private final long residentHardLimit;
+  private final long maxSizeHighWatermark;
+  private final long residentHardLimit;
   private final long nativeHardLimit;
   private final NativeMemory.Memory memory;
   private final Budget budget;
@@ -106,6 +107,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     boolean countBounded = maxSize > 0L;
     this.capacity = countBounded ? -1L : capacity;
     this.byteCapacity = countBounded ? Long.MAX_VALUE : capacity;
+    this.maxSizeHighWatermark =
+        countBounded ? maxSizeHighWatermark(maxSize) : Long.MAX_VALUE;
     long limit = countBounded ? maxSize : capacity;
     if (countBounded) {
       this.residentHardLimit = Long.MAX_VALUE;
@@ -402,6 +405,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         worker.recordNonBlockingReplaceFailure();
       }
       return result > 0;
+    }
+    if (data.mappingCount() >= maxSizeHighWatermark) {
+      worker.requestMaintenance();
+      return false;
     }
     Entry candidate =
         allocateEntry(
@@ -1890,6 +1897,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private static long saturatedAdd(long left, long right) {
     return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+  }
+
+  private static long maxSizeHighWatermark(long maxSize) {
+    long overshoot = maxSize / 64L + (maxSize % 64L == 0L ? 0L : 1L);
+    overshoot = Math.max(1L, Math.min(1_024L, overshoot));
+    return saturatedAdd(maxSize, overshoot);
   }
 
   private static long saturatedMultiply(long left, long right) {

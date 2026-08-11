@@ -1,17 +1,21 @@
 package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.testng.annotations.Test;
 
@@ -177,6 +181,51 @@ public final class MaxSizeTest {
     }
   }
 
+  @Test(timeOut = 10_000L)
+  public void maxSizeRejectsNewKeysAtTheApproximateHighWatermark() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(1)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    ReentrantLock ownerLock = ownerLock(cache);
+    CountDownLatch locked = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    Thread holder =
+        new Thread(
+            () -> {
+              ownerLock.lock();
+              try {
+                locked.countDown();
+                release.await();
+              } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+              } finally {
+                ownerLock.unlock();
+              }
+            });
+    holder.start();
+    try {
+      assertTrue(locked.await(2L, TimeUnit.SECONDS));
+      assertTrue(cache.put("one", "value-one"));
+      assertTrue(cache.put("two", "value-two"));
+      assertFalse(cache.put("three", "value-three"));
+      assertEquals(cache.size(), 2L);
+      assertTrue(cache.put("one", "replacement"));
+      assertEquals(cache.get("one"), "replacement");
+    } finally {
+      release.countDown();
+      holder.join(2_000L);
+      try {
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+      } finally {
+        cache.close();
+      }
+    }
+  }
+
   private static OHCache<String, String> newMaxSizeCache(long maxSize) {
     return newMaxSizeCache(maxSize, Eviction.S3_FIFO);
   }
@@ -214,6 +263,15 @@ public final class MaxSizeTest {
       Thread.yield();
     }
     assertTrue(false, "put admission did not succeed for " + key);
+  }
+
+  private static ReentrantLock ownerLock(OffHeapCache<?, ?> cache) throws Exception {
+    Field workerField = OffHeapCache.class.getDeclaredField("worker");
+    workerField.setAccessible(true);
+    Object worker = workerField.get(cache);
+    Field ownerField = worker.getClass().getDeclaredField("ownerLock");
+    ownerField.setAccessible(true);
+    return (ReentrantLock) ownerField.get(worker);
   }
 
   private static final class MutableTicker implements Ticker {
