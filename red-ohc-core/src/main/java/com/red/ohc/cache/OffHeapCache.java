@@ -137,9 +137,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     data.put(bootstrap, bootstrap);
     data.remove(bootstrap, bootstrap);
     this.memory = new NativeMemory.Memory(allocatorType, nativeHardLimit);
-    this.budget = new Budget(residentHardLimit);
-    this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null, null));
-    this.evictionContexts = ThreadLocal.withInitial(() -> new ThreadContext(null, null));
+    this.budget = new Budget(residentHardLimit, memory.writerStripeCount());
+    this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null));
+    this.evictionContexts = ThreadLocal.withInitial(() -> new ThreadContext(null));
     this.worker =
         new MaintenanceEventLoop(
             data,
@@ -477,7 +477,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       writeValue(context, ValueBlock.payloadAddress(replacement), value, valueBytes, valueLength);
       if (!claimWriter(entry)) {
         freeBlock(replacement, newAllocation);
-        budget.refund(context.budgetLease(), newWeight);
+        budget.refund(newWeight);
         if (isClosing()) {
           throw new IllegalStateException("cache is closing");
         }
@@ -488,7 +488,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         entry.finishWriter();
         locked = false;
         freeBlock(replacement, newAllocation);
-        budget.refund(context.budgetLease(), newWeight);
+        budget.refund(newWeight);
         return 0;
       }
       long old = Entry.rawValueAddress(entry.valueAddress);
@@ -502,7 +502,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         entry.finishWriter();
         locked = false;
         freeBlock(replacement, newAllocation);
-        budget.refund(context.budgetLease(), newWeight);
+        budget.refund(newWeight);
         return 0;
       }
       long newTaggedValue = Entry.tagValueAddress(replacement, expireAtMillis > 0L);
@@ -527,7 +527,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         if (replacement != 0L) {
           freeBlock(replacement, newAllocation);
         }
-        budget.refund(context.budgetLease(), newWeight);
+        budget.refund(newWeight);
       }
       worker.requestAllocationPressure();
       return 0;
@@ -540,7 +540,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         if (replacement != 0L) {
           freeBlock(replacement, newAllocation);
         }
-        budget.refund(context.budgetLease(), newWeight);
+        budget.refund(newWeight);
       }
       if (isClosing()
           || failure instanceof CacheMaintenanceException) {
@@ -600,7 +600,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (keyAddress != 0L) {
         freeBlock(keyAddress, keyAllocation);
       }
-      budget.refund(context.budgetLease(), totalWeight);
+      budget.refund(totalWeight);
       worker.requestAllocationPressure();
       return null;
     } catch (Throwable failure) {
@@ -610,7 +610,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (keyAddress != 0L) {
         freeBlock(keyAddress, keyAllocation);
       }
-      budget.refund(context.budgetLease(), totalWeight);
+      budget.refund(totalWeight);
       throw failure;
     }
   }
@@ -1323,7 +1323,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         freeBlock(replacement, allocation);
       }
       if (!published && budgetReserved) {
-        budget.refund(context.budgetLease(), weight);
+        budget.refund(weight);
       }
       if (writerHeld) {
         entry.finishWriter();
@@ -1624,7 +1624,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalArgumentException("entry allocation exceeds cache capacity");
     }
     worker.throwIfUnavailable();
-    if (budget.tryReserve(context.budgetLease(), weight)) {
+    if (budget.tryReserve(weight)) {
       return true;
     }
     worker.requestBudgetPressure();
@@ -1659,10 +1659,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return null;
       }
       if (!context.hasWriterResources()) {
-        context.bindWriterResources(
-            memory.writerForCurrentThread(), budget.leaseForCurrentThread());
+        context.bindWriterResources(memory.writerForCurrentThread());
       }
-      if (!context.tryActivateWriter()) {
+      if (!context.tryEnterWriter()) {
         return null;
       }
       activated = true;
@@ -1675,7 +1674,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (!admitted) {
         context.slot.writerActive = false;
         if (activated) {
-          context.deactivateWriter();
+          context.exitWriter();
         }
       }
     }
@@ -1683,7 +1682,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private void exitWriter(ThreadContext context) {
     context.slot.writerActive = false;
-    context.deactivateWriter();
+    context.exitWriter();
     Thread waiter = closeWaiter;
     if (waiter != null) {
       LockSupport.unpark(waiter);
@@ -1869,7 +1868,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void freeEntry(ThreadContext context, Entry entry, long valueAllocation) {
     freeBlock(Entry.rawValueAddress(entry.valueAddress), valueAllocation);
     freeBlock(entry.nativeKeyAddress, entry.keyAllocationLength());
-    budget.refund(context.budgetLease(), entryWeight(entry, valueAllocation));
+    budget.refund(entryWeight(entry, valueAllocation));
   }
 
   private void freeBlock(long address, long allocation) {

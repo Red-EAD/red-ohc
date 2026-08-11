@@ -38,9 +38,8 @@ public class MaintenanceEventLoopTest {
   public void removalNotificationObservesValueBeforeNativeRetirement() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE, 64L << 20);
     Budget budget = new Budget(1L << 20);
-    Budget.Lease lease = budget.leaseForCurrentThread();
     WriterArena arena = memory.newWriterArena();
-    ThreadContext context = new ThreadContext(arena, lease);
+    ThreadContext context = new ThreadContext(arena);
     ConcurrentHashMap<Entry, Entry> data = index();
     AtomicInteger observedPayload = new AtomicInteger(-1);
     MaintenanceEventLoop loop =
@@ -62,7 +61,7 @@ public class MaintenanceEventLoopTest {
         WriterArena.allocationWeight(keyAllocation)
             + WriterArena.allocationWeight(valueAllocation);
     try {
-      assertTrue(budget.tryReserve(lease, weight));
+      assertTrue(budget.tryReserve(weight));
       long keyAddress = arena.allocate(keyAllocation);
       long valueAddress = arena.allocate(valueAllocation);
       ValueBlock.initialize(valueAddress, 1L, 8);
@@ -329,60 +328,12 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void idleBudgetLeasesAreReclaimedOnlyAfterBudgetPressure() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    Budget budget = new Budget(128L);
-    Budget.Lease first = budget.leaseForCurrentThread();
-    Budget.Lease second = budget.leaseForCurrentThread();
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            index(), memory, budget, Ticker.DEFAULT, 128L, Eviction.LRU, new ReaderRegistry());
-    try {
-      assertTrue(budget.tryReserve(first, 1L));
-      assertFalse(
-          budget.tryReserve(second, 64L),
-          "the first lease must retain the refill credit before maintenance runs");
-
-      invokeMaintenancePass(loop);
-      assertFalse(
-          budget.tryReserve(second, 64L),
-          "an ordinary maintenance pass must not scan and reclaim idle writer leases");
-
-      Method request =
-          MaintenanceEventLoop.class.getDeclaredMethod("requestBudgetPressure");
-      request.invoke(loop);
-      invokeMaintenancePass(loop);
-      assertTrue(
-          budget.tryReserve(second, 64L),
-          "budget pressure must reclaim idle writer credit for a later reservation");
-    } finally {
-      memory.closeArenas();
-    }
-  }
-
-  @Test
-  public void realPassCleansQueuedWriterAndReaderRegistrationsWithoutCreatingWork() throws Exception {
+  public void realPassCleansQueuedReaderRegistrationsWithoutCreatingWork() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     Budget budget = new Budget(1 << 20);
-    AtomicReference<Budget.Lease> leaseRef = new AtomicReference<>();
-    Thread owner =
-        new Thread(
-            () -> {
-              Budget.Lease lease = budget.leaseForCurrentThread();
-              assertTrue(budget.tryReserve(lease, 64L));
-              leaseRef.set(lease);
-            });
-    owner.start();
-    owner.join();
-    Budget.Lease lease = leaseRef.get();
-    Field ownerThread = Budget.Lease.class.getDeclaredField("ownerThread");
-    ownerThread.setAccessible(true);
-    WeakReference<?> ownerReference = (WeakReference<?>) ownerThread.get(lease);
-    ownerReference.clear();
-    assertTrue(ownerReference.enqueue());
-
     ReaderRegistry readers = new ReaderRegistry();
-    readers.register(new ReaderSlot());
+    ReaderSlot reader = new ReaderSlot();
+    readers.register(reader);
     WeakReference<ReaderSlot> readerReference = readers.references().iterator().next();
     readerReference.clear();
     assertTrue(readerReference.enqueue());
@@ -392,10 +343,7 @@ public class MaintenanceEventLoopTest {
             index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
     try {
       assertEquals(invokeMaintenancePassWork(loop), 0);
-      assertEquals(leaseCount(budget), 0);
       assertEquals(readerCount(readers), 0);
-      assertEquals(budget.reserved(), 64L, "only resident native memory remains reserved");
-      budget.release(64L);
     } finally {
       memory.closeArenas();
     }
@@ -445,7 +393,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     readers.register(context.slot);
     context.bindMaintenance(loop);
     loop.start();
@@ -515,7 +463,7 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     try {
       int limit = (int) loop.queueCapacity();
       for (int i = 0; i < limit; i++) {
@@ -606,7 +554,7 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     try {
       try {
         loop.prepareReliableRemoval(context, null);
@@ -639,7 +587,7 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Entry entry = new Entry(0L, 0, 124, 0L);
     try {
       loop.prepareReliableRemoval(context, entry);
@@ -665,7 +613,7 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Entry entry = new Entry(0L, 0, 125, 0L);
     try {
       loop.start();
@@ -887,7 +835,7 @@ public class MaintenanceEventLoopTest {
         com.red.ohc.storage.WriterArena.allocationWeight(allocation)
             + com.red.ohc.storage.WriterArena.allocationWeight(one.keyAllocationLength());
     Budget budget = new Budget(1 << 20);
-    assertTrue(budget.tryReserve(budget.leaseForCurrentThread(), weight * 2L));
+    assertTrue(budget.tryReserve(weight * 2L));
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             data,
@@ -1041,7 +989,7 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Entry entry = new Entry(0L, 0, 126, 0L);
     try {
       loop.prepareReliableRemoval(context, entry);
@@ -1156,7 +1104,7 @@ public class MaintenanceEventLoopTest {
             index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
     try {
       loop.start();
-      retireOne(loop, memory, budget, new ThreadContext(null, null));
+      retireOne(loop, memory, budget, new ThreadContext(null));
       waitForRetiredEntries(loop, 1);
 
       CompletableFuture<Void> flush = loop.flush();
@@ -1270,7 +1218,7 @@ public class MaintenanceEventLoopTest {
     readers.register(activeReader);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, budget, ticker, 1 << 20, Eviction.LRU, readers);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     loop.start();
     try {
       retireOne(loop, memory, budget, context);
@@ -1306,7 +1254,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     loop.start();
     try {
       retireOne(loop, memory, budget, context);
@@ -1336,7 +1284,6 @@ public class MaintenanceEventLoopTest {
         new MaintenanceEventLoop(
             index(), memory, budget, Ticker.DEFAULT, 16L << 20, Eviction.LRU, readers);
     RetirementQueue retirements = retirementQueue(loop);
-    Budget.Lease lease = budget.leaseForCurrentThread();
     RetirementQueue.Reservation[] reservations =
         new RetirementQueue.Reservation[(int) retirements.capacityRecords()];
     try {
@@ -1346,7 +1293,7 @@ public class MaintenanceEventLoopTest {
         retirements.append(reservation, 0L, 0L);
         reservations[index] = reservation;
       }
-      ThreadContext context = new ThreadContext(null, null);
+      ThreadContext context = new ThreadContext(null);
       assertFalse(loop.prepareRetirement(context, 1), "a full retirement ring must fail fast");
 
       loop.start();
@@ -1374,7 +1321,6 @@ public class MaintenanceEventLoopTest {
         new MaintenanceEventLoop(
             index(), memory, budget, Ticker.DEFAULT, 16L << 20, Eviction.LRU, new ReaderRegistry());
     RetirementQueue retirements = retirementQueue(loop);
-    Budget.Lease lease = budget.leaseForCurrentThread();
     long allocation = ValueBlock.allocationLength(1);
     int recordCount = 2_048;
     try {
@@ -1382,8 +1328,7 @@ public class MaintenanceEventLoopTest {
         RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
         assertTrue(retirements.reserve(reservation, 1));
         assertTrue(
-            budget.tryReserve(
-                lease, com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+            budget.tryReserve(com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
         long address = memory.newWriterArena().allocate(allocation);
         ValueBlock.initialize(address, 0L, 1);
         retirements.append(reservation, address, allocation);
@@ -1416,11 +1361,10 @@ public class MaintenanceEventLoopTest {
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     Budget budget = new Budget(1 << 20);
-    Budget.Lease lease = budget.leaseForCurrentThread();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry());
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     try {
       loop.start();
       waitUntilParked(loop);
@@ -1434,8 +1378,7 @@ public class MaintenanceEventLoopTest {
 
       long allocation = ValueBlock.allocationLength(1);
       assertTrue(
-          budget.tryReserve(
-              lease, com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+          budget.tryReserve(com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
       long value = memory.newWriterArena().allocate(allocation);
       ValueBlock.initialize(value, 0L, 1);
       assertTrue(loop.prepareRetirement(context, 1));
@@ -1470,9 +1413,7 @@ public class MaintenanceEventLoopTest {
     long value = memory.newWriterArena().allocate(allocation);
     ValueBlock.initialize(value, 0L, 1);
     assertTrue(
-        budget.tryReserve(
-            budget.leaseForCurrentThread(),
-            com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+        budget.tryReserve(com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
     assertTrue(loop.prepareRetirement(context, 1));
     loop.retireValue(context, value, allocation);
     loop.afterWrite();
@@ -1558,12 +1499,6 @@ public class MaintenanceEventLoopTest {
     Method method = MaintenanceEventLoop.class.getDeclaredMethod("maintenancePass");
     method.setAccessible(true);
     return (Integer) method.invoke(loop);
-  }
-
-  private static int leaseCount(Budget budget) throws Exception {
-    Method method = Budget.class.getDeclaredMethod("leaseCount");
-    method.setAccessible(true);
-    return (Integer) method.invoke(budget);
   }
 
   private static int readerCount(ReaderRegistry readers) throws Exception {

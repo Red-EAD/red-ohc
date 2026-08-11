@@ -830,12 +830,11 @@ public final class MaintenanceEventLoop
   }
 
   private int maintenancePass() {
-    budget.reclaimCollectedLeases(4096);
     readers.cleanupCollected(4096);
     boolean clockSampled = sampleClockIfDue();
     int work = 0;
     if (budgetPressureRequested.get() && budgetPressureRequested.getAndSet(false)) {
-      budget.reclaimIdleLeases();
+      budget.reclaimIdleCredits();
       work++;
     }
     boolean mutationsPending =
@@ -1695,7 +1694,7 @@ public final class MaintenanceEventLoop
     retirements.freeAll();
     retirements.close();
     memory.closeArenas();
-    budget.returnUnusedCredits();
+    budget.reclaimIdleCredits();
     budget.clear();
     readers.clear();
   }

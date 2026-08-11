@@ -64,7 +64,7 @@ public final class HashingTest {
           }
         };
     byte[] bytes = "encoded".getBytes(StandardCharsets.US_ASCII);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
 
     int length = KeyEncoder.encode(serializer, bytes, context);
 

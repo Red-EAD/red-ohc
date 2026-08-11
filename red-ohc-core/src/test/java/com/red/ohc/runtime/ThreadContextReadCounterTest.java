@@ -11,7 +11,7 @@ import com.red.ohc.index.Entry;
 public final class ThreadContextReadCounterTest {
   @Test
   public void oneReadSequenceDrivesStatsAndAccessSampling() {
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     long first = context.hit();
     context.finishRead(first);
     assertEquals(first, 1L);
@@ -44,7 +44,7 @@ public final class ThreadContextReadCounterTest {
 
   @Test
   public void businessAccessSamplingPublishesOneEventPerSixteenHits() {
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Entry entry = new Entry(0L, 0, 2, 0L);
 
     for (int index = 0; index < 32; index++) {
@@ -60,7 +60,7 @@ public final class ThreadContextReadCounterTest {
 
   @Test
   public void bulkAccessSamplingPublishesOneEventPerSixteenHits() {
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Entry entry = new Entry(0L, 0, 3, 0L);
 
     context.beginBulkRead();

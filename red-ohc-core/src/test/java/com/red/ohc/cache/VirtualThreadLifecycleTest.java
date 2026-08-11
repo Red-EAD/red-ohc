@@ -55,16 +55,15 @@ public final class VirtualThreadLifecycleTest {
       assertTrue(cache.put("seed", "value"));
       cache.flushAsync().join();
       int baselineReaders = readerCount(cache);
-      int baselineLeases = leaseCount(cache);
+      int baselineStripes = budgetStripeCount(cache);
       WorkloadResult workload = runWorkload(cache, startVirtualThread);
       assertEquals(workload.readHits, READERS);
       assertEquals(workload.acceptedWrites, WRITERS);
 
-      awaitCollectionAndCleanup(
-          cache, workload.terminatedThreads, baselineReaders, baselineLeases);
+      awaitCollectionAndCleanup(cache, workload.terminatedThreads, baselineReaders, baselineStripes);
 
       int remainingReaders = readerCount(cache);
-      int remainingLeases = leaseCount(cache);
+      int remainingStripes = budgetStripeCount(cache);
       int liveThreads = liveReferences(workload.terminatedThreads);
       assertTrue(
           remainingReaders <= baselineReaders + 4,
@@ -74,14 +73,7 @@ public final class VirtualThreadLifecycleTest {
               + baselineReaders
               + ", live virtual threads="
               + liveThreads);
-      assertTrue(
-          remainingLeases <= baselineLeases + 4,
-          "writer leases="
-              + remainingLeases
-              + ", baseline="
-              + baselineLeases
-              + ", live virtual threads="
-              + liveThreads);
+      assertEquals(remainingStripes, baselineStripes);
     }
   }
 
@@ -137,13 +129,13 @@ public final class VirtualThreadLifecycleTest {
       OffHeapCache<?, ?> cache,
       List<WeakReference<Thread>> terminated,
       int baselineReaders,
-      int baselineLeases)
+      int baselineStripes)
       throws Exception {
     for (int attempt = 0; attempt < 100; attempt++) {
       System.gc();
       cache.flushAsync().join();
       if (readerCount(cache) <= baselineReaders + 4
-          && leaseCount(cache) <= baselineLeases + 4
+          && budgetStripeCount(cache) == baselineStripes
           && liveReferences(terminated) <= 4) {
         return;
       }
@@ -161,11 +153,11 @@ public final class VirtualThreadLifecycleTest {
     return live;
   }
 
-  private static int leaseCount(OffHeapCache<?, ?> cache) throws Exception {
+  private static int budgetStripeCount(OffHeapCache<?, ?> cache) throws Exception {
     Field budgetField = OffHeapCache.class.getDeclaredField("budget");
     budgetField.setAccessible(true);
     Object budget = budgetField.get(cache);
-    Method count = budget.getClass().getDeclaredMethod("leaseCount");
+    Method count = budget.getClass().getDeclaredMethod("stripeCount");
     count.setAccessible(true);
     return (Integer) count.invoke(budget);
   }

@@ -10,7 +10,6 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.maintenance.ReliableRemovalQueue;
 import com.red.ohc.maintenance.RetirementQueue;
-import com.red.ohc.storage.Budget;
 import com.red.ohc.storage.WriterArena;
 
 public final class ThreadContext {
@@ -38,7 +37,7 @@ public final class ThreadContext {
   public final ReliableRemovalQueue.Reservation reliableRemoval =
       new ReliableRemovalQueue.Reservation();
   private WriterArena writerArena;
-  private Budget.Lease budgetLease;
+  private boolean writerEntered;
   private long readSequence;
   private long accessSequence;
   private MaintenanceEventLoop maintenance;
@@ -51,9 +50,8 @@ public final class ThreadContext {
 
   boolean registered;
 
-  public ThreadContext(WriterArena writerArena, Budget.Lease budgetLease) {
+  public ThreadContext(WriterArena writerArena) {
     this.writerArena = writerArena;
-    this.budgetLease = budgetLease;
   }
 
   public static void verifyNativeByteBufferSupported() {
@@ -117,34 +115,36 @@ public final class ThreadContext {
     return writerArena;
   }
 
-  public Budget.Lease budgetLease() {
-    return budgetLease;
-  }
-
   public boolean hasWriterResources() {
     return writerArena != null;
   }
 
-  public void bindWriterResources(WriterArena writerArena, Budget.Lease budgetLease) {
-    if (writerArena == null || budgetLease == null) {
-      throw new IllegalArgumentException("writer arena and budget lease are required");
+  public void bindWriterResources(WriterArena writerArena) {
+    if (writerArena == null) {
+      throw new IllegalArgumentException("writer arena is required");
     }
-    if (this.writerArena != null || this.budgetLease != null) {
-      if (this.writerArena != writerArena || this.budgetLease != budgetLease) {
+    if (this.writerArena != null) {
+      if (this.writerArena != writerArena) {
         throw new IllegalStateException("writer resources are already bound");
       }
       return;
     }
     this.writerArena = writerArena;
-    this.budgetLease = budgetLease;
   }
 
-  public boolean tryActivateWriter() {
-    return budgetLease.tryActivate();
+  public boolean tryEnterWriter() {
+    if (writerEntered) {
+      return false;
+    }
+    writerEntered = true;
+    return true;
   }
 
-  public void deactivateWriter() {
-    budgetLease.deactivate();
+  public void exitWriter() {
+    if (!writerEntered) {
+      throw new IllegalStateException("writer is not entered");
+    }
+    writerEntered = false;
   }
 
   public boolean isRegistered() {

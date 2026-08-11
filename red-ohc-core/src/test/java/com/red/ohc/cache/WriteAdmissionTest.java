@@ -1,22 +1,18 @@
 package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
-import com.red.ohc.runtime.ThreadContext;
 import com.red.ohc.storage.Budget;
-import com.red.ohc.storage.NativeMemory;
 
 public class WriteAdmissionTest {
   private static final CacheSerializer<String> STRING =
@@ -65,7 +61,7 @@ public class WriteAdmissionTest {
   }
 
   @Test(timeOut = 5_000L)
-  public void readOnlyThreadDoesNotAllocateWriterLease() throws Exception {
+  public void readOnlyThreadDoesNotAllocateWriterState() throws Exception {
     try (OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
@@ -74,7 +70,6 @@ public class WriteAdmissionTest {
             .buildTyped()) {
       assertTrue(cache.put("seed", "value"));
       cache.flushAsync().join();
-      int beforeRead = leaseCount(cache);
       AtomicReference<String> observed = new AtomicReference<>();
 
       Thread reader = new Thread(() -> observed.set(cache.get("seed")), "read-only-cache-thread");
@@ -82,30 +77,26 @@ public class WriteAdmissionTest {
       reader.join();
 
       assertEquals(observed.get(), "value");
-      assertEquals(
-          leaseCount(cache),
-          beforeRead,
-          "a read-only thread must not allocate or retain writer budget state");
     }
   }
 
   @Test
-  public void firstWriteLazilyCreatesOnlyOneLeaseForTheThread() throws Exception {
+  public void firstWriteUsesTheCacheFixedBudgetStripeSet() throws Exception {
     try (OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped()) {
-      assertEquals(leaseCount(cache), 0);
+      int before = budgetStripeCount(cache);
       assertTrue(cache.put("first", "value"));
       assertTrue(cache.put("second", "value"));
-      assertEquals(leaseCount(cache), 1);
+      assertEquals(budgetStripeCount(cache), before);
     }
   }
 
   @Test
-  public void closeClearsReaderAndLeaseRegistries() throws Exception {
+  public void closeClearsReaderRegistryAndBudget() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
@@ -114,13 +105,12 @@ public class WriteAdmissionTest {
             .buildTyped();
     assertTrue(cache.put("key", "value"));
     assertEquals(cache.get("key"), "value");
-    assertTrue(leaseCount(cache) > 0);
     assertTrue(readerCount(cache) > 0);
 
     cache.close();
 
-    assertEquals(leaseCount(cache), 0);
     assertEquals(readerCount(cache), 0);
+    assertEquals(budgetReserved(cache), 0L);
   }
 
   @Test(timeOut = 30_000L)
@@ -183,111 +173,19 @@ public class WriteAdmissionTest {
     }
   }
 
-  @Test(timeOut = 10_000L)
-  public void failedBudgetReservationTriggersIdleLeaseReclaim() throws Exception {
-    OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(4 << 10)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
-    int leaseCount = 1;
-    java.util.concurrent.ExecutorService holders =
-        java.util.concurrent.Executors.newFixedThreadPool(leaseCount);
-    java.util.concurrent.CountDownLatch ready =
-        new java.util.concurrent.CountDownLatch(leaseCount);
-    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-    AtomicInteger accepted = new AtomicInteger();
-    try {
-      for (int index = 0; index < leaseCount; index++) {
-        final int key = index;
-        holders.submit(
-            () -> {
-              if (cache.put("holder-" + key, "value")) {
-                accepted.incrementAndGet();
-              }
-              ready.countDown();
-              release.await();
-              return null;
-            });
-      }
-      assertTrue(ready.await(2L, java.util.concurrent.TimeUnit.SECONDS));
-      assertEquals(accepted.get(), leaseCount);
-      assertFalse(
-          cache.put("pressure", "first-attempt"),
-          "idle writer leases must retain all refill credit before budget pressure");
-
-      boolean recovered = false;
-      long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2L);
-      while (!recovered && System.nanoTime() < deadline) {
-        recovered = cache.put("pressure", "recovered");
-        Thread.yield();
-      }
-      assertTrue(recovered, "budget pressure must reclaim idle lease credit");
-      assertEquals(cache.get("pressure"), "recovered");
-    } finally {
-      release.countDown();
-      holders.shutdownNow();
-      holders.awaitTermination(2L, java.util.concurrent.TimeUnit.SECONDS);
-      cache.close();
-    }
-  }
-
-  @Test
-  public void failedWriterLeaseActivationReturnsWithoutSettingCloseMarker() throws Exception {
-    OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
-    ThreadContext context = null;
-    try {
-      Field contextsField = OffHeapCache.class.getDeclaredField("contexts");
-      contextsField.setAccessible(true);
-      @SuppressWarnings("unchecked")
-      ThreadLocal<ThreadContext> contexts = (ThreadLocal<ThreadContext>) contextsField.get(cache);
-      context = contexts.get();
-
-      Field memoryField = OffHeapCache.class.getDeclaredField("memory");
-      memoryField.setAccessible(true);
-      NativeMemory.Memory memory = (NativeMemory.Memory) memoryField.get(cache);
-      Field budgetField = OffHeapCache.class.getDeclaredField("budget");
-      budgetField.setAccessible(true);
-      Budget budget = (Budget) budgetField.get(cache);
-      context.bindWriterResources(
-          memory.writerForCurrentThread(), budget.leaseForCurrentThread());
-
-      Field leaseField = ThreadContext.class.getDeclaredField("budgetLease");
-      leaseField.setAccessible(true);
-      Object lease = leaseField.get(context);
-      Field stateField = lease.getClass().getDeclaredField("state");
-      stateField.setAccessible(true);
-      AtomicInteger state = (AtomicInteger) stateField.get(lease);
-      state.set(2); // Budget.Lease.RECLAIMING
-
-      Method enterWriter = OffHeapCache.class.getDeclaredMethod("enterWriter");
-      enterWriter.setAccessible(true);
-      assertEquals(enterWriter.invoke(cache), null);
-      state.set(0); // Budget.Lease.IDLE
-      assertFalse(
-          context.slot.writerActive, "failed lease activation must not block close forever");
-    } finally {
-      // Keep cleanup independent of the intentionally injected activation failure.
-      if (context != null) {
-        context.slot.writerActive = false;
-      }
-      cache.close();
-    }
-  }
-
-  private static int leaseCount(OffHeapCache<?, ?> cache) throws Exception {
+  private static int budgetStripeCount(OffHeapCache<?, ?> cache) throws Exception {
     Field budgetField = OffHeapCache.class.getDeclaredField("budget");
     budgetField.setAccessible(true);
-    Object budget = budgetField.get(cache);
-    Method count = budget.getClass().getDeclaredMethod("leaseCount");
+    Budget budget = (Budget) budgetField.get(cache);
+    Method count = Budget.class.getDeclaredMethod("stripeCount");
     count.setAccessible(true);
     return (Integer) count.invoke(budget);
+  }
+
+  private static long budgetReserved(OffHeapCache<?, ?> cache) throws Exception {
+    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
+    budgetField.setAccessible(true);
+    return ((Budget) budgetField.get(cache)).reserved();
   }
 
   private static int readerCount(OffHeapCache<?, ?> cache) throws Exception {

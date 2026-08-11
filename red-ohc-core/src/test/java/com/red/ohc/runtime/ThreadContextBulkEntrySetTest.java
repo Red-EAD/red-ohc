@@ -13,7 +13,7 @@ import com.red.ohc.index.Entry;
 public class ThreadContextBulkEntrySetTest {
   @Test
   public void reusesBoundedSetsAndIsolatesNestedAndHugeCalls() {
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Set<Entry> outer = context.acquireBulkEntries(256);
     context.releaseBulkEntries(outer);
     Set<Entry> reused = context.acquireBulkEntries(256);
@@ -33,7 +33,7 @@ public class ThreadContextBulkEntrySetTest {
 
   @Test
   public void bulkDedupUsesOnlyAJdkIdentitySet() {
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     Set<Entry> entries = context.acquireBulkEntries(16);
     try {
       assertTrue(

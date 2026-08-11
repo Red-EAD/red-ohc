@@ -30,7 +30,7 @@ public class ReaderGuardTest {
             Eviction.LRU,
             new ReaderRegistry());
     ReaderGuard guard = new ReaderGuard(loop, () -> false);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
       assertTrue(context.slot.epoch != 0L);
@@ -55,7 +55,7 @@ public class ReaderGuardTest {
             new ReaderRegistry());
     AtomicInteger closeChecks = new AtomicInteger();
     ReaderGuard guard = new ReaderGuard(loop, () -> closeChecks.getAndIncrement() != 0);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     try {
       assertFalse(
           guard.enter(context),
@@ -80,7 +80,7 @@ public class ReaderGuardTest {
             Eviction.LRU,
             new ReaderRegistry());
     ReaderGuard guard = new ReaderGuard(loop, () -> false);
-    ThreadContext context = new ThreadContext(null, null);
+    ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
       long epoch = context.slot.epoch;
