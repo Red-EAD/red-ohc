@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
@@ -13,8 +14,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
-
-import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheLoader;
@@ -836,7 +835,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     ThreadContext context = contexts.get();
     int hits = 0;
     int expected = keys.size();
-    ReferenceOpenHashSet<Entry> uniqueEntries = context.acquireBulkEntries(expected);
+    Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
     boolean guarded = false;
     try {
       if (!enter(context)) {
@@ -928,7 +927,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     int expected = keys.size();
     Map<K, V> result = new HashMap<>(resultCapacity(expected));
     ThreadContext context = contexts.get();
-    ReferenceOpenHashSet<Entry> uniqueEntries = context.acquireBulkEntries(expected);
+    Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
     boolean guarded = false;
     try {
       if (!enter(context)) {

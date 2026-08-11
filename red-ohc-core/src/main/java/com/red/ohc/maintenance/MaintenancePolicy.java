@@ -1,6 +1,8 @@
 package com.red.ohc.maintenance;
 
-import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import com.red.ohc.api.Eviction;
 import com.red.ohc.index.Entry;
@@ -32,7 +34,7 @@ public final class MaintenancePolicy {
   private final EntryDeque window = new EntryDeque();
   private final EntryDeque probation = new EntryDeque();
   private final EntryDeque protectedQueue = new EntryDeque();
-  private final Long2LongLinkedOpenHashMap ghost;
+  private final LinkedHashMap<Long, Long> ghost;
   private final long ghostMaximum;
   private final long smallMaximum;
   private long windowMaximum;
@@ -80,8 +82,8 @@ public final class MaintenancePolicy {
     this.ghostMaximum = Math.max(1L, capacity - smallMaximum);
     this.ghost =
         eviction == Eviction.S3_FIFO
-            ? new Long2LongLinkedOpenHashMap(
-                (int) Math.min(1_048_576L, Math.max(256L, plannedEntries)))
+            ? new LinkedHashMap<>(
+                (int) Math.min(1_048_576L, Math.max(256L, plannedEntries)) * 4 / 3 + 1)
             : null;
   }
 
@@ -98,8 +100,9 @@ public final class MaintenancePolicy {
     switch (eviction) {
       case S3_FIFO:
         long hash = entry.keyHash64();
-        if (ghost.containsKey(hash)) {
-          ghostWeight -= ghost.remove(hash);
+        Long ghostEntryWeight = ghost.remove(hash);
+        if (ghostEntryWeight != null) {
+          ghostWeight -= ghostEntryWeight;
           ghostHits++;
           link(main, entry, Entry.POLICY_S3_MAIN);
           mainWeight += entry.policyWeight;
@@ -519,10 +522,19 @@ public final class MaintenancePolicy {
   }
 
   private void addGhost(Entry entry, long fingerprint) {
-    long previous = ghost.putAndMoveToFirst(fingerprint, entry.policyWeight);
-    ghostWeight += entry.policyWeight - previous;
-    while (ghostWeight > ghostMaximum && !ghost.isEmpty()) {
-      ghostWeight -= ghost.removeLastLong();
+    Long previous = ghost.remove(fingerprint);
+    if (previous != null) {
+      ghostWeight -= previous;
+    }
+    ghost.put(fingerprint, entry.policyWeight);
+    ghostWeight += entry.policyWeight;
+    if (ghostWeight > ghostMaximum) {
+      Iterator<Map.Entry<Long, Long>> oldest = ghost.entrySet().iterator();
+      while (ghostWeight > ghostMaximum && oldest.hasNext()) {
+        Map.Entry<Long, Long> entryToRemove = oldest.next();
+        ghostWeight -= entryToRemove.getValue();
+        oldest.remove();
+      }
     }
   }
 

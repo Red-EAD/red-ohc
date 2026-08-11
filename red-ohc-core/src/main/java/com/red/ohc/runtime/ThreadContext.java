@@ -1,8 +1,9 @@
 package com.red.ohc.runtime;
 
 import java.nio.ByteBuffer;
-
-import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
@@ -24,7 +25,8 @@ public final class ThreadContext {
   private ByteBuffer writableValueBuffer;
   private ByteBuffer[] readOnlyValueBuffers = new ByteBuffer[4];
   private int readOnlyValueDepth;
-  private ReferenceOpenHashSet<Entry>[] bulkEntrySets = new ReferenceOpenHashSet[2];
+  private Set<Entry>[] bulkEntrySets = new Set[2];
+  private int[] bulkEntrySetCapacities = new int[2];
   private boolean[] reusableBulkEntrySets = new boolean[2];
   private int bulkEntrySetDepth;
 
@@ -199,27 +201,27 @@ public final class ThreadContext {
   }
 
   /** Acquires per-depth hit-Entry identity tracking without retaining a huge table. */
-  public ReferenceOpenHashSet<Entry> acquireBulkEntries(int expected) {
+  public Set<Entry> acquireBulkEntries(int expected) {
     if (expected < 0) {
       throw new IllegalArgumentException("negative bulk entry count");
     }
     ensureBulkEntryDepth();
     int depth = bulkEntrySetDepth++;
     boolean reusable = expected <= MAX_REUSABLE_BULK_KEYS;
-    ReferenceOpenHashSet<Entry> entries = bulkEntrySets[depth];
-    if (!reusable || entries == null) {
-      entries = new ReferenceOpenHashSet<>(expected);
+    Set<Entry> entries = bulkEntrySets[depth];
+    if (!reusable || entries == null || bulkEntrySetCapacities[depth] < expected) {
+      entries = Collections.newSetFromMap(new IdentityHashMap<>(expected));
       bulkEntrySets[depth] = entries;
+      bulkEntrySetCapacities[depth] = reusable ? expected : 0;
     } else {
       entries.clear();
-      entries.ensureCapacity(expected);
     }
     reusableBulkEntrySets[depth] = reusable;
     return entries;
   }
 
   /** Releases a duplicate table while preserving nested bulk-call isolation. */
-  public void releaseBulkEntries(ReferenceOpenHashSet<Entry> entries) {
+  public void releaseBulkEntries(Set<Entry> entries) {
     if (bulkEntrySetDepth <= 0) {
       throw new IllegalStateException("bulk entry set is not acquired");
     }
@@ -230,6 +232,7 @@ public final class ThreadContext {
     entries.clear();
     if (!reusableBulkEntrySets[depth]) {
       bulkEntrySets[depth] = null;
+      bulkEntrySetCapacities[depth] = 0;
     }
     reusableBulkEntrySets[depth] = false;
   }
@@ -239,12 +242,14 @@ public final class ThreadContext {
       return;
     }
     int expandedLength = bulkEntrySets.length << 1;
-    ReferenceOpenHashSet<Entry>[] expanded = new ReferenceOpenHashSet[expandedLength];
+    Set<Entry>[] expanded = new Set[expandedLength];
+    int[] expandedCapacities = new int[expandedLength];
     boolean[] expandedReusable = new boolean[expandedLength];
     System.arraycopy(bulkEntrySets, 0, expanded, 0, bulkEntrySets.length);
-    System.arraycopy(
-        reusableBulkEntrySets, 0, expandedReusable, 0, reusableBulkEntrySets.length);
+    System.arraycopy(bulkEntrySetCapacities, 0, expandedCapacities, 0, bulkEntrySetCapacities.length);
+    System.arraycopy(reusableBulkEntrySets, 0, expandedReusable, 0, reusableBulkEntrySets.length);
     bulkEntrySets = expanded;
+    bulkEntrySetCapacities = expandedCapacities;
     reusableBulkEntrySets = expandedReusable;
   }
 

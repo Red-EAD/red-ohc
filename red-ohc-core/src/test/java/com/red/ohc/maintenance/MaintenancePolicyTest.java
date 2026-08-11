@@ -7,6 +7,7 @@ import static org.testng.Assert.assertSame;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 
 import org.testng.annotations.Test;
 
@@ -127,6 +128,18 @@ public class MaintenancePolicyTest {
         returnee.policyState(),
         Entry.POLICY_S3_MAIN,
         "only a cold Small eviction creates an S3-FIFO ghost admission into Main");
+  }
+
+  @Test
+  public void s3GhostUsesOnlyAJdkLinkedHashMap() throws Exception {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
+    java.lang.reflect.Field ghost = MaintenancePolicy.class.getDeclaredField("ghost");
+    ghost.setAccessible(true);
+
+    assertEquals(
+        ghost.get(policy).getClass(),
+        LinkedHashMap.class,
+        "S3 ghost state must not depend on a third-party collection");
   }
 
   @Test
