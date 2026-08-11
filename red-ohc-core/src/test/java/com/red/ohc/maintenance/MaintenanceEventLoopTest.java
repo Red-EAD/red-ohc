@@ -177,18 +177,88 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    int constructorCalls = ticker.calls.get();
+    int constructorCalls = ticker.calls();
     loop.start();
     try {
       waitUntilParked(loop);
       Thread.sleep(20L);
       assertEquals(
-          ticker.calls.get(),
+          ticker.calls(),
           constructorCalls,
           "an idle worker must not sample a clock just to decide to park");
     } finally {
       loop.stop();
       loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void idleStartupProbesTheAsyncSourceOnceBeforeParking() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    CountingQueue<Object> asyncMutations = new CountingQueue<>();
+    Field field = MaintenanceEventLoop.class.getDeclaredField("asyncMutations");
+    field.setAccessible(true);
+    field.set(loop, asyncMutations);
+    try {
+      loop.start();
+      waitUntilParked(loop);
+
+      assertEquals(
+          asyncMutations.emptyChecks.get(),
+          1,
+          "initial idle arming must not repeat the complete source probe");
+    } finally {
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void maintenancePassReusesTheSampledClockForEvictionDue() throws Exception {
+    CountingTicker ticker = new CountingTicker();
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    WriterArena arena = memory.newWriterArena();
+    long key = arena.allocate(8L);
+    long allocation = ValueBlock.allocationLength(1);
+    long value = arena.allocate(allocation);
+    NativeMemory.putLong(key, 129L);
+    ValueBlock.initialize(value, 0L, 1);
+    Entry entry = new Entry(key, 0, 129, value);
+    ConcurrentHashMap<Entry, Entry> data = index();
+    data.put(entry, entry);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            data, memory, new Budget(1 << 20), ticker, 1L, Eviction.LRU, new ReaderRegistry());
+    try {
+      invokeApplyEntry(loop, entry);
+      assertTrue(entry.claimWriter());
+      Field retry = MaintenanceEventLoop.class.getDeclaredField("evictionRetryNanos");
+      retry.setAccessible(true);
+      retry.setLong(loop, 0L);
+      ticker.reset();
+
+      invokeMaintenancePass(loop);
+
+      assertEquals(
+          ticker.monotonicCalls.get(),
+          65,
+          "the pass clock must be reused for the due check while retry scheduling stays unchanged");
+      assertEquals(ticker.wallCalls.get(), 1);
+    } finally {
+      if (entry.isWriterLocked()) {
+        entry.finishWriter();
+      }
       memory.closeArenas();
     }
   }
@@ -1457,18 +1527,38 @@ public class MaintenanceEventLoopTest {
   }
 
   private static final class CountingTicker implements Ticker {
-    final AtomicInteger calls = new AtomicInteger();
+    final AtomicInteger monotonicCalls = new AtomicInteger();
+    final AtomicInteger wallCalls = new AtomicInteger();
 
     @Override
     public long nanos() {
-      calls.incrementAndGet();
+      monotonicCalls.incrementAndGet();
       return System.nanoTime();
     }
 
     @Override
     public long currentTimeMillis() {
-      calls.incrementAndGet();
+      wallCalls.incrementAndGet();
       return System.currentTimeMillis();
+    }
+
+    int calls() {
+      return monotonicCalls.get() + wallCalls.get();
+    }
+
+    void reset() {
+      monotonicCalls.set(0);
+      wallCalls.set(0);
+    }
+  }
+
+  private static final class CountingQueue<E> extends ConcurrentLinkedQueue<E> {
+    final AtomicInteger emptyChecks = new AtomicInteger();
+
+    @Override
+    public boolean isEmpty() {
+      emptyChecks.incrementAndGet();
+      return super.isEmpty();
     }
   }
 

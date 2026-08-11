@@ -780,6 +780,7 @@ public final class MaintenanceEventLoop
   @Override
   public void run() {
     wakeGate.requireProcessing();
+    boolean passRequired = false;
     while (!stopping || hasWork()) {
       if (stopping && terminalFailure.get() != null) {
         // A terminal failure has invalidated maintenance state. Once close has stopped the
@@ -799,12 +800,9 @@ public final class MaintenanceEventLoop
         }
         continue;
       }
-      if (!stopping
-          && !hasImmediateSourceWork()
-          && deferredMutations.isEmpty()
-          && !retirements.hasPendingReclaim()
-          && !evictionWorkDue()) {
+      if (!stopping && !passRequired) {
         parkUntilWorkOrTimer(false);
+        passRequired = true;
         continue;
       }
 
@@ -817,15 +815,22 @@ public final class MaintenanceEventLoop
       } finally {
         finishActorRetirementBatch();
       }
-      if (!hasImmediateSourceWork()) {
-        parkUntilWorkOrTimer(work != 0 && !stopping);
+      if (stopping) {
+        passRequired = true;
+      } else if (work == 0) {
+        passRequired = false;
+      } else if (hasImmediateSourceWork(nowNanos)) {
+        passRequired = true;
+      } else {
+        parkUntilWorkOrTimer(true);
+        passRequired = false;
       }
     }
     shutdownAndFree();
   }
 
   private int maintenancePass() {
-    sampleClockIfDue();
+    boolean clockSampled = sampleClockIfDue();
     int work = 0;
     if (budgetPressureRequested.get() && budgetPressureRequested.getAndSet(false)) {
       budget.reclaimIdleLeases();
@@ -865,7 +870,15 @@ public final class MaintenanceEventLoop
     if (retirements.hasPendingReclaim()) {
       work += reclaim(1024);
     }
-    if (!stopping && evictionWorkDue()) {
+    long evictionNow = nowNanos;
+    if (!stopping
+        && !clockSampled
+        && evictionRetryNanos != Long.MAX_VALUE
+        && policy.usedWeight() > capacity) {
+      evictionNow = ticker.nanos();
+      nowNanos = evictionNow;
+    }
+    if (!stopping && evictionWorkDue(evictionNow)) {
       try {
         work += evictIfNeeded(64);
       } finally {
@@ -904,23 +917,35 @@ public final class MaintenanceEventLoop
   }
 
   private boolean hasImmediateSourceWork() {
-    return reliableRemovals.hasCommittedHead()
+    if (hasImmediateSourceBeforeFlush()) {
+      return true;
+    }
+    return flushNeedsImmediatePass(evictionDecisionNanos());
+  }
+
+  private boolean hasImmediateSourceWork(long monotonicNow) {
+    return hasImmediateSourceBeforeFlush() || flushNeedsImmediatePass(monotonicNow);
+  }
+
+  private boolean hasImmediateSourceBeforeFlush() {
+    return clockRefreshRequested
+        || reclaimContinuation
         || !queue.isEmpty()
+        || accessHint.get()
         || repairNeeded.get()
         || allocationPressureRequested.get()
         || budgetPressureRequested.get()
-        || accessHint.get()
-        || !asyncMutations.isEmpty()
-        || flushNeedsImmediatePass()
         || retirements.hasReadyHint()
-        || clockRefreshRequested
-        || reclaimContinuation;
+        || reliableRemovals.hasCommittedHead()
+        || !asyncMutations.isEmpty();
   }
 
   /** A flush remains pending across a deferred eviction retry, but that retry is timer work. */
-  private boolean flushNeedsImmediatePass() {
+  private boolean flushNeedsImmediatePass(long monotonicNow) {
     return flushRequest.get() != null
-        && (clockRefreshRequested || evictionRetryNanos == Long.MAX_VALUE || evictionWorkDue());
+        && (clockRefreshRequested
+            || evictionRetryNanos == Long.MAX_VALUE
+            || evictionWorkDue(monotonicNow));
   }
 
   private void parkUntilWorkOrTimer(boolean batchGrace) {
@@ -946,7 +971,12 @@ public final class MaintenanceEventLoop
     // this point observes it and changes PROCESSING_TO_IDLE to PROCESSING_TO_REQUIRED;
     // a producer before it is still covered by hasWork().
     idleGeneration++;
-    if (stopping || hasImmediateSourceWork()) {
+    if (stopping || hasImmediateSourceBeforeFlush()) {
+      wakeGate.requireProcessing();
+      return;
+    }
+    long monotonicNow = evictionDecisionNanos();
+    if (flushNeedsImmediatePass(monotonicNow) || evictionWorkDue(monotonicNow)) {
       wakeGate.requireProcessing();
       return;
     }
@@ -1317,14 +1347,15 @@ public final class MaintenanceEventLoop
     return true;
   }
 
-  private void sampleClockIfDue() {
+  private boolean sampleClockIfDue() {
     if (!clockRefreshRequested && clockSampleCountdown-- > 0) {
-      return;
+      return false;
     }
     clockRefreshRequested = false;
     nowNanos = ticker.nanos();
     nowMillis = ticker.currentTimeMillis();
     clockSampleCountdown = CLOCK_SAMPLE_INTERVAL_PASSES - 1;
+    return true;
   }
 
   /** A QSBR epoch deadline is real work; an idle cache with no retirements still parks forever. */
@@ -1363,11 +1394,18 @@ public final class MaintenanceEventLoop
     return delay;
   }
 
-  private boolean evictionWorkDue() {
+  private long evictionDecisionNanos() {
+    if (evictionRetryNanos == Long.MAX_VALUE || policy.usedWeight() <= capacity) {
+      return nowNanos;
+    }
+    return ticker.nanos();
+  }
+
+  private boolean evictionWorkDue(long monotonicNow) {
     if (policy.usedWeight() <= capacity) {
       return false;
     }
-    return evictionRetryNanos == Long.MAX_VALUE || evictionRetryNanos <= ticker.nanos();
+    return evictionRetryNanos == Long.MAX_VALUE || evictionRetryNanos <= monotonicNow;
   }
 
   private static long deadlineDelayNanos(long deadline, long now) {
