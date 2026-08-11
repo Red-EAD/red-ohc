@@ -718,35 +718,26 @@ public final class MaintenanceEventLoop
     }
   }
 
-  /** Completes the pre-reserved removal claim after CHM and retirement records are published. */
-  public void publishRemoval(com.red.ohc.runtime.ThreadContext context, Entry entry) {
-    publishRemoval(context, entry, true);
-  }
-
-  /** Completes a removal and optionally defers the wake to the surrounding public batch call. */
-  public void publishRemoval(
-      com.red.ohc.runtime.ThreadContext context, Entry entry, boolean wake) {
-    publishRemoval(context, entry, wake, 0L, null);
-  }
-
-  public void publishRemoval(
+  /**
+   * Commits a pre-reserved removal notification before publishing its retirement records.
+   *
+   * <p>The notification may deserialize the supplied value and the entry key. The single
+   * maintenance owner therefore observes the notification before either native address becomes
+   * reclaimable.
+   */
+  public void publishRemovalAndRetire(
       com.red.ohc.runtime.ThreadContext context,
       Entry entry,
       boolean wake,
       long valueAddress,
+      long valueAllocation,
       RemovalCause cause) {
-    try {
-      entry.completePendingClaim();
-      reliableRemovals.commit(context.reliableRemoval, entry, valueAddress, cause);
-      if (wake) {
-        signal();
-      }
-    } catch (Throwable failure) {
-      if (context.reliableRemoval.active()) {
-        reliableRemovals.cancel(context.reliableRemoval);
-        signal();
-      }
-      throw failure;
+    entry.completePendingClaim();
+    reliableRemovals.commit(context.reliableRemoval, entry, valueAddress, cause);
+    retireValue(context, valueAddress, valueAllocation);
+    retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
+    if (wake) {
+      signal();
     }
   }
 

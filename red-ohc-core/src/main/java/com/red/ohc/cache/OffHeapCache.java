@@ -672,11 +672,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         long valueAllocation =
             value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
         entry.clearValue();
-        worker.retireValue(context, value, valueAllocation);
-        worker.retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
         entry.finishWriter();
         writerHeld = false;
-        worker.publishRemoval(context, entry, !deferMaintenanceWake);
+        worker.publishRemovalAndRetire(
+            context, entry, !deferMaintenanceWake, value, valueAllocation, null);
         removalPrepared = false;
         return true;
       }
@@ -1160,11 +1159,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (removed) {
         long valueAllocation = ValueBlock.allocationLength(ValueBlock.length(value));
         entry.clearValue();
-        worker.retireValue(context, value, valueAllocation);
-        worker.retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
         entry.finishWriter();
         writerHeld = false;
-        worker.publishRemoval(context, entry, true, value, RemovalCause.EXPIRED);
+        worker.publishRemovalAndRetire(
+            context, entry, false, value, valueAllocation, RemovalCause.EXPIRED);
         removalPrepared = false;
         worker.afterWrite(context);
         return 1;

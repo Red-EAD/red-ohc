@@ -21,6 +21,7 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
+import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
 import com.red.ohc.runtime.AccessConsumer;
@@ -30,8 +31,73 @@ import com.red.ohc.runtime.ThreadContext;
 import com.red.ohc.storage.Budget;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
+import com.red.ohc.storage.WriterArena;
 
 public class MaintenanceEventLoopTest {
+  @Test
+  public void removalNotificationObservesValueBeforeNativeRetirement() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE, 64L << 20);
+    Budget budget = new Budget(1L << 20);
+    Budget.Lease lease = budget.leaseForCurrentThread();
+    WriterArena arena = memory.newWriterArena();
+    ThreadContext context = new ThreadContext(arena, lease);
+    ConcurrentHashMap<Entry, Entry> data = index();
+    AtomicInteger observedPayload = new AtomicInteger(-1);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            data,
+            memory,
+            budget,
+            Ticker.DEFAULT,
+            1L << 20,
+            Eviction.LRU,
+            (entry, address, cause) ->
+                observedPayload.set(
+                    NativeMemory.getByte(ValueBlock.payloadAddress(address)) & 0xff),
+            new ReaderRegistry(),
+            1_024);
+    long keyAllocation = 16L;
+    long valueAllocation = ValueBlock.allocationLength(8);
+    long weight =
+        WriterArena.allocationWeight(keyAllocation)
+            + WriterArena.allocationWeight(valueAllocation);
+    try {
+      assertTrue(budget.tryReserve(lease, weight));
+      long keyAddress = arena.allocate(keyAllocation);
+      long valueAddress = arena.allocate(valueAllocation);
+      ValueBlock.initialize(valueAddress, 1L, 8);
+      NativeMemory.putByte(ValueBlock.payloadAddress(valueAddress), (byte) 0x11);
+      Entry entry =
+          new Entry(
+              keyAddress,
+              8,
+              7,
+              0x1234L,
+              Entry.tagValueAddress(valueAddress, true));
+      data.put(entry, entry);
+
+      assertTrue(entry.claimWriter());
+      assertTrue(loop.prepareReliableRemoval(context, entry));
+      entry.markRetired();
+      assertTrue(data.remove(entry, entry));
+      entry.clearValue();
+      entry.finishWriter();
+
+      loop.publishRemovalAndRetire(
+          context,
+          entry,
+          false,
+          valueAddress,
+          valueAllocation,
+          RemovalCause.EXPIRED);
+      invokeMaintenancePass(loop);
+
+      assertEquals(observedPayload.get(), 0x11);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
   @Test
   public void acceptedWriteStatsUseAStripedCounter() throws Exception {
     Field accepted = MaintenanceEventLoop.class.getDeclaredField("accepted");
@@ -264,9 +330,7 @@ public class MaintenanceEventLoopTest {
       removed.markRetired();
       assertTrue(data.remove(removed, removed));
       removed.finishWriter();
-      loop.retireValue(context, 0L, 0L);
-      loop.retireValue(context, 0L, 0L);
-      loop.publishRemoval(context, removed);
+      loop.publishRemovalAndRetire(context, removed, true, 0L, 0L, null);
 
       loop.start();
       loop.flush().join();
