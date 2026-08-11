@@ -6,7 +6,6 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
@@ -15,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
-import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheLoader;
@@ -835,12 +834,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     ThreadContext context = contexts.get();
     int hits = 0;
     int expected = keys.size();
-    ObjectOpenHashSet<K> unique = null;
+    ReferenceOpenHashSet<Entry> uniqueEntries = context.acquireBulkEntries(expected);
     boolean guarded = false;
     try {
-      if (!(keys instanceof Set<?>)) {
-        unique = context.acquireBulkKeys(expected);
-      }
       if (!enter(context)) {
         return 0;
       }
@@ -848,15 +844,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       context.beginBulkRead();
       for (K key : keys) {
         Objects.requireNonNull(key, "key");
-        if (unique != null && !unique.add(key)) {
-          continue;
-        }
         KeyEncoder.encode(keySerializer, key, context);
         Entry entry = data.get(context.lookupKey);
         long value = valueIfLive(entry);
         if (value == 0L) {
           context.bulkMiss();
         } else {
+          if (!uniqueEntries.add(entry)) {
+            continue;
+          }
           context.bulkHit(entry);
           com.red.ohc.runtime.DirectValueView view =
               context.pushDirectView(ValueBlock.payloadAddress(value), ValueBlock.length(value));
@@ -873,9 +869,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context.finishBulkRead();
         exit(context);
       }
-      if (unique != null) {
-        context.releaseBulkKeys(unique);
-      }
+      context.releaseBulkEntries(uniqueEntries);
     }
     return hits;
   }
@@ -933,12 +927,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     int expected = keys.size();
     Map<K, V> result = new HashMap<>(resultCapacity(expected));
     ThreadContext context = contexts.get();
-    ObjectOpenHashSet<K> unique = null;
+    ReferenceOpenHashSet<Entry> uniqueEntries = context.acquireBulkEntries(expected);
     boolean guarded = false;
     try {
-      if (!(keys instanceof Set<?>)) {
-        unique = context.acquireBulkKeys(expected);
-      }
       if (!enter(context)) {
         return result;
       }
@@ -946,15 +937,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       context.beginBulkRead();
       for (K key : keys) {
         Objects.requireNonNull(key, "key");
-        if (unique != null && !unique.add(key)) {
-          continue;
-        }
         KeyEncoder.encode(keySerializer, key, context);
         Entry entry = data.get(context.lookupKey);
         long value = valueIfLive(entry);
         if (value == 0L) {
           context.bulkMiss();
         } else {
+          if (!uniqueEntries.add(entry)) {
+            continue;
+          }
           context.bulkHit(entry);
           Entry.ValueState observedState = entry.valueState();
           V cached = weakValue(entry, value, observedState);
@@ -986,9 +977,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context.finishBulkRead();
         exit(context);
       }
-      if (unique != null) {
-        context.releaseBulkKeys(unique);
-      }
+      context.releaseBulkEntries(uniqueEntries);
     }
     return result;
   }

@@ -19,6 +19,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,6 +53,25 @@ public class BulkCacheTest {
         @Override
         public int serializedSize(String value) {
           return value.getBytes(StandardCharsets.UTF_8).length;
+        }
+      };
+  private static final CacheSerializer<byte[]> BYTES =
+      new CacheSerializer<byte[]>() {
+        @Override
+        public void serialize(byte[] value, ByteBuffer buffer) {
+          buffer.put(value);
+        }
+
+        @Override
+        public byte[] deserialize(ByteBuffer buffer) {
+          byte[] value = new byte[buffer.remaining()];
+          buffer.get(value);
+          return value;
+        }
+
+        @Override
+        public int serializedSize(byte[] value) {
+          return value.length;
         }
       };
 
@@ -380,6 +400,129 @@ public class BulkCacheTest {
       assertEquals(keys, Arrays.asList("key-1", "key-2"));
       assertEquals(values, Arrays.asList("value-1", "value-2"));
       assertEquals(deserializations.get(), 0);
+    }
+  }
+
+  @Test
+  public void directAllDeduplicatesEqualSerializedKeysEvenForSetInput() {
+    byte[] stored = "same-key".getBytes(StandardCharsets.UTF_8);
+    byte[] first = "same-key".getBytes(StandardCharsets.UTF_8);
+    byte[] duplicate = "same-key".getBytes(StandardCharsets.UTF_8);
+    Set<byte[]> keys = new LinkedHashSet<>(Arrays.asList(first, duplicate));
+    List<byte[]> callbacks = new ArrayList<>();
+    try (OHCache<byte[], String> cache =
+        OHCacheBuilder.<byte[], String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(BYTES)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put(stored, "value"));
+
+      assertEquals(
+          cache.getDirectAll(keys, (key, value) -> callbacks.add(key)),
+          1,
+          "one serialized cache key must produce one callback");
+      assertEquals(callbacks.size(), 1);
+      assertSame(callbacks.get(0), first);
+    }
+  }
+
+  @Test
+  public void getAllDeduplicatesEqualSerializedKeysBeforeDeserializing() {
+    AtomicInteger deserializations = new AtomicInteger();
+    CacheSerializer<String> countingValueSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            deserializations.incrementAndGet();
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return STRING.serializedSize(value);
+          }
+        };
+    byte[] stored = "same-key".getBytes(StandardCharsets.UTF_8);
+    byte[] first = "same-key".getBytes(StandardCharsets.UTF_8);
+    byte[] duplicate = "same-key".getBytes(StandardCharsets.UTF_8);
+    try (OHCache<byte[], String> cache =
+        OHCacheBuilder.<byte[], String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(BYTES)
+            .valueSerializer(countingValueSerializer)
+            .build()) {
+      assertTrue(cache.put(stored, "value"));
+
+      Map<byte[], String> result = cache.getAll(Arrays.asList(first, duplicate));
+
+      assertEquals(result.size(), 1);
+      assertEquals(result.get(first), "value");
+      assertSame(result.keySet().iterator().next(), first);
+      assertEquals(deserializations.get(), 1);
+    }
+  }
+
+  @Test
+  public void getAllQueriesDistinctEncodingsWhenCallerKeysAreEqual() {
+    AtomicInteger deserializations = new AtomicInteger();
+    CacheSerializer<AliasedKey> keySerializer =
+        new CacheSerializer<AliasedKey>() {
+          @Override
+          public void serialize(AliasedKey value, ByteBuffer buffer) {
+            buffer.put(value.encoded);
+          }
+
+          @Override
+          public AliasedKey deserialize(ByteBuffer buffer) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public int serializedSize(AliasedKey value) {
+            return value.encoded.length;
+          }
+        };
+    CacheSerializer<String> countingValueSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            deserializations.incrementAndGet();
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return STRING.serializedSize(value);
+          }
+        };
+    AliasedKey first = new AliasedKey("logical-key", "encoding-a");
+    AliasedKey second = new AliasedKey("logical-key", "encoding-b");
+    try (OHCache<AliasedKey, String> cache =
+        OHCacheBuilder.<AliasedKey, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(keySerializer)
+            .valueSerializer(countingValueSerializer)
+            .build()) {
+      assertTrue(cache.put(first, "first-value"));
+      assertTrue(cache.put(second, "second-value"));
+
+      Map<AliasedKey, String> result = cache.getAll(Arrays.asList(first, second));
+
+      assertEquals(result.size(), 1);
+      assertEquals(result.get(first), "second-value");
+      assertSame(result.keySet().iterator().next(), first);
+      assertEquals(deserializations.get(), 2);
     }
   }
 
@@ -1115,7 +1258,7 @@ public class BulkCacheTest {
   }
 
   @Test
-  public void bulkReadSkipsTheTemporaryDedupSetForSetInput() {
+  public void bulkReadEntryDeduplicationDoesNotHashCallerKeys() {
     AtomicInteger hashCalls = new AtomicInteger();
     CacheSerializer<CountingKey> keySerializer =
         new CacheSerializer<CountingKey>() {
@@ -1150,7 +1293,7 @@ public class BulkCacheTest {
       assertEquals(
           hashCalls.get(),
           keys.size(),
-          "only the final result HashMap should hash Set keys during getAll");
+          "only the final result HashMap should hash caller keys during getAll");
     }
   }
 
@@ -1301,6 +1444,26 @@ public class BulkCacheTest {
     @Override
     public boolean equals(Object other) {
       return other instanceof CountingKey && Arrays.equals(bytes, ((CountingKey) other).bytes);
+    }
+  }
+
+  private static final class AliasedKey {
+    private final String logical;
+    private final byte[] encoded;
+
+    private AliasedKey(String logical, String encoded) {
+      this.logical = logical;
+      this.encoded = encoded.getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Override
+    public int hashCode() {
+      return logical.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other instanceof AliasedKey && logical.equals(((AliasedKey) other).logical);
     }
   }
 }

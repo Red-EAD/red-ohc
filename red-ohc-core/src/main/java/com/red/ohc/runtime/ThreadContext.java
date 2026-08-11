@@ -2,7 +2,7 @@ package com.red.ohc.runtime;
 
 import java.nio.ByteBuffer;
 
-import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
@@ -24,9 +24,9 @@ public final class ThreadContext {
   private ByteBuffer writableValueBuffer;
   private ByteBuffer[] readOnlyValueBuffers = new ByteBuffer[4];
   private int readOnlyValueDepth;
-  private ObjectOpenHashSet<Object>[] bulkKeySets = new ObjectOpenHashSet[2];
-  private boolean[] reusableBulkKeySets = new boolean[2];
-  private int bulkKeySetDepth;
+  private ReferenceOpenHashSet<Entry>[] bulkEntrySets = new ReferenceOpenHashSet[2];
+  private boolean[] reusableBulkEntrySets = new boolean[2];
+  private int bulkEntrySetDepth;
 
   /**
    * Reusable native-retirement reservation; it is active only across one writer critical section.
@@ -180,54 +180,54 @@ public final class ThreadContext {
     }
   }
 
-  /** Acquires per-depth duplicate tracking without retaining a huge collection's table. */
-  @SuppressWarnings("unchecked")
-  public <K> ObjectOpenHashSet<K> acquireBulkKeys(int expected) {
+  /** Acquires per-depth hit-Entry identity tracking without retaining a huge table. */
+  public ReferenceOpenHashSet<Entry> acquireBulkEntries(int expected) {
     if (expected < 0) {
-      throw new IllegalArgumentException("negative bulk key count");
+      throw new IllegalArgumentException("negative bulk entry count");
     }
-    ensureBulkKeyDepth();
-    int depth = bulkKeySetDepth++;
+    ensureBulkEntryDepth();
+    int depth = bulkEntrySetDepth++;
     boolean reusable = expected <= MAX_REUSABLE_BULK_KEYS;
-    ObjectOpenHashSet<Object> keys = bulkKeySets[depth];
-    if (!reusable || keys == null) {
-      keys = new ObjectOpenHashSet<>(expected);
-      bulkKeySets[depth] = keys;
+    ReferenceOpenHashSet<Entry> entries = bulkEntrySets[depth];
+    if (!reusable || entries == null) {
+      entries = new ReferenceOpenHashSet<>(expected);
+      bulkEntrySets[depth] = entries;
     } else {
-      keys.clear();
-      keys.ensureCapacity(expected);
+      entries.clear();
+      entries.ensureCapacity(expected);
     }
-    reusableBulkKeySets[depth] = reusable;
-    return (ObjectOpenHashSet<K>) keys;
+    reusableBulkEntrySets[depth] = reusable;
+    return entries;
   }
 
   /** Releases a duplicate table while preserving nested bulk-call isolation. */
-  public void releaseBulkKeys(Object keys) {
-    if (bulkKeySetDepth <= 0) {
-      throw new IllegalStateException("bulk key set is not acquired");
+  public void releaseBulkEntries(ReferenceOpenHashSet<Entry> entries) {
+    if (bulkEntrySetDepth <= 0) {
+      throw new IllegalStateException("bulk entry set is not acquired");
     }
-    int depth = --bulkKeySetDepth;
-    if (bulkKeySets[depth] != keys) {
-      throw new IllegalStateException("bulk key set release order mismatch");
+    int depth = --bulkEntrySetDepth;
+    if (bulkEntrySets[depth] != entries) {
+      throw new IllegalStateException("bulk entry set release order mismatch");
     }
-    ((ObjectOpenHashSet<?>) keys).clear();
-    if (!reusableBulkKeySets[depth]) {
-      bulkKeySets[depth] = null;
+    entries.clear();
+    if (!reusableBulkEntrySets[depth]) {
+      bulkEntrySets[depth] = null;
     }
-    reusableBulkKeySets[depth] = false;
+    reusableBulkEntrySets[depth] = false;
   }
 
-  private void ensureBulkKeyDepth() {
-    if (bulkKeySetDepth < bulkKeySets.length) {
+  private void ensureBulkEntryDepth() {
+    if (bulkEntrySetDepth < bulkEntrySets.length) {
       return;
     }
-    int expandedLength = bulkKeySets.length << 1;
-    ObjectOpenHashSet<Object>[] expanded = new ObjectOpenHashSet[expandedLength];
+    int expandedLength = bulkEntrySets.length << 1;
+    ReferenceOpenHashSet<Entry>[] expanded = new ReferenceOpenHashSet[expandedLength];
     boolean[] expandedReusable = new boolean[expandedLength];
-    System.arraycopy(bulkKeySets, 0, expanded, 0, bulkKeySets.length);
-    System.arraycopy(reusableBulkKeySets, 0, expandedReusable, 0, reusableBulkKeySets.length);
-    bulkKeySets = expanded;
-    reusableBulkKeySets = expandedReusable;
+    System.arraycopy(bulkEntrySets, 0, expanded, 0, bulkEntrySets.length);
+    System.arraycopy(
+        reusableBulkEntrySets, 0, expandedReusable, 0, reusableBulkEntrySets.length);
+    bulkEntrySets = expanded;
+    reusableBulkEntrySets = expandedReusable;
   }
 
   public void markRegistered() {
