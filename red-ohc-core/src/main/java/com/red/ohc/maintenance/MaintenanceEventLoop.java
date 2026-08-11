@@ -775,6 +775,9 @@ public final class MaintenanceEventLoop
       }
       FlushRequest existing = flushRequest.get();
       if (existing != null) {
+        existing.sequence = asyncSubmitted.get();
+        clockRefreshRequested = true;
+        signal();
         return existing.future;
       }
       FlushRequest created =
@@ -1045,34 +1048,39 @@ public final class MaintenanceEventLoop
   }
 
   private void completeFlushIfIdle() {
-    FlushRequest request = flushRequest.get();
-    if (request == null) {
-      return;
+    FlushRequest completed;
+    synchronized (asyncSubmissionLock) {
+      FlushRequest request = flushRequest.get();
+      if (request == null) {
+        return;
+      }
+      // A bounded eviction scan may have deferred its next retry to protect the worker from
+      // repeated scans. Flush must retain its barrier until that retry brings the policy back under
+      // capacity, including when the previous scan was blocked by a writer.
+      if (policy.usedWeight() > capacity) {
+        return;
+      }
+      if (clockRefreshRequested) {
+        return;
+      }
+      if (reliableRemovals.size() != 0L
+          || !queue.isEmpty()
+          || !deferredMutations.isEmpty()
+          || repairNeeded.get()
+          || asyncCompletedSequence < request.sequence
+          || allocationPressureRequested.get()
+          || accessHint.get()
+          || retirements.hasReadyHint()
+          || retirements.hasPendingReclaim()
+          || reclaimContinuation) {
+        return;
+      }
+      if (!flushRequest.compareAndSet(request, null)) {
+        return;
+      }
+      completed = request;
     }
-    // A bounded eviction scan may have deferred its next retry to protect the worker from
-    // repeated scans. Flush must retain its barrier until that retry brings the policy back under
-    // capacity, including when the previous scan was blocked by a writer.
-    if (policy.usedWeight() > capacity) {
-      return;
-    }
-    if (clockRefreshRequested) {
-      return;
-    }
-    if (reliableRemovals.size() != 0L
-        || !queue.isEmpty()
-        || !deferredMutations.isEmpty()
-        || repairNeeded.get()
-        || asyncCompletedSequence < request.sequence
-        || allocationPressureRequested.get()
-        || accessHint.get()
-        || retirements.hasReadyHint()
-        || retirements.hasPendingReclaim()
-        || reclaimContinuation) {
-      return;
-    }
-    if (flushRequest.compareAndSet(request, null)) {
-      request.future.complete(null);
-    }
+    completed.future.complete(null);
   }
 
   private int drainAsyncMutations(int limit) {
@@ -1833,7 +1841,7 @@ public final class MaintenanceEventLoop
   }
 
   private static final class FlushRequest {
-    private final long sequence;
+    private volatile long sequence;
     private final CompletableFuture<Void> future;
 
     private FlushRequest(long sequence, CompletableFuture<Void> future) {

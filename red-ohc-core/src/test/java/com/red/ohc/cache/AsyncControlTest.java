@@ -93,6 +93,65 @@ public class AsyncControlTest {
     }
   }
 
+  @Test(timeOut = 5_000L)
+  public void laterFlushExtendsAnExistingBarrierToCoverEarlierSubmissions() throws Exception {
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch releaseFirst = new CountDownLatch(1);
+    CountDownLatch secondStarted = new CountDownLatch(1);
+    CountDownLatch releaseSecond = new CountDownLatch(1);
+    CacheSerializer<String> blocking =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            if ("first".equals(value)) {
+              firstStarted.countDown();
+              await(releaseFirst);
+            } else if ("second".equals(value)) {
+              secondStarted.countDown();
+              await(releaseSecond);
+            }
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return STRING.serializedSize(value);
+          }
+        };
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(blocking)
+            .build()) {
+      CompletableFuture<Boolean> first =
+          cache.putIfAbsentAsync("first-key", "first", 0L);
+      assertTrue(firstStarted.await(2L, TimeUnit.SECONDS));
+      CompletableFuture<Void> firstFlush = cache.flushAsync();
+      CompletableFuture<Boolean> second =
+          cache.putIfAbsentAsync("second-key", "second", 0L);
+      CompletableFuture<Void> secondFlush = cache.flushAsync();
+      assertSame(secondFlush, firstFlush);
+
+      releaseFirst.countDown();
+      assertTrue(secondStarted.await(2L, TimeUnit.SECONDS));
+      assertFalse(secondFlush.isDone(), "flush completed while its covered task was still running");
+
+      releaseSecond.countDown();
+      secondFlush.get(2L, TimeUnit.SECONDS);
+      assertTrue(first.join());
+      assertTrue(second.join());
+    } finally {
+      releaseFirst.countDown();
+      releaseSecond.countDown();
+    }
+  }
+
   @Test
   public void replaceRejectsAnEntryLargerThanTheByteCapacityBeforePublishing() {
     try (OffHeapCache<String, String> cache =
@@ -446,6 +505,17 @@ public class AsyncControlTest {
         .valueSerializer(STRING)
         .loaderExecutor(executor)
         .build();
+  }
+
+  private static void await(CountDownLatch latch) {
+    try {
+      if (!latch.await(2L, TimeUnit.SECONDS)) {
+        throw new AssertionError("test latch was not released");
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(interrupted);
+    }
   }
 
   private static OHCache<byte[], byte[]> newCache(
