@@ -1404,7 +1404,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         result.complete(
             expireAtMillis > 0L && expireAtMillis <= ticker.currentTimeMillis() ? null : loaded);
       } else {
-        result.complete(getEncoded(encodedKey));
+        V winner = getEncoded(encodedKey);
+        result.complete(
+            winner != null
+                ? winner
+                : expireAtMillis > 0L && expireAtMillis <= ticker.currentTimeMillis()
+                    ? null
+                    : loaded);
       }
     } catch (Throwable failure) {
       result.completeExceptionally(failure);

@@ -231,6 +231,66 @@ public class AsyncControlTest {
   }
 
   @Test
+  public void loaderReturnsComputedValueWhenBestEffortAdmissionFails() {
+    MutableTicker ticker = new MutableTicker(0L);
+    AtomicReference<OHCache<String, String>> cacheRef = new AtomicReference<>();
+    AtomicReference<String> loadedResult = new AtomicReference<>();
+    AtomicReference<String> expiredResult = new AtomicReference<>();
+    CacheSerializer<String> nestedLoadSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            if ("outer-value".equals(value)) {
+              loadedResult.set(
+                  cacheRef
+                      .get()
+                      .getOrLoadAsync("loaded-key", ignored -> "loaded-value", 0L)
+                      .join());
+              expiredResult.set(
+                  cacheRef
+                      .get()
+                      .getOrLoadAsync(
+                          "expired-key",
+                          ignored -> {
+                            ticker.now = 100L;
+                            return "expired-value";
+                          },
+                          100L)
+                      .join());
+            }
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return STRING.serializedSize(value);
+          }
+        };
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .ticker(ticker)
+            .keySerializer(STRING)
+            .valueSerializer(nestedLoadSerializer)
+            .loaderExecutor(Runnable::run)
+            .build()) {
+      cacheRef.set(cache);
+
+      assertTrue(cache.put("outer-key", "outer-value"));
+
+      assertEquals(loadedResult.get(), "loaded-value");
+      assertEquals(expiredResult.get(), null);
+      assertEquals(cache.get("loaded-key"), null, "cache admission remains best effort");
+      assertEquals(cache.get("expired-key"), null);
+    }
+  }
+
+  @Test
   public void concurrentMissesUseOneLoaderAndReturnOneSharedResult() throws Exception {
     ExecutorService loaderExecutor = Executors.newFixedThreadPool(2);
     ExecutorService callers = Executors.newFixedThreadPool(2);
