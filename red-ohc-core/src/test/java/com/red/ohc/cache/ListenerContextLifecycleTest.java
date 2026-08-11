@@ -5,17 +5,32 @@ import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
-import java.nio.ByteBuffer;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.CacheInput;
-import com.red.ohc.api.CacheOutput;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.runtime.ThreadContext;
 
 public final class ListenerContextLifecycleTest {
-  private static final CacheSerializer<String> STRING = CacheTestSerializers.string();
+  private static final CacheSerializer<String> STRING =
+      new CacheSerializer<String>() {
+        @Override
+        public void serialize(String value, java.nio.ByteBuffer buffer) {
+          buffer.put(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public String deserialize(java.nio.ByteBuffer buffer) {
+          byte[] bytes = new byte[buffer.remaining()];
+          buffer.get(bytes);
+          return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public int serializedSize(String value) {
+          return value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        }
+      };
 
   @Test
   public void cacheWithoutListenerDoesNotCreateAnEvictionContext() throws Exception {

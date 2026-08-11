@@ -163,7 +163,7 @@ public final class Entry {
   }
 
   public boolean compareAndSetWeakValueSlot(WeakValueSlot expected, WeakValueSlot update) {
-    while (true) {
+    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
       ValueState current = valueState;
       WeakValueSlot currentValue = current == null ? null : current.weakValue;
       if (currentValue != expected) {
@@ -176,7 +176,9 @@ public final class Entry {
       if (VALUE_STATE.compareAndSet(this, current, next)) {
         return true;
       }
+      Thread.onSpinWait();
     }
+    return false;
   }
 
   public void clearWeakValueSlot() {
@@ -249,10 +251,19 @@ public final class Entry {
   }
 
   public boolean compareAndSetValueState(ValueState expected, ValueState update) {
-    return expected != null
-        && update != null
-        && valueAddress == expected.taggedValueAddress
-        && VALUE_STATE.compareAndSet(this, expected, update);
+    if (expected == null || update == null) {
+      return false;
+    }
+    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
+      if (valueState != expected || valueAddress != expected.taggedValueAddress) {
+        return false;
+      }
+      if (VALUE_STATE.compareAndSet(this, expected, update)) {
+        return true;
+      }
+      Thread.onSpinWait();
+    }
+    return false;
   }
 
   /** Immutable token joining a native value address and its optional weak Java object. */
@@ -539,7 +550,7 @@ public final class Entry {
   /** Marks a maintenance snapshot applied only when no newer writer publication exists. */
   public boolean markAppliedVersion(long version) {
     long expected = version & VERSION_MASK;
-    while (true) {
+    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
       long current = maintenanceMeta;
       if ((current >>> MUTATION_VERSION_SHIFT) != expected) {
         return false;
@@ -548,7 +559,9 @@ public final class Entry {
       if (MAINTENANCE.compareAndSet(this, current, next)) {
         return true;
       }
+      Thread.onSpinWait();
     }
+    return false;
   }
 
   /**

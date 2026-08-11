@@ -8,12 +8,16 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.jctools.queues.MpscArrayQueue;
@@ -25,6 +29,7 @@ import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
 import com.red.ohc.runtime.AccessConsumer;
+import com.red.ohc.runtime.AccessRing;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.runtime.ThreadContext;
@@ -61,7 +66,7 @@ public class MaintenanceEventLoopTest {
         WriterArena.allocationWeight(keyAllocation)
             + WriterArena.allocationWeight(valueAllocation);
     try {
-      assertTrue(budget.tryReserve(weight));
+      assertTrue(budget.tryReserve(weight, 0));
       long keyAddress = arena.allocate(keyAllocation);
       long valueAddress = arena.allocate(valueAllocation);
       ValueBlock.initialize(valueAddress, 1L, 8);
@@ -126,6 +131,41 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
+  public void repairDebtUsesOneDirtyShardTokenAndAnO1Aggregate() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+            new ReaderRegistry(), 4_096);
+    Entry entry = new Entry(0L, 0, 31, 0L);
+    try {
+      Field queueField = MaintenanceEventLoop.class.getDeclaredField("dirtyRepairShardQueue");
+      queueField.setAccessible(true);
+      ConcurrentLinkedQueue<?> dirtyShards =
+          (ConcurrentLinkedQueue<?>) queueField.get(loop);
+      Field debtField = MaintenanceEventLoop.class.getDeclaredField("repairDebtTotal");
+      debtField.setAccessible(true);
+      AtomicLong debt = (AtomicLong) debtField.get(loop);
+      Method mark =
+          MaintenanceEventLoop.class.getDeclaredMethod("markMutationForRepair", Entry.class);
+      mark.setAccessible(true);
+
+      assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
+      mark.invoke(loop, entry);
+      assertEquals(dirtyShards.size(), 1);
+      assertEquals(debt.get(), 1L);
+
+      Method repair = MaintenanceEventLoop.class.getDeclaredMethod("repairMutations", int.class);
+      repair.setAccessible(true);
+      assertEquals(repair.invoke(loop, 4_096), 1);
+      assertEquals(debt.get(), 0L);
+      assertTrue(dirtyShards.isEmpty());
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void eventLoopOwnsTheExpiryConsumerInsteadOfAllocatingAMethodReferencePerPass() {
     assertTrue(
         TimerWheel.TimerConsumer.class.isAssignableFrom(MaintenanceEventLoop.class),
@@ -137,6 +177,72 @@ public class MaintenanceEventLoopTest {
     assertTrue(
         AccessConsumer.class.isAssignableFrom(MaintenanceEventLoop.class),
         "the actor itself must be the stable access-ring consumer");
+  }
+
+  @Test
+  public void dirtyReaderSignalUsesOneTokenAndRequeuesAfterTheDrainLimit() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry readers = new ReaderRegistry();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
+    ReaderSlot slot = new ReaderSlot();
+    slot.access = new AccessRing();
+    slot.access.offer(new Entry(0L, 0, 1, 0L), 1L);
+    slot.access.offer(new Entry(0L, 0, 2, 0L), 1L);
+    try {
+      loop.signalAccess(slot);
+      loop.signalAccess(slot);
+
+      Field field = MaintenanceEventLoop.class.getDeclaredField("dirtyReaderQueue");
+      field.setAccessible(true);
+      Queue<?> dirtyReaders = (Queue<?>) field.get(loop);
+      assertEquals(dirtyReaders.size(), 1, "a dirty reader must publish one coalesced token");
+
+      Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainAccesses", int.class);
+      drain.setAccessible(true);
+      assertEquals(drain.invoke(loop, 1), 1);
+      assertEquals(dirtyReaders.size(), 1, "remaining ring data must requeue the same reader");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void dirtyReaderOverflowRetainsTokensWhenTheReusableQueueIsFull() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
+            new ReaderRegistry(), 1_024);
+    List<ReaderSlot> slots = new ArrayList<>(1_025);
+    try {
+      for (int i = 0; i < 1_025; i++) {
+        ReaderSlot slot = new ReaderSlot();
+        slot.access = new AccessRing();
+        slot.access.offer(new Entry(0L, 0, i + 1, 0L), 1L);
+        slots.add(slot);
+        loop.signalAccess(slot);
+      }
+
+      Field overflowField =
+          MaintenanceEventLoop.class.getDeclaredField("dirtyReaderOverflowQueue");
+      overflowField.setAccessible(true);
+      Queue<?> overflow = (Queue<?>) overflowField.get(loop);
+      assertEquals(overflow.size(), 1, "the full fixed queue must spill its token");
+
+      Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainAccesses", int.class);
+      drain.setAccessible(true);
+      assertEquals(drain.invoke(loop, 1_024), 1_024);
+      assertEquals(drain.invoke(loop, 1_024), 1);
+      assertTrue(overflow.isEmpty(), "overflow tokens must be drained");
+      for (ReaderSlot slot : slots) {
+        assertFalse(slot.hasAccessPending(), "draining a token must clear its pending state");
+        assertTrue(slot.access.isEmpty(), "draining a token must consume its access ring");
+      }
+    } finally {
+      memory.closeArenas();
+    }
   }
 
   @Test
@@ -252,8 +358,8 @@ public class MaintenanceEventLoopTest {
 
       assertEquals(
           ticker.monotonicCalls.get(),
-          65,
-          "the pass clock must be reused for the due check while retry scheduling stays unchanged");
+          1,
+          "one maintenance pass must reuse one monotonic sample for every deadline check");
       assertEquals(ticker.wallCalls.get(), 1);
     } finally {
       if (entry.isWriterLocked()) {
@@ -342,7 +448,9 @@ public class MaintenanceEventLoopTest {
         new MaintenanceEventLoop(
             index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
     try {
+      CompletableFuture<Void> flush = loop.flush();
       assertEquals(invokeMaintenancePassWork(loop), 0);
+      assertTrue(flush.isDone(), "the flush pass must consume the queued reader cleanup");
       assertEquals(readerCount(readers), 0);
     } finally {
       memory.closeArenas();
@@ -602,6 +710,73 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
+  public void flushWaitsForUncommittedReliableRemovalWithoutSpinning() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    ThreadContext context = new ThreadContext(null);
+    Entry entry = new Entry(0L, 0, 127, 0L);
+    try {
+      assertTrue(loop.prepareReliableRemoval(context, entry));
+      loop.start();
+      waitUntilParked(loop);
+
+      CompletableFuture<Void> flush = loop.flush();
+      assertFalse(flush.isDone(), "flush must not complete before the reservation is resolved");
+
+      Thread.sleep(20L);
+
+      loop.cancelReliableRemoval(context, entry);
+      flush.get(1L, TimeUnit.SECONDS);
+    } finally {
+      if (context.reliableRemoval().active()) {
+        loop.cancelReliableRemoval(context, entry);
+      }
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void stoppingWorkerDoesNotSpinOnAnUncommittedReliableRemoval() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    ThreadContext context = new ThreadContext(null);
+    Entry entry = new Entry(0L, 0, 126, 0L);
+    try {
+      assertTrue(loop.prepareReliableRemoval(context, entry));
+      loop.start();
+      waitUntilParked(loop);
+
+      loop.stop();
+      loop.join(1_000L);
+      assertFalse(loop.isAlive(), "stop must reach teardown without waiting for an uncommitted slot");
+    } finally {
+      if (loop.isAlive()) {
+        loop.stop();
+        loop.join(1_000L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
   public void cancelingARemovalReservationSignalsAparkedWorker() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
@@ -835,7 +1010,7 @@ public class MaintenanceEventLoopTest {
         com.red.ohc.storage.WriterArena.allocationWeight(allocation)
             + com.red.ohc.storage.WriterArena.allocationWeight(one.keyAllocationLength());
     Budget budget = new Budget(1 << 20);
-    assertTrue(budget.tryReserve(weight * 2L));
+    assertTrue(budget.tryReserve(weight * 2L, 0));
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             data,
@@ -1328,7 +1503,8 @@ public class MaintenanceEventLoopTest {
         RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
         assertTrue(retirements.reserve(reservation, 1));
         assertTrue(
-            budget.tryReserve(com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+            budget.tryReserve(
+                com.red.ohc.storage.WriterArena.allocationWeight(allocation), 0));
         long address = memory.newWriterArena().allocate(allocation);
         ValueBlock.initialize(address, 0L, 1);
         retirements.append(reservation, address, allocation);
@@ -1378,7 +1554,8 @@ public class MaintenanceEventLoopTest {
 
       long allocation = ValueBlock.allocationLength(1);
       assertTrue(
-          budget.tryReserve(com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+          budget.tryReserve(
+              com.red.ohc.storage.WriterArena.allocationWeight(allocation), 0));
       long value = memory.newWriterArena().allocate(allocation);
       ValueBlock.initialize(value, 0L, 1);
       assertTrue(loop.prepareRetirement(context, 1));
@@ -1413,7 +1590,8 @@ public class MaintenanceEventLoopTest {
     long value = memory.newWriterArena().allocate(allocation);
     ValueBlock.initialize(value, 0L, 1);
     assertTrue(
-        budget.tryReserve(com.red.ohc.storage.WriterArena.allocationWeight(allocation)));
+        budget.tryReserve(
+            com.red.ohc.storage.WriterArena.allocationWeight(allocation), 0));
     assertTrue(loop.prepareRetirement(context, 1));
     loop.retireValue(context, value, allocation);
     loop.afterWrite();

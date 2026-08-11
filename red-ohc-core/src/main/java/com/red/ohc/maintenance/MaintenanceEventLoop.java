@@ -1,6 +1,5 @@
 package com.red.ohc.maintenance;
 
-import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -8,6 +7,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -82,8 +82,11 @@ public final class MaintenanceEventLoop
   private final AtomicBoolean budgetPressureRequested = new AtomicBoolean();
   private final ConcurrentLinkedQueue<Entry>[] repairQueues;
   private final int repairShardMask;
-  private int repairShardCursor;
-  private final AtomicLong[] repairDebts;
+  private final AtomicIntegerArray repairShardDirty;
+  private final RepairShardToken[] repairShardTokens;
+  private final ConcurrentLinkedQueue<RepairShardToken> dirtyRepairShardQueue =
+      new ConcurrentLinkedQueue<>();
+  private final AtomicLong repairDebtTotal = new AtomicLong();
   private final ConcurrentLinkedQueue<AsyncMutationTask> asyncMutations =
       new ConcurrentLinkedQueue<>();
   /** Linearizes async sequence assignment with queue publication for the flush barrier. */
@@ -98,9 +101,17 @@ public final class MaintenanceEventLoop
 
   private long deferredMutationRetryNanos = Long.MAX_VALUE;
   private final AtomicBoolean accessHint = new AtomicBoolean();
+  /** Reusable normal-path storage; a steady access stream must not allocate queue nodes. */
+  private final MpscArrayQueue<ReaderSlot> dirtyReaderQueue;
+  /** Bounded-queue overflow is rare and must retain tokens rather than dropping them. */
+  private final ConcurrentLinkedQueue<ReaderSlot> dirtyReaderOverflowQueue =
+      new ConcurrentLinkedQueue<>();
   private final ReaderRegistry readers;
   private final RetirementQueue retirements;
+  private final int retirementRecordsPerStripe;
+  private final int actorRetirementBatchRecords;
   private final RetirementQueue.Reservation actorRetirement = new RetirementQueue.Reservation();
+  private final ReliableRemovalQueue.Record removalRecord = new ReliableRemovalQueue.Record();
   private final TimerWheel wheel;
   private final MaintenancePolicy policy;
   private final Thread thread;
@@ -139,6 +150,7 @@ public final class MaintenanceEventLoop
 
   private long nowNanos;
   private int clockSampleCountdown;
+  private boolean monotonicSampledThisPass;
   private volatile long hits;
   private volatile long misses;
   private volatile long physicalExpired;
@@ -161,6 +173,11 @@ public final class MaintenanceEventLoop
 
   /** A bounded reclaim pass hit its limit and must be continued before the worker can park. */
   private boolean reclaimContinuation;
+
+  /** The actor has processed a removal but is waiting for two retirement slots. */
+  private boolean pendingRemovalRetirement;
+  private Throwable pendingRemovalFailure;
+  private long pendingRemovalRetryNanos = Long.MAX_VALUE;
 
   /** Actor-owned marker: publish the policy weight only after a policy mutation. */
   private boolean policyDirty;
@@ -263,6 +280,7 @@ public final class MaintenanceEventLoop
     }
     this.queueCapacity = queueCapacity;
     this.queue = new MpscArrayQueue<>(queueCapacity);
+    this.dirtyReaderQueue = new MpscArrayQueue<>(queueCapacity);
     int shardCount = 1;
     int requestedShards = Math.min(16, Math.max(1, queueCapacity / 1_024));
     while (shardCount < requestedShards) {
@@ -275,16 +293,25 @@ public final class MaintenanceEventLoop
     }
     this.repairQueues = repairQueues;
     this.repairShardMask = shardCount - 1;
-    this.repairDebts = new AtomicLong[shardCount];
+    this.repairShardDirty = new AtomicIntegerArray(shardCount);
+    this.repairShardTokens = new RepairShardToken[shardCount];
     for (int i = 0; i < shardCount; i++) {
-      this.repairDebts[i] = new AtomicLong();
+      this.repairShardTokens[i] = new RepairShardToken(i);
     }
     this.reliableRemovals = new ReliableRemovalQueue(queueCapacity);
     this.policy = new MaintenancePolicy(eviction, capacity, countBounded);
     this.readers = readers;
-    this.retirements = new RetirementQueue(memory, stripeCount(), retirementRecordsPerStripe());
-    this.wheel = new TimerWheel(ticker.currentTimeMillis());
-    this.nowMillis = ticker.currentTimeMillis();
+    this.retirementRecordsPerStripe = NativeMemory.defaultRetirementRecordsPerStripe();
+    this.actorRetirementBatchRecords =
+        Math.min(RETIREMENT_BATCH_RECORDS, retirementRecordsPerStripe);
+    this.retirements =
+        new RetirementQueue(
+            memory,
+            memory.writerStripeCount(),
+            retirementRecordsPerStripe);
+    long initialNowMillis = ticker.currentTimeMillis();
+    this.wheel = new TimerWheel(initialNowMillis);
+    this.nowMillis = initialNowMillis;
     this.thread = new Thread(this, "red-ohc-maintenance-event-loop");
     this.thread.setDaemon(true);
   }
@@ -322,11 +349,6 @@ public final class MaintenanceEventLoop
 
   public long nowMillis() {
     return nowMillis;
-  }
-
-  /** Writer-side TTL operations use the actor's published clock, refreshed only on demand. */
-  public void refreshClock() {
-    nowMillis = ticker.currentTimeMillis();
   }
 
   public Thread thread() {
@@ -436,6 +458,13 @@ public final class MaintenanceEventLoop
 
   /** Reader-side access publication is the only reader activity that needs to wake the actor. */
   public void signalAccess(ReaderSlot slot) {
+    if (slot == null) {
+      throw new NullPointerException("slot");
+    }
+    if (!slot.markAccessPending()) {
+      return;
+    }
+    publishDirtyReader(slot);
     if (accessHint.compareAndSet(false, true)) {
       signal();
     }
@@ -560,7 +589,10 @@ public final class MaintenanceEventLoop
     int shard = entry.keyHash() & repairShardMask;
     boolean firstRepair = entry.queueOfferFailed();
     if (firstRepair) {
-      repairDebts[shard].incrementAndGet();
+      repairDebtTotal.incrementAndGet();
+      if (repairShardDirty.compareAndSet(shard, 0, 1)) {
+        dirtyRepairShardQueue.offer(repairShardTokens[shard]);
+      }
     }
     repairVersion.incrementAndGet();
     repairNeeded.set(true);
@@ -648,22 +680,13 @@ public final class MaintenanceEventLoop
       return false;
     }
     try {
-      if (!retirements.tryReserve(context.retirement(), 2)) {
-        reliableRemovals.cancel(context.reliableRemoval());
-        signal();
-        return false;
-      }
       if (!reserveMutation(entry, Entry.PENDING_REMOVE)) {
-        retirements.cancel(context.retirement());
         reliableRemovals.cancel(context.reliableRemoval());
         signal();
         return false;
       }
       return true;
     } catch (Throwable failure) {
-      if (context.retirement().active()) {
-        retirements.cancel(context.retirement());
-      }
       if (context.reliableRemoval().active()) {
         reliableRemovals.cancel(context.reliableRemoval());
       }
@@ -673,7 +696,8 @@ public final class MaintenanceEventLoop
   }
 
   /**
-   * Commits a pre-reserved removal notification before publishing its retirement records.
+   * Commits a pre-reserved removal record; the actor publishes its retirement records only after
+   * listener and policy work has completed.
    *
    * <p>The notification may deserialize the supplied value and the entry key. The single
    * maintenance owner therefore observes the notification before either native address becomes
@@ -687,9 +711,8 @@ public final class MaintenanceEventLoop
       long valueAllocation,
       RemovalCause cause) {
     entry.completePendingClaim();
-    reliableRemovals.commit(context.reliableRemoval(), entry, valueAddress, cause);
-    retireValue(context, valueAddress, valueAllocation);
-    retireValue(context, entry.nativeKeyAddress, entry.keyAllocationLength());
+    reliableRemovals.commit(
+        context.reliableRemoval(), entry, valueAddress, valueAllocation, cause);
     if (wake) {
       signal();
     }
@@ -698,9 +721,6 @@ public final class MaintenanceEventLoop
   public void cancelReliableRemoval(
       com.red.ohc.runtime.ThreadContext context, Entry entry) {
     entry.cancelPendingClaimIfPresent();
-    if (context.retirement().active()) {
-      retirements.cancel(context.retirement());
-    }
     if (context.reliableRemoval().active()) {
       reliableRemovals.cancel(context.reliableRemoval());
       signal();
@@ -746,6 +766,7 @@ public final class MaintenanceEventLoop
   }
 
   public Snapshot snapshot() {
+    long repairDebt = repairDebt();
     return new Snapshot(
         hits,
         misses,
@@ -754,7 +775,7 @@ public final class MaintenanceEventLoop
         publishedLiveWeight,
         timeoutLagMillis,
         unhealthy.get(),
-        queueDepth(),
+        queue.size() + repairDebt,
         retiredEntries(),
         retiredBytes(),
         timerBytes(),
@@ -772,7 +793,7 @@ public final class MaintenanceEventLoop
         retirementAdmissionFailures.get(),
         reliableRemovalAdmissionFailures.get(),
         nativeAllocationFailures.get(),
-        repairQueueDepth(),
+        repairDebt,
         asyncMutationQueueDepth(),
         asyncMutationFailedCount(),
         asyncMutationRejectedCount());
@@ -831,19 +852,20 @@ public final class MaintenanceEventLoop
   }
 
   private int maintenancePass() {
-    readers.cleanupCollected(4096);
+    monotonicSampledThisPass = false;
     boolean clockSampled = sampleClockIfDue();
     int work = 0;
     if (budgetPressureRequested.get() && budgetPressureRequested.getAndSet(false)) {
-      budget.reclaimIdleCredits();
-      work++;
+      if (budget.reclaimIdleCredits() != 0L) {
+        work++;
+      }
     }
     boolean mutationsPending =
         !queue.isEmpty() || repairNeeded.get() || !deferredMutations.isEmpty();
     if (mutationsPending) {
       policy.beginWriteBatch();
     }
-    if (reliableRemovals.hasCommittedHead()) {
+    if (reliableRemovals.hasCommittedHint() || pendingRemovalRetirementDue()) {
       work += drainReliableRemovals(4096);
     }
     if (!queue.isEmpty()) {
@@ -877,7 +899,7 @@ public final class MaintenanceEventLoop
         && !clockSampled
         && evictionRetryNanos != Long.MAX_VALUE
         && policy.usedWeight() > capacity) {
-      evictionNow = ticker.nanos();
+      evictionNow = sampleMonotonicNow();
       nowNanos = evictionNow;
     }
     if (!stopping && evictionWorkDue(evictionNow)) {
@@ -909,7 +931,8 @@ public final class MaintenanceEventLoop
 
   private boolean hasWork() {
     return hasSourceWork()
-        || reliableRemovals.size() != 0L
+        || reliableRemovals.hasCommittedHint()
+        || pendingRemovalRetirement
         || !asyncMutations.isEmpty()
         || retirements.hasPendingReclaim();
   }
@@ -932,18 +955,39 @@ public final class MaintenanceEventLoop
   private boolean hasImmediateSourceBeforeFlush() {
     return clockRefreshRequested
         || reclaimContinuation
+        || pendingRemovalRetirementDue()
         || !queue.isEmpty()
         || accessHint.get()
         || repairNeeded.get()
         || allocationPressureRequested.get()
         || budgetPressureRequested.get()
         || retirements.hasReadyHint()
-        || reliableRemovals.hasCommittedHead()
+        || reliableRemovals.hasCommittedHint()
         || !asyncMutations.isEmpty();
+  }
+
+  /**
+   * A removal whose two retirement records are blocked behind QSBR is deadline work, not an
+   * immediately runnable source. Treating it as immediate would re-enter the same failed reserve
+   * path on every idle-arm attempt and burn a maintenance core while the reader remains active.
+   */
+  private boolean pendingRemovalRetirementDue() {
+    return pendingRemovalRetirement
+        && (retirements.hasReadyHint()
+            || pendingRemovalRetryNanos == Long.MAX_VALUE
+            || pendingRemovalRetryNanos <= nowNanos);
   }
 
   /** A flush remains pending across a deferred eviction retry, but that retry is timer work. */
   private boolean flushNeedsImmediatePass(long monotonicNow) {
+    if (pendingRemovalRetirement && reclaimBlocked && !retirements.hasReadyHint()) {
+      return false;
+    }
+    if (flushRequest.get() != null
+        && reliableRemovals.size() != 0L
+        && !reliableRemovals.hasCommittedHint()) {
+      return false;
+    }
     return flushRequest.get() != null
         && (clockRefreshRequested
             || evictionRetryNanos == Long.MAX_VALUE
@@ -1014,6 +1058,7 @@ public final class MaintenanceEventLoop
     if (flushRequest.get() == null) {
       return;
     }
+    readers.cleanupCollected(4_096);
     FlushRequest completed;
     synchronized (asyncSubmissionLock) {
       FlushRequest request = flushRequest.get();
@@ -1039,7 +1084,8 @@ public final class MaintenanceEventLoop
           || accessHint.get()
           || retirements.hasReadyHint()
           || retirements.hasPendingReclaim()
-          || reclaimContinuation) {
+          || reclaimContinuation
+          || pendingRemovalRetirement) {
         return;
       }
       if (!flushRequest.compareAndSet(request, null)) {
@@ -1115,63 +1161,100 @@ public final class MaintenanceEventLoop
 
   private int drainReliableRemovals(int limit) {
     int work = 0;
-    while (work < limit && reliableRemovals.hasCommittedHead()) {
-      ReliableRemovalQueue.Notification notification =
-          evictionNotifier == null ? null : reliableRemovals.pollNotification();
-      Entry entry = notification == null ? reliableRemovals.poll() : notification.entry;
-      if (entry != null) {
-        if (notification != null && notification.cause != null) {
-          evictionNotifier.notify(
-              entry, notification.valueAddress, notification.cause);
-        }
-        processEntry(entry);
-        work++;
-      } else {
-        if (reliableRemovals.pollTombstone()) {
-          work++;
-        } else {
+    while (work < limit) {
+      if (pendingRemovalRetirement) {
+        if (!commitPendingRemovalRetirement()) {
           break;
         }
+        pendingRemovalRetirement = false;
+        pendingRemovalRetryNanos = Long.MAX_VALUE;
+        Throwable failure = pendingRemovalFailure;
+        pendingRemovalFailure = null;
+        removalRecord.clear();
+        work++;
+        if (failure != null) {
+          throwUnchecked(failure);
+        }
+        continue;
+      }
+      if (!reliableRemovals.pollNext(removalRecord)) {
+        break;
+      }
+      Entry entry = removalRecord.entry;
+      if (entry == null) {
+        removalRecord.clear();
+        work++;
+        continue;
+      }
+      Throwable failure = null;
+      if (evictionNotifier != null && removalRecord.cause != null) {
+        try {
+          evictionNotifier.notify(entry, removalRecord.valueAddress, removalRecord.cause);
+        } catch (Throwable listenerFailure) {
+          failure = listenerFailure;
+        }
+      }
+      try {
+        processEntry(entry);
+      } catch (Throwable processingFailure) {
+        if (failure != null) {
+          processingFailure.addSuppressed(failure);
+        }
+        failure = processingFailure;
+      }
+      pendingRemovalFailure = failure;
+      if (!commitPendingRemovalRetirement()) {
+        pendingRemovalRetirement = true;
+        pendingRemovalRetryNanos = sampleMonotonicNow() + EPOCH_ADVANCE_INTERVAL_NANOS;
+        break;
+      }
+      Throwable completedFailure = pendingRemovalFailure;
+      pendingRemovalFailure = null;
+      removalRecord.clear();
+      work++;
+      if (completedFailure != null) {
+        throwUnchecked(completedFailure);
       }
     }
     return work;
+  }
+
+  private boolean commitPendingRemovalRetirement() {
+    if (!prepareActorRetirement(2)) {
+      return false;
+    }
+    Entry entry = removalRecord.entry;
+    retireActorValue(removalRecord.valueAddress, removalRecord.valueAllocation);
+    retireActorValue(entry.nativeKeyAddress, entry.keyAllocationLength());
+    return true;
   }
 
   /** Repairs coalesced mutations whose advisory queue offer lost a race with a full queue. */
   private int repairMutations(int limit) {
     int work = 0;
     long observedVersion = repairVersion.get();
-    while (work < limit) {
-      Entry entry = null;
-      for (int attempts = 0; attempts <= repairShardMask; attempts++) {
-        int shard = repairShardCursor++ & repairShardMask;
-        entry = repairQueues[shard].poll();
-        if (entry != null) {
-          break;
+    RepairShardToken token;
+    while (work < limit && (token = dirtyRepairShardQueue.poll()) != null) {
+      ConcurrentLinkedQueue<Entry> repairQueue = repairQueues[token.index];
+      Entry entry;
+      while (work < limit && (entry = repairQueue.poll()) != null) {
+        if (entry.isRepairMarked()) {
+          processEntry(entry);
+          work++;
         }
       }
-      if (entry == null) {
-        break;
+      repairShardDirty.set(token.index, 0);
+      if (!repairQueue.isEmpty()
+          && repairShardDirty.compareAndSet(token.index, 0, 1)) {
+        dirtyRepairShardQueue.offer(token);
       }
-      if (!entry.isRepairMarked()) {
-        continue;
-      }
-      processEntry(entry);
-      work++;
     }
-    if (observedVersion == repairVersion.get() && repairDebt() == 0L && repairQueuesEmpty()) {
+    if (observedVersion == repairVersion.get()
+        && repairDebtTotal.get() == 0L
+        && dirtyRepairShardQueue.isEmpty()) {
       repairNeeded.set(false);
     }
     return work;
-  }
-
-  private boolean repairQueuesEmpty() {
-    for (ConcurrentLinkedQueue<Entry> queue : repairQueues) {
-      if (!queue.isEmpty()) {
-        return false;
-      }
-    }
-    return true;
   }
 
   private void processEntry(Entry entry) {
@@ -1198,7 +1281,7 @@ public final class MaintenanceEventLoop
       if (entry.requeueMutation(flags)) {
         deferredMutations.addLast(entry);
       }
-      deferredMutationRetryNanos = ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
+      deferredMutationRetryNanos = sampleMonotonicNow() + DEFERRED_MUTATION_RETRY_NANOS;
       return;
     }
     processEntry(entry, flags);
@@ -1225,31 +1308,26 @@ public final class MaintenanceEventLoop
     deferredMutationRetryNanos =
         deferredMutations.isEmpty()
             ? Long.MAX_VALUE
-            : ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
+            : sampleMonotonicNow() + DEFERRED_MUTATION_RETRY_NANOS;
     return work;
   }
 
   private void deferMutation(Entry entry) {
     deferredMutations.addLast(entry);
-    deferredMutationRetryNanos = ticker.nanos() + DEFERRED_MUTATION_RETRY_NANOS;
+    deferredMutationRetryNanos = sampleMonotonicNow() + DEFERRED_MUTATION_RETRY_NANOS;
   }
 
   private void decrementRepairDebt(Entry entry) {
-    AtomicLong debt = repairDebts[entry.keyHash() & repairShardMask];
     while (true) {
-      long current = debt.get();
-      if (current == 0L || debt.compareAndSet(current, current - 1L)) {
+      long current = repairDebtTotal.get();
+      if (current == 0L || repairDebtTotal.compareAndSet(current, current - 1L)) {
         return;
       }
     }
   }
 
   private long repairDebt() {
-    long total = 0L;
-    for (AtomicLong debt : repairDebts) {
-      total += debt.get();
-    }
-    return total;
+    return repairDebtTotal.get();
   }
 
   private void processEntry(Entry entry, int flags) {
@@ -1354,10 +1432,18 @@ public final class MaintenanceEventLoop
       return false;
     }
     clockRefreshRequested = false;
-    nowNanos = ticker.nanos();
+    nowNanos = sampleMonotonicNow();
     nowMillis = ticker.currentTimeMillis();
     clockSampleCountdown = CLOCK_SAMPLE_INTERVAL_PASSES - 1;
     return true;
+  }
+
+  private long sampleMonotonicNow() {
+    if (!monotonicSampledThisPass) {
+      nowNanos = ticker.nanos();
+      monotonicSampledThisPass = true;
+    }
+    return nowNanos;
   }
 
   /** A QSBR epoch deadline is real work; an idle cache with no retirements still parks forever. */
@@ -1379,10 +1465,15 @@ public final class MaintenanceEventLoop
     boolean evictionDeadline =
         policy.usedWeight() > capacity && evictionRetryNanos != Long.MAX_VALUE;
     boolean epochDeadline = retirements.hasPendingReclaim();
-    if (deferredMutationRetryNanos == Long.MAX_VALUE && !evictionDeadline && !epochDeadline) {
+    boolean pendingRemovalDeadline =
+        pendingRemovalRetirement && pendingRemovalRetryNanos != Long.MAX_VALUE;
+    if (deferredMutationRetryNanos == Long.MAX_VALUE
+        && !evictionDeadline
+        && !epochDeadline
+        && !pendingRemovalDeadline) {
       return wheelDelay;
     }
-    long monotonicNow = ticker.nanos();
+    long monotonicNow = sampleMonotonicNow();
     long delay = wheelDelay;
     if (deferredMutationRetryNanos != Long.MAX_VALUE) {
       delay = Math.min(delay, deadlineDelayNanos(deferredMutationRetryNanos, monotonicNow));
@@ -1393,6 +1484,9 @@ public final class MaintenanceEventLoop
     if (epochDeadline) {
       delay = Math.min(delay, epochAdvanceDelayNanos(monotonicNow));
     }
+    if (pendingRemovalRetirement && pendingRemovalRetryNanos != Long.MAX_VALUE) {
+      delay = Math.min(delay, deadlineDelayNanos(pendingRemovalRetryNanos, monotonicNow));
+    }
     return delay;
   }
 
@@ -1400,7 +1494,7 @@ public final class MaintenanceEventLoop
     if (evictionRetryNanos == Long.MAX_VALUE || policy.usedWeight() <= capacity) {
       return nowNanos;
     }
-    return ticker.nanos();
+    return sampleMonotonicNow();
   }
 
   private boolean evictionWorkDue(long monotonicNow) {
@@ -1416,7 +1510,7 @@ public final class MaintenanceEventLoop
   }
 
   private void scheduleEvictionRetry() {
-    long now = ticker.nanos();
+    long now = sampleMonotonicNow();
     evictionRetryNanos = now + evictionRetryBackoffNanos;
     evictionRetryBackoffNanos = Math.min(1_000_000L, evictionRetryBackoffNanos << 1);
   }
@@ -1426,20 +1520,18 @@ public final class MaintenanceEventLoop
       return 0;
     }
     int work = 0;
-    for (WeakReference<ReaderSlot> reference : readers.references()) {
-      ReaderSlot slot = reference.get();
+    ReaderSlot slot;
+    while (work < limit) {
+      slot = dirtyReaderQueue.poll();
       if (slot == null) {
-        continue;
+        slot = dirtyReaderOverflowQueue.poll();
+      }
+      if (slot == null) {
+        break;
       }
       AccessRing access = slot.access;
-      if (access == null && !slot.hasAccessPending()) {
-        continue;
-      }
-      if (access != null && !slot.hasAccessPending() && access.isEmpty()) {
-        continue;
-      }
       // Clear before reading the counters/ring. A producer racing after this point either
-      // publishes data into this scan or leaves the hint set for the next pass.
+      // publishes data into this drain or publishes a second queue token for the next pass.
       slot.clearAccessPending();
       long hitDelta = slot.publishedHits - slot.consumedHits;
       long missDelta = slot.publishedMisses - slot.consumedMisses;
@@ -1456,17 +1548,28 @@ public final class MaintenanceEventLoop
           work++;
         }
       }
-      if (work >= limit) {
-        // The original hint may cover more than one bounded batch. Keep the hint live
-        // until the ring is actually empty instead of relying on a future read to wake us.
-        if (access != null && !access.isEmpty()) {
-          slot.markAccessPending();
-          accessHint.set(true);
-        }
-        return work;
+      if (access != null && !access.isEmpty()) {
+        requeueDirtyReader(slot);
+        break;
       }
     }
+    if (!dirtyReaderQueue.isEmpty() || !dirtyReaderOverflowQueue.isEmpty()) {
+      accessHint.set(true);
+    }
     return work;
+  }
+
+  private void requeueDirtyReader(ReaderSlot slot) {
+    if (slot.markAccessPending()) {
+      publishDirtyReader(slot);
+    }
+    accessHint.set(true);
+  }
+
+  private void publishDirtyReader(ReaderSlot slot) {
+    if (!dirtyReaderQueue.offer(slot)) {
+      dirtyReaderOverflowQueue.offer(slot);
+    }
   }
 
   @Override
@@ -1499,20 +1602,20 @@ public final class MaintenanceEventLoop
     long address = Entry.rawValueAddress(taggedAddress);
     if (taggedAddress != expectedValueAddress
         || address == 0L
-        || !Entry.hasTtl(taggedAddress)
-        || !ValueBlock.expired(address, nowMillis)) {
+        || !Entry.hasTtl(taggedAddress)) {
       return;
     }
     long expiry = ValueBlock.expireAtMillis(address);
-    if (expiry > 0L) {
-      timeoutLagMillis = Math.max(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
+    if (expiry <= 0L || expiry > nowMillis) {
+      return;
     }
+    timeoutLagMillis = Math.max(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
     if (removeFromMap(
         entry, false, expectedGeneration, expectedValueAddress, RemovalCause.EXPIRED)) {
       physicalExpired++;
     } else {
       if (entry.valueAddress == expectedValueAddress && isCurrent(entry)) {
-        wheel.add(entry, ValueBlock.expireAtMillis(address));
+        wheel.add(entry, expiry);
       }
     }
   }
@@ -1611,7 +1714,7 @@ public final class MaintenanceEventLoop
       return false;
     }
     boolean removed = false;
-      long value = 0L;
+    long value = 0L;
     try {
       if (entry.generation() != expectedGeneration || entry.valueAddress != expectedValueAddress) {
         return false;
@@ -1619,7 +1722,7 @@ public final class MaintenanceEventLoop
       if (!prepareActorRetirement(2)) {
         return false;
       }
-        removed = removeCurrent(entry);
+      removed = removeCurrent(entry);
       if (removed) {
         value = Entry.rawValueAddress(entry.valueAddress);
         entry.clearValue();
@@ -1639,10 +1742,18 @@ public final class MaintenanceEventLoop
       policy.remove(entry, eviction);
     }
     policyDirty = true;
+    Throwable listenerFailure = null;
     if (cause != null && evictionNotifier != null) {
-      evictionNotifier.notify(entry, value, cause);
+      try {
+        evictionNotifier.notify(entry, value, cause);
+      } catch (Throwable failure) {
+        listenerFailure = failure;
+      }
     }
     retireEntryBlocks(entry, value);
+    if (listenerFailure != null) {
+      throwUnchecked(listenerFailure);
+    }
     return true;
   }
 
@@ -1678,10 +1789,20 @@ public final class MaintenanceEventLoop
   private void shutdownAndFree() {
     rejectPendingAsync(new IllegalStateException("cache is closed"));
     finishActorRetirementBatch();
+    readers.cleanupCollected(4_096);
     while (hasActiveReaders()) {
       LockSupport.park(this);
     }
-    reliableRemovals.drain();
+    while (reliableRemovals.pollNext(removalRecord)) {
+      releaseReliableRemovalRecord();
+      removalRecord.clear();
+    }
+    if (pendingRemovalRetirement) {
+      releaseReliableRemovalRecord();
+      pendingRemovalRetirement = false;
+      pendingRemovalFailure = null;
+      removalRecord.clear();
+    }
     while (retirements.consumeReadyHint()) {
       int sealed = retirements.seal(Integer.MAX_VALUE, epoch);
       if (sealed != 0) {
@@ -1689,6 +1810,9 @@ public final class MaintenanceEventLoop
       }
     }
     clearPendingMutationQueues();
+    dirtyReaderQueue.clear();
+    dirtyReaderOverflowQueue.clear();
+    accessHint.set(false);
     for (Entry entry : data.values()) {
       long value = Entry.rawValueAddress(entry.valueAddress);
       entry.clearValue();
@@ -1706,6 +1830,27 @@ public final class MaintenanceEventLoop
     readers.clear();
   }
 
+  private void releaseReliableRemovalRecord() {
+    Entry entry = removalRecord.entry;
+    if (entry == null) {
+      return;
+    }
+    if (removalRecord.valueAddress != 0L) {
+      memory.releaseEntry(removalRecord.valueAddress, removalRecord.valueAllocation);
+    }
+    memory.releaseEntry(entry.nativeKeyAddress, entry.keyAllocationLength());
+  }
+
+  private static void throwUnchecked(Throwable failure) {
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
+    }
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+    throw new RuntimeException(failure);
+  }
+
   private void clearPendingMutationQueues() {
     while (queue.poll() != null) {
       // Drop the transport reference without touching entry ownership.
@@ -1713,11 +1858,13 @@ public final class MaintenanceEventLoop
     for (ConcurrentLinkedQueue<Entry> repairQueue : repairQueues) {
       repairQueue.clear();
     }
+    dirtyRepairShardQueue.clear();
+    for (int shard = 0; shard <= repairShardMask; shard++) {
+      repairShardDirty.set(shard, 0);
+    }
     deferredMutations.clear();
     repairNeeded.set(false);
-    for (AtomicLong debt : repairDebts) {
-      debt.set(0L);
-    }
+    repairDebtTotal.set(0L);
   }
 
   private boolean hasActiveReaders() {
@@ -1726,7 +1873,7 @@ public final class MaintenanceEventLoop
 
   private boolean prepareActorRetirement(int records) {
     int batchRecords =
-        Math.max(records, Math.min(RETIREMENT_BATCH_RECORDS, retirementRecordsPerStripe()));
+        Math.max(records, actorRetirementBatchRecords);
     if (actorRetirement.active()) {
       if (retirements.remaining(actorRetirement) >= records) {
         return true;
@@ -1764,23 +1911,12 @@ public final class MaintenanceEventLoop
     }
   }
 
-  private static int stripeCount() {
-    int target = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
-    int stripes = 1;
-    while (stripes < target && stripes < (1 << 30)) {
-      stripes <<= 1;
-    }
-    return stripes;
-  }
+  private static final class RepairShardToken {
+    private final int index;
 
-  /** Keeps the fixed native retire transport within the cache's 512KiB ledger reserve. */
-  private static int retirementRecordsPerStripe() {
-    long perStripe = (512L << 10) / ((long) stripeCount() * 32L);
-    int records = 2;
-    while ((records << 1) <= perStripe) {
-      records <<= 1;
+    private RepairShardToken(int index) {
+      this.index = index;
     }
-    return records;
   }
 
   private static final class AsyncMutationTask {

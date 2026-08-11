@@ -14,6 +14,12 @@ import com.red.ohc.api.AllocatorType;
 public final class NativeMemory {
   static final Unsafe U;
   static final long BYTE_ARRAY_BASE;
+  /** Cached once so bounded CAS paths never query the runtime on their hot path. */
+  public static final int LOGICAL_CPU_COUNT =
+      Math.max(1, Runtime.getRuntime().availableProcessors());
+  private static final int DEFAULT_WRITER_STRIPE_COUNT = computeWriterStripeCount();
+  private static final int DEFAULT_RETIREMENT_RECORDS_PER_STRIPE =
+      computeRetirementRecordsPerStripe(DEFAULT_WRITER_STRIPE_COUNT);
 
   /** Start block-wise comparison only when the key is large enough to amortize aggregation. */
   static final int BULK_EQUALS_THRESHOLD = 128;
@@ -33,6 +39,32 @@ public final class NativeMemory {
   }
 
   private NativeMemory() {}
+
+  public static int defaultWriterStripeCount() {
+    return DEFAULT_WRITER_STRIPE_COUNT;
+  }
+
+  public static int defaultRetirementRecordsPerStripe() {
+    return DEFAULT_RETIREMENT_RECORDS_PER_STRIPE;
+  }
+
+  private static int computeWriterStripeCount() {
+    int target = Math.max(1, LOGICAL_CPU_COUNT * 4);
+    int stripes = 1;
+    while (stripes < target && stripes < (1 << 30)) {
+      stripes <<= 1;
+    }
+    return stripes;
+  }
+
+  private static int computeRetirementRecordsPerStripe(int stripeCount) {
+    long perStripe = (512L << 10) / ((long) stripeCount * 32L);
+    int records = 2;
+    while ((records << 1) <= perStripe) {
+      records <<= 1;
+    }
+    return records;
+  }
 
   public static final class Memory {
     private final NativeAllocator allocator;
@@ -75,11 +107,7 @@ public final class NativeMemory {
       }
       this.allocator = new NativeAllocator(type);
       this.hardLimit = hardLimit;
-      int stripeCount = 1;
-      int target = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
-      while (stripeCount < target && stripeCount < (1 << 30)) {
-        stripeCount <<= 1;
-      }
+      int stripeCount = DEFAULT_WRITER_STRIPE_COUNT;
       this.arenas = new WriterArena[stripeCount];
       for (int index = 0; index < stripeCount; index++) {
         arenas[index] = new WriterArena(this, index + 1);
@@ -158,6 +186,10 @@ public final class NativeMemory {
       return arenas[((int) Thread.currentThread().getId()) & stripeMask];
     }
 
+    public int writerStripeIndex() {
+      return ((int) Thread.currentThread().getId()) & stripeMask;
+    }
+
     public int writerStripeCount() {
       return arenas.length;
     }
@@ -218,14 +250,20 @@ public final class NativeMemory {
       if (reused != null) {
         return reused;
       }
-      while (true) {
+      boolean counted = false;
+      for (int attempt = 0; attempt < LOGICAL_CPU_COUNT; attempt++) {
         int current = pooledPageCount.get();
         if (current >= pooledPageLimit) {
           return null;
         }
         if (pooledPageCount.compareAndSet(current, current + 1)) {
+          counted = true;
           break;
         }
+        Thread.onSpinWait();
+      }
+      if (!counted) {
+        return null;
       }
       int pageKey = 0;
       long address = 0L;
@@ -338,7 +376,7 @@ public final class NativeMemory {
     }
 
     private void reservePhysical(long bytes) {
-      while (true) {
+      for (int attempt = 0; attempt < LOGICAL_CPU_COUNT; attempt++) {
         long current = allocated.get();
         if (current > hardLimit - bytes) {
           throw new AllocationLimitException(hardLimit, current, bytes);
@@ -346,7 +384,9 @@ public final class NativeMemory {
         if (allocated.compareAndSet(current, current + bytes)) {
           return;
         }
+        Thread.onSpinWait();
       }
+      throw new AllocationLimitException(hardLimit, allocated.get(), bytes);
     }
   }
 

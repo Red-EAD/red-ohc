@@ -28,6 +28,9 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.ValueView;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
+import com.red.ohc.storage.CacheMath;
+import com.red.ohc.storage.ValueBlock;
+import com.red.ohc.storage.WriterArena;
 
 /**
  * OHC-only direct-read benchmark. Caffeine runs in a separate benchmark process so its result
@@ -44,7 +47,6 @@ import com.red.ohc.cache.OffHeapCache;
 public class OHCBenchmark {
   @Param({"JNA", "UNSAFE"})
   public AllocatorType allocator;
-
   @Param({"16", "64"})
   public int keyBytes;
 
@@ -195,12 +197,14 @@ public class OHCBenchmark {
     return bytes;
   }
 
-  private static long capacityFor(String residency, int keyBytes, int valueBytes) {
-    long keyAllocation = (keyBytes + 7L) & ~7L;
-    long nativePerEntry = keyAllocation + 16L + ((valueBytes + 7L) & ~7L);
+  static long capacityFor(String residency, int keyBytes, int valueBytes) {
+    long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyBytes + Long.BYTES));
+    long valueAllocation = ValueBlock.allocationLength(valueBytes);
+    long allocationWeightPerEntry =
+        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
     long residentEntries = "HIT_ONLY".equals(residency) ? WORKING_SET : WORKING_SET * 5L / 6L;
-    // The current eviction target is 75% of the nominal payload capacity.
-    return residentEntries * nativePerEntry * 4L / 3L + nativePerEntry;
+    // Match MaintenancePolicy's allocator-weight accounting and leave 25% headroom for churn.
+    return residentEntries * allocationWeightPerEntry * 4L / 3L + allocationWeightPerEntry;
   }
 
   private static int[] uniformSequence(int bound) {

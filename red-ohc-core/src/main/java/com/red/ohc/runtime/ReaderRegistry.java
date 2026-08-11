@@ -55,6 +55,19 @@ public final class ReaderRegistry {
     return false;
   }
 
+  /** Returns the oldest active reader epoch after one weak-registry cleanup and scan. */
+  public long minActiveEpoch() {
+    cleanupCollected(4_096);
+    long minimum = Long.MAX_VALUE;
+    for (WeakReference<ReaderSlot> reference : slots) {
+      ReaderSlot slot = reference.get();
+      if (slot != null && slot.epoch != 0L && slot.epoch < minimum) {
+        minimum = slot.epoch;
+      }
+    }
+    return minimum;
+  }
+
   /**
    * Close-side scan of distributed writer admission flags; normal writers never share a counter.
    */

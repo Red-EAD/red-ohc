@@ -12,6 +12,10 @@ public interface OHCache<K, V> extends AutoCloseable {
    */
   boolean put(K key, V value);
 
+  /**
+   * Publishes an entry with an absolute expiry time. TTL reads use the current ticker immediately;
+   * physical removal of expired native storage remains asynchronous.
+   */
   boolean put(K key, V value, long expireAtMillis);
 
   boolean remove(K key);

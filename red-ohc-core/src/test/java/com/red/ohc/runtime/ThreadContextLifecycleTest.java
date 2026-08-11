@@ -35,6 +35,16 @@ public final class ThreadContextLifecycleTest {
   }
 
   @Test
+  public void nestedWriterAdmissionFailsWithoutChangingTheOuterState() {
+    ThreadContext context = new ThreadContext(null);
+
+    assertTrue(context.tryEnterWriter());
+    assertTrue(!context.tryEnterWriter());
+    assertTrue(context.isWriterEntered());
+    context.exitWriter();
+  }
+
+  @Test
   public void accessRingIsCreatedOnlyWhenSamplingFirstHits() {
     ThreadContext context = new ThreadContext(null);
     Entry entry = new Entry(0L, 0, 1, 0L);

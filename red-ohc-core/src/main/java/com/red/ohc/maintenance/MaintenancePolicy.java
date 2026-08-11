@@ -92,9 +92,10 @@ public final class MaintenancePolicy {
       updateWeight(entry);
       return;
     }
-    entry.policyWeight = weightOf(entry);
-    weightedSize += entry.policyWeight;
     long bytes = byteWeightOf(entry);
+    long weight = countBounded ? 1L : bytes;
+    entry.policyWeight = weight;
+    weightedSize += weight;
     entry.policyByteWeight = bytes;
     liveBytes += bytes;
     switch (eviction) {
@@ -490,8 +491,8 @@ public final class MaintenancePolicy {
   }
 
   private void updateWeight(Entry entry) {
-    long updated = weightOf(entry);
     long updatedBytes = byteWeightOf(entry);
+    long updated = countBounded ? 1L : updatedBytes;
     long delta = updated - entry.policyWeight;
     long byteDelta = updatedBytes - entry.policyByteWeight;
     if (delta == 0L && byteDelta == 0L) {
@@ -574,13 +575,6 @@ public final class MaintenancePolicy {
       entry = null;
       return this;
     }
-  }
-
-  private long weightOf(Entry entry) {
-    if (countBounded) {
-      return 1L;
-    }
-    return byteWeightOf(entry);
   }
 
   private static long byteWeightOf(Entry entry) {

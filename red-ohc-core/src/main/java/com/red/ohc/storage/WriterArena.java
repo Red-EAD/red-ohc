@@ -36,6 +36,7 @@ public final class WriterArena {
     if (sizeClass < 0) {
       return allocateDirect(entryBytes);
     }
+    int pagePublishAttempts = 0;
     while (true) {
       Page page = currentPages.get(sizeClass);
       if (page == null) {
@@ -45,6 +46,10 @@ public final class WriterArena {
         }
         if (!currentPages.compareAndSet(sizeClass, null, acquired)) {
           memory.returnUnusedPage(acquired);
+          if (++pagePublishAttempts >= NativeMemory.LOGICAL_CPU_COUNT) {
+            return allocateDirect(entryBytes);
+          }
+          Thread.onSpinWait();
           continue;
         }
         page = acquired;

@@ -6,6 +6,7 @@ import static org.testng.Assert.assertTrue;
 
 import org.testng.annotations.Test;
 
+import com.red.ohc.api.RemovalCause;
 import com.red.ohc.index.Entry;
 
 public final class ReliableRemovalQueueTest {
@@ -14,30 +15,36 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation first = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
+    ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
     Entry entry = new Entry(0L, 0, 1, 0L);
 
     assertTrue(queue.tryReserve(first));
-    assertFalse(queue.poll() != null, "an uncommitted ticket must block consumption");
-    queue.commit(first, entry);
-    assertEquals(queue.poll(), entry);
+    assertFalse(queue.pollNext(record), "an uncommitted ticket must block consumption");
+    queue.commit(first, entry, 17L, 24L, RemovalCause.SIZE);
+    assertTrue(queue.pollNext(record));
+    assertEquals(record.entry, entry);
+    assertEquals(record.valueAddress, 17L);
+    assertEquals(record.valueAllocation, 24L);
+    assertEquals(record.cause, RemovalCause.SIZE);
 
     assertTrue(queue.tryReserve(second));
     queue.cancel(second);
-    assertTrue(queue.pollTombstone());
+    assertTrue(queue.pollNext(record));
+    assertEquals(record.entry, null);
     assertEquals(queue.size(), 0L);
   }
 
   @Test
-  public void uncommittedHeadIsNotImmediateWork() {
+  public void uncommittedHeadDoesNotPublishACommittedHint() {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
 
     assertTrue(queue.tryReserve(reservation));
     assertEquals(queue.size(), 1L);
-    assertFalse(queue.hasCommittedHead());
+    assertFalse(queue.hasCommittedHint());
 
     queue.commit(reservation, new Entry(0L, 0, 5, 0L));
-    assertTrue(queue.hasCommittedHead());
+    assertTrue(queue.hasCommittedHint());
   }
 
   @Test
@@ -45,30 +52,58 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation first = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
+    ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
 
     assertTrue(queue.tryReserve(first));
     assertTrue(queue.tryReserve(second));
     queue.commit(second, new Entry(0L, 0, 2, 0L));
-    assertFalse(queue.pollTombstone());
+    assertFalse(queue.pollNext(record));
     queue.cancel(first);
-    assertTrue(queue.pollTombstone());
-    assertTrue(queue.poll() != null);
+    assertTrue(queue.pollNext(record));
+    assertEquals(record.entry, null);
+    assertTrue(queue.pollNext(record));
+    assertEquals(record.entry.keyHash(), 2);
     assertEquals(queue.size(), 0L);
+  }
+
+  @Test
+  public void committedHintClearsWhenACommittedPrefixMeetsAnUncommittedHead() {
+    ReliableRemovalQueue queue = new ReliableRemovalQueue(4);
+    ReliableRemovalQueue.Reservation committed = new ReliableRemovalQueue.Reservation();
+    ReliableRemovalQueue.Reservation pending = new ReliableRemovalQueue.Reservation();
+    ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
+
+    assertTrue(queue.tryReserve(committed));
+    queue.commit(committed, new Entry(0L, 0, 6, 0L));
+    assertTrue(queue.tryReserve(pending));
+
+    assertTrue(queue.pollNext(record));
+    assertFalse(queue.pollNext(record));
+    assertFalse(
+        queue.hasCommittedHint(),
+        "an uncommitted head must not keep the actor in an immediate-work loop");
+
+    queue.commit(pending, new Entry(0L, 0, 7, 0L));
+    assertTrue(queue.hasCommittedHint(), "a later commit must re-arm the actor hint");
+    assertTrue(queue.pollNext(record));
+    assertEquals(record.entry.keyHash(), 7);
   }
 
   @Test
   public void cancelAfterCommitIsIdempotent() {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
+    ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
     Entry entry = new Entry(0L, 0, 3, 0L);
 
     assertTrue(queue.tryReserve(reservation));
-    queue.commit(reservation, entry);
+    queue.commit(reservation, entry, 0L, 0L, null);
     queue.cancel(reservation);
 
     assertEquals(
         queue.size(), 1L, "exception cleanup must not cancel an already committed removal ticket");
-    assertEquals(queue.poll(), entry);
+    assertTrue(queue.pollNext(record));
+    assertEquals(record.entry, entry);
   }
 
   @Test

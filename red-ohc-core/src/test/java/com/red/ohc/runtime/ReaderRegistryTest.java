@@ -46,6 +46,25 @@ public final class ReaderRegistryTest {
     assertEquals(cleanupCollected(registry, 1), 0, "queued readers must be removed only once");
   }
 
+  @Test
+  public void minimumActiveEpochIsSharedByEveryRetirementStripe() {
+    ReaderRegistry registry = new ReaderRegistry();
+    ReaderSlot older = new ReaderSlot();
+    ReaderSlot newer = new ReaderSlot();
+    registry.register(older);
+    registry.register(newer);
+
+    older.epoch = 7L;
+    newer.epoch = 9L;
+    assertEquals(registry.minActiveEpoch(), 7L);
+
+    older.epoch = 0L;
+    assertEquals(registry.minActiveEpoch(), 9L);
+
+    newer.epoch = 0L;
+    assertEquals(registry.minActiveEpoch(), Long.MAX_VALUE);
+  }
+
   @Test(timeOut = 10_000L)
   public void registrationAndCollectionNeverPublishANullRegistryReference() throws Exception {
     ReaderRegistry registry = new ReaderRegistry();

@@ -5,6 +5,7 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
@@ -134,6 +135,8 @@ public final class PermanentReadClockTest {
       assertEquals(cache.get(readKey), null);
       assertFalse(cache.containsKey(readKey));
       assertFalse(cache.getDirect(readKey, value -> value.getByte(0)));
+      assertEquals(
+          cache.getDirectAll(Collections.singletonList(readKey), (key, value) -> {}), 0);
       assertTrue(cache.putIfAbsentAsync(absentKey, new byte[] {3}, 0L).join());
       assertFalse(cache.replaceAsync(replaceKey, new byte[] {2}, new byte[] {4}, 0L).join());
     }

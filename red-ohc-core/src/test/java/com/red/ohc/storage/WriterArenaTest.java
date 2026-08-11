@@ -173,7 +173,7 @@ public class WriterArenaTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     try {
       int expected = 1;
-      int target = Math.max(1, Runtime.getRuntime().availableProcessors() * 4);
+      int target = NativeMemory.LOGICAL_CPU_COUNT * 4;
       while (expected < target) {
         expected <<= 1;
       }

@@ -5,6 +5,7 @@ import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -12,6 +13,7 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.index.ChmSizing;
+import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.runtime.ReaderRegistry;
 
 public final class CHMArchitectureTest {
@@ -75,4 +77,14 @@ public final class CHMArchitectureTest {
         ReaderRegistry.class,
         "reader registration must be append-only CAS without a global lock");
   }
+
+  @Test
+  public void maintenanceClockHasNoCallerRefreshEntryPoint() {
+    for (Method method : MaintenanceEventLoop.class.getDeclaredMethods()) {
+      assertTrue(
+          !method.getName().equals("refreshClock"),
+          "business and loader threads must not write the actor-owned clock");
+    }
+  }
+
 }

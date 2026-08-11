@@ -16,7 +16,7 @@ public final class ThreadContext {
   private static final int MAX_REUSABLE_BULK_KEYS = 4_096;
   public byte[] keyBytes = new byte[64];
   public ByteBuffer keyBuffer = ByteBuffer.wrap(keyBytes);
-  public final LookupKey lookupKey = new LookupKey();
+  public LookupKey lookupKey = new LookupKey();
   public final ReaderSlot slot = new ReaderSlot();
   private DirectValueView[] directViews;
   private int directViewDepth;
@@ -49,6 +49,7 @@ public final class ThreadContext {
     private final ReliableRemovalQueue.Reservation reliableRemoval =
         new ReliableRemovalQueue.Reservation();
     private WriterArena writerArena;
+    private int budgetStripeIndex = -1;
     private boolean writerEntered;
     private boolean retirementPublished;
     private long maintenanceWakeGeneration = Long.MIN_VALUE;
@@ -57,6 +58,9 @@ public final class ThreadContext {
       this.writerArena = writerArena;
     }
   }
+
+
+
 
   public static void verifyNativeByteBufferSupported() {
     NativeByteBuffer.verifySupported();
@@ -68,6 +72,9 @@ public final class ThreadContext {
       keyBuffer = ByteBuffer.wrap(keyBytes);
     }
   }
+
+
+
 
   public ByteBuffer keyBuffer(int length) {
     keyBuffer.clear();
@@ -131,9 +138,12 @@ public final class ThreadContext {
     return state != null && state.writerArena != null;
   }
 
-  public void bindWriterResources(WriterArena writerArena) {
+  public void bindWriterResources(WriterArena writerArena, int budgetStripeIndex) {
     if (writerArena == null) {
       throw new IllegalArgumentException("writer arena is required");
+    }
+    if (budgetStripeIndex < 0) {
+      throw new IllegalArgumentException("budget stripe index must be non-negative");
     }
     WriterState state = ensureWriterState();
     if (state.writerArena != null) {
@@ -143,6 +153,7 @@ public final class ThreadContext {
       return;
     }
     state.writerArena = writerArena;
+    state.budgetStripeIndex = budgetStripeIndex;
   }
 
   public boolean tryEnterWriter() {
@@ -173,6 +184,14 @@ public final class ThreadContext {
 
   public ReliableRemovalQueue.Reservation reliableRemoval() {
     return ensureWriterState().reliableRemoval;
+  }
+
+  public int budgetStripeIndex() {
+    WriterState state = writerState;
+    if (state == null || state.writerArena == null) {
+      throw new IllegalStateException("writer resources are not bound");
+    }
+    return state.budgetStripeIndex;
   }
 
   public boolean isRegistered() {
@@ -336,7 +355,7 @@ public final class ThreadContext {
     if (bulkReadChanged) {
       publish();
       MaintenanceEventLoop loop = maintenance;
-      if (loop != null && slot.markAccessPending()) {
+      if (loop != null) {
         loop.signalAccess(slot);
       }
     }
@@ -352,7 +371,7 @@ public final class ThreadContext {
       return;
     }
     MaintenanceEventLoop loop = maintenance;
-    if (loop != null && slot.markAccessPending()) {
+    if (loop != null) {
       loop.signalAccess(slot);
     }
   }
@@ -364,7 +383,7 @@ public final class ThreadContext {
       // stats publication may wake the actor even when an earlier access burst was already
       // drained; hit delivery itself still signals only on an empty-to-nonempty ring edge.
       MaintenanceEventLoop loop = maintenance;
-      if (loop != null && slot.markAccessPending()) {
+      if (loop != null) {
         loop.signalAccess(slot);
       }
     }
@@ -374,7 +393,7 @@ public final class ThreadContext {
   public void flushRead() {
     publish();
     MaintenanceEventLoop loop = maintenance;
-    if (loop != null && slot.markAccessPending()) {
+    if (loop != null) {
       loop.signalAccess(slot);
     }
   }

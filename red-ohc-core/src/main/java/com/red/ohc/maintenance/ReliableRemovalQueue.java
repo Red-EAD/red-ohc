@@ -1,5 +1,6 @@
 package com.red.ohc.maintenance;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.red.ohc.api.RemovalCause;
@@ -15,6 +16,7 @@ public final class ReliableRemovalQueue {
   private final int mask;
   private final AtomicLong producer = new AtomicLong();
   private volatile long consumer;
+  private final AtomicBoolean committedHint = new AtomicBoolean();
 
   public ReliableRemovalQueue(int capacity) {
     if (Integer.bitCount(capacity) != 1 || capacity < 2) {
@@ -44,18 +46,23 @@ public final class ReliableRemovalQueue {
   }
 
   public void commit(Reservation reservation, Entry entry) {
-    publish(reservation, entry, 0L, null);
+    publish(reservation, entry, 0L, 0L, null);
   }
 
-  void commit(Reservation reservation, Entry entry, long valueAddress, RemovalCause cause) {
-    publish(reservation, entry, valueAddress, cause);
+  void commit(
+      Reservation reservation,
+      Entry entry,
+      long valueAddress,
+      long valueAllocation,
+      RemovalCause cause) {
+    publish(reservation, entry, valueAddress, valueAllocation, cause);
   }
 
   public void cancel(Reservation reservation) {
     if (!reservation.active()) {
       return;
     }
-    publish(reservation, null, 0L, null);
+    publish(reservation, null, 0L, 0L, null);
   }
 
   /**
@@ -65,13 +72,9 @@ public final class ReliableRemovalQueue {
    */
   public int drain() {
     int drained = 0;
+    Record record = new Record();
     while (true) {
-      Entry entry = poll();
-      if (entry != null) {
-        drained++;
-        continue;
-      }
-      if (pollTombstone()) {
+      if (pollNext(record)) {
         drained++;
         continue;
       }
@@ -79,32 +82,25 @@ public final class ReliableRemovalQueue {
     }
   }
 
-  public Entry poll() {
-    Slot slot = head();
-    if (slot == null || slot.value == null) {
-      return null;
+  /** Consumes one committed head into an actor-owned record without allocating. */
+  public boolean pollNext(Record record) {
+    if (record == null) {
+      throw new NullPointerException("record");
     }
-    Entry entry = slot.value;
-    finish(slot);
-    return entry;
-  }
-
-  Notification pollNotification() {
     Slot slot = head();
-    if (slot == null || slot.value == null) {
-      return null;
-    }
-    Entry entry = slot.value;
-    Notification notification = new Notification(entry, slot.valueAddress, slot.cause);
-    finish(slot);
-    return notification;
-  }
-
-  public boolean pollTombstone() {
-    Slot slot = head();
-    if (slot == null || slot.value != null) {
+    if (slot == null) {
+      // A reserved but not-yet-committed head is not immediate work. Clear the coalesced
+      // hint, then recheck the head so a commit racing this clear cannot be stranded.
+      committedHint.set(false);
+      if (head() != null) {
+        committedHint.set(true);
+      }
       return false;
     }
+    record.entry = slot.value;
+    record.valueAddress = slot.valueAddress;
+    record.valueAllocation = slot.valueAllocation;
+    record.cause = slot.cause;
     finish(slot);
     return true;
   }
@@ -113,22 +109,28 @@ public final class ReliableRemovalQueue {
     return producer.get() - consumer;
   }
 
-  /** Returns whether the consumer can observe a committed value at the current head. */
-  boolean hasCommittedHead() {
-    return head() != null;
+  /** Producer publication hint; the actor confirms readiness only through {@link #pollNext}. */
+  boolean hasCommittedHint() {
+    return committedHint.get();
   }
 
   private void publish(
-      Reservation reservation, Entry entry, long valueAddress, RemovalCause cause) {
+      Reservation reservation,
+      Entry entry,
+      long valueAddress,
+      long valueAllocation,
+      RemovalCause cause) {
     if (!reservation.active()) {
       throw new IllegalStateException("missing reservation");
     }
     Slot slot = reservation.slot;
     slot.valueAddress = valueAddress;
+    slot.valueAllocation = valueAllocation;
     slot.cause = cause;
     slot.value = entry;
     slot.sequence = reservation.sequence + 1L;
     reservation.clear();
+    committedHint.set(true);
   }
 
   private Slot head() {
@@ -139,20 +141,26 @@ public final class ReliableRemovalQueue {
   private void finish(Slot slot) {
     slot.value = null;
     slot.valueAddress = 0L;
+    slot.valueAllocation = 0L;
     slot.cause = null;
     slot.sequence = consumer + slots.length;
     consumer++;
+    if (consumer == producer.get()) {
+      committedHint.set(false);
+    }
   }
 
-  static final class Notification {
-    final Entry entry;
-    final long valueAddress;
-    final RemovalCause cause;
+  public static final class Record {
+    Entry entry;
+    long valueAddress;
+    long valueAllocation;
+    RemovalCause cause;
 
-    private Notification(Entry entry, long valueAddress, RemovalCause cause) {
-      this.entry = entry;
-      this.valueAddress = valueAddress;
-      this.cause = cause;
+    public void clear() {
+      entry = null;
+      valueAddress = 0L;
+      valueAllocation = 0L;
+      cause = null;
     }
   }
 
@@ -174,6 +182,7 @@ public final class ReliableRemovalQueue {
     volatile long sequence;
     volatile Entry value;
     long valueAddress;
+    long valueAllocation;
     RemovalCause cause;
   }
 }

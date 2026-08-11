@@ -1,12 +1,10 @@
 package com.red.ohc.maintenance;
 
-import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.red.ohc.runtime.ReaderRegistry;
-import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
 
@@ -47,9 +45,6 @@ public final class RetirementQueue {
 
   /** Published by the actor for deadline-driven QSBR reclaim scheduling. */
   private volatile boolean reclaimPending;
-
-  /** Actor-published diagnostic snapshot; stats readers never traverse the actor-owned set. */
-  private volatile long oldestRetireEpoch;
 
   public RetirementQueue(NativeMemory.Memory memory, int stripeCount, int recordsPerStripe) {
     if (Integer.bitCount(stripeCount) != 1) {
@@ -195,28 +190,16 @@ public final class RetirementQueue {
       sealCursor = (sealCursor + 1) & (stripes.length - 1);
       scanned++;
     }
-    // A stripe can contain more published records than this bounded pass consumed. Keep
-    // the actor required even when the pass stopped after exhausting one stripe rather than
-    // exactly at the global limit; otherwise consuming the coalesced hint would strand the
-    // remaining stripes until a new producer happens to publish another record.
-    if (hasReadyRecord()) {
-      readyHint.lazySet(true);
-    }
-    publishOldestRetireEpoch();
     return sealed;
-  }
-
-  private boolean hasReadyRecord() {
-    for (Stripe stripe : stripes) {
-      if (stripe.hasReadyRecord()) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /** Reclaims at most {@code limit} sealed records whose readers are quiescent or newer. */
   public int reclaim(ReaderRegistry readers, int limit) {
+    if (activeStripeCount == 0 || limit <= 0) {
+      reclaimPending = activeStripeCount != 0;
+      return 0;
+    }
+    long minimumActiveEpoch = readers.minActiveEpoch();
     int reclaimed = 0;
     int remaining = activeStripeCount;
     while (remaining > 0 && reclaimed < limit) {
@@ -224,7 +207,7 @@ public final class RetirementQueue {
         reclaimCursor = 0;
       }
       Stripe stripe = activeStripes[reclaimCursor];
-      reclaimed += stripe.reclaim(readers, limit - reclaimed, this);
+      reclaimed += stripe.reclaim(minimumActiveEpoch, limit - reclaimed, this);
       remaining--;
       if (stripe.hasSealedRecords()) {
         reclaimCursor = (reclaimCursor + 1) % activeStripeCount;
@@ -233,7 +216,6 @@ public final class RetirementQueue {
       }
     }
     reclaimPending = activeStripeCount != 0;
-    publishOldestRetireEpoch();
     return reclaimed;
   }
 
@@ -274,23 +256,6 @@ public final class RetirementQueue {
     return retiredEntries;
   }
 
-  public long oldestEpoch() {
-    return oldestRetireEpoch;
-  }
-
-  /** Actor-only traversal of the compact active set, published for lock-free diagnostics. */
-  private void publishOldestRetireEpoch() {
-    long oldest = Long.MAX_VALUE;
-    for (int index = 0; index < activeStripeCount; index++) {
-      Stripe stripe = activeStripes[index];
-      long epoch = stripe.headEpoch();
-      if (epoch != 0L && epoch < oldest) {
-        oldest = epoch;
-      }
-    }
-    oldestRetireEpoch = oldest == Long.MAX_VALUE ? 0L : oldest;
-  }
-
   public long allocatedBytes() {
     return (long) stripes.length * stripes[0].capacity * RECORD_BYTES;
   }
@@ -321,7 +286,6 @@ public final class RetirementQueue {
     retiredBytes = 0L;
     retiredEntries = 0;
     reclaimPending = false;
-    oldestRetireEpoch = 0L;
     readyHint.set(false);
   }
 
@@ -482,9 +446,8 @@ public final class RetirementQueue {
       return sealed;
     }
 
-    int reclaim(ReaderRegistry readers, int limit, RetirementQueue owner) {
+    int reclaim(long minimumActiveEpoch, int limit, RetirementQueue owner) {
       int reclaimed = 0;
-      long approvedEpoch = Long.MIN_VALUE;
       while (reclaimed < limit && consumer < seal) {
         long record = address(consumer);
         long epoch = NativeMemory.getLongVolatile(record + EPOCH);
@@ -495,11 +458,8 @@ public final class RetirementQueue {
         // complete contiguous run carrying this epoch. A reader entering after the
         // scan cannot acquire the already-unpublished pointer; a pre-existing reader
         // had published its epoch before the pointer update and is included here.
-        if (epoch != approvedEpoch) {
-          if (!allQuiescentAfter(readers, epoch)) {
-            break;
-          }
-          approvedEpoch = epoch;
+        if (epoch >= minimumActiveEpoch) {
+          break;
         }
         long entryAddress = NativeMemory.getLong(record + ADDRESS);
         long allocation = NativeMemory.getLong(record + ALLOCATION);
@@ -554,18 +514,5 @@ public final class RetirementQueue {
       return address + ((index & mask) * RECORD_BYTES);
     }
 
-    private static boolean allQuiescentAfter(ReaderRegistry readers, long retireEpoch) {
-      for (WeakReference<ReaderSlot> reference : readers.references()) {
-        ReaderSlot reader = reference.get();
-        if (reader == null) {
-          continue;
-        }
-        long activeEpoch = reader.epoch;
-        if (activeEpoch != 0L && activeEpoch <= retireEpoch) {
-          return false;
-        }
-      }
-      return true;
-    }
   }
 }
