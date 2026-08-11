@@ -139,10 +139,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     data.remove(bootstrap, bootstrap);
     this.memory = new NativeMemory.Memory(allocatorType, nativeHardLimit);
     this.budget = new Budget(residentHardLimit);
-    this.contexts =
-        ThreadLocal.withInitial(
-            () ->
-                new ThreadContext(memory.writerForCurrentThread(), budget.leaseForCurrentThread()));
+    this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null, null));
     this.evictionContexts = ThreadLocal.withInitial(() -> new ThreadContext(null, null));
     this.worker =
         new MaintenanceEventLoop(
@@ -1656,16 +1653,33 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       worker.registerReader(context.slot);
     }
     context.slot.writerActive = true;
-    if (!context.tryActivateWriter()) {
-      context.slot.writerActive = false;
+    boolean activated = false;
+    boolean admitted = false;
+    try {
+      if (closeState.get() != OPEN) {
+        return null;
+      }
+      if (!context.hasWriterResources()) {
+        context.bindWriterResources(
+            memory.writerForCurrentThread(), budget.leaseForCurrentThread());
+      }
+      if (!context.tryActivateWriter()) {
+        return null;
+      }
+      activated = true;
+      if (closeState.get() == OPEN) {
+        admitted = true;
+        return context;
+      }
       return null;
+    } finally {
+      if (!admitted) {
+        context.slot.writerActive = false;
+        if (activated) {
+          context.deactivateWriter();
+        }
+      }
     }
-    if (closeState.get() == OPEN) {
-      return context;
-    }
-    context.slot.writerActive = false;
-    context.deactivateWriter();
-    return null;
   }
 
   private void exitWriter(ThreadContext context) {

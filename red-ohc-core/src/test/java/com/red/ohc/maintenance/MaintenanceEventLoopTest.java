@@ -4,6 +4,7 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
@@ -354,6 +355,47 @@ public class MaintenanceEventLoopTest {
       assertTrue(
           budget.tryReserve(second, 64L),
           "budget pressure must reclaim idle writer credit for a later reservation");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void realPassCleansQueuedWriterAndReaderRegistrationsWithoutCreatingWork() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    Budget budget = new Budget(1 << 20);
+    AtomicReference<Budget.Lease> leaseRef = new AtomicReference<>();
+    Thread owner =
+        new Thread(
+            () -> {
+              Budget.Lease lease = budget.leaseForCurrentThread();
+              assertTrue(budget.tryReserve(lease, 64L));
+              leaseRef.set(lease);
+            });
+    owner.start();
+    owner.join();
+    Budget.Lease lease = leaseRef.get();
+    Field ownerThread = Budget.Lease.class.getDeclaredField("ownerThread");
+    ownerThread.setAccessible(true);
+    WeakReference<?> ownerReference = (WeakReference<?>) ownerThread.get(lease);
+    ownerReference.clear();
+    assertTrue(ownerReference.enqueue());
+
+    ReaderRegistry readers = new ReaderRegistry();
+    readers.register(new ReaderSlot());
+    WeakReference<ReaderSlot> readerReference = readers.references().iterator().next();
+    readerReference.clear();
+    assertTrue(readerReference.enqueue());
+
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, budget, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
+    try {
+      assertEquals(invokeMaintenancePassWork(loop), 0);
+      assertEquals(leaseCount(budget), 0);
+      assertEquals(readerCount(readers), 0);
+      assertEquals(budget.reserved(), 64L, "only resident native memory remains reserved");
+      budget.release(64L);
     } finally {
       memory.closeArenas();
     }
@@ -1509,9 +1551,25 @@ public class MaintenanceEventLoopTest {
   }
 
   private static void invokeMaintenancePass(MaintenanceEventLoop loop) throws Exception {
+    invokeMaintenancePassWork(loop);
+  }
+
+  private static int invokeMaintenancePassWork(MaintenanceEventLoop loop) throws Exception {
     Method method = MaintenanceEventLoop.class.getDeclaredMethod("maintenancePass");
     method.setAccessible(true);
-    method.invoke(loop);
+    return (Integer) method.invoke(loop);
+  }
+
+  private static int leaseCount(Budget budget) throws Exception {
+    Method method = Budget.class.getDeclaredMethod("leaseCount");
+    method.setAccessible(true);
+    return (Integer) method.invoke(budget);
+  }
+
+  private static int readerCount(ReaderRegistry readers) throws Exception {
+    Method method = ReaderRegistry.class.getDeclaredMethod("registeredCount");
+    method.setAccessible(true);
+    return (Integer) method.invoke(readers);
   }
 
   private static final class FrozenTicker implements Ticker {

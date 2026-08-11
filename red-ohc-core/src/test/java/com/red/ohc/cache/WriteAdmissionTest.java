@@ -9,11 +9,14 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.runtime.ThreadContext;
+import com.red.ohc.storage.Budget;
+import com.red.ohc.storage.NativeMemory;
 
 public class WriteAdmissionTest {
   private static final CacheSerializer<String> STRING =
@@ -59,6 +62,65 @@ public class WriteAdmissionTest {
       expectThrows(
           IllegalArgumentException.class, () -> cache.put("this-key-is-too-large", "value"));
     }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void readOnlyThreadDoesNotAllocateWriterLease() throws Exception {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped()) {
+      assertTrue(cache.put("seed", "value"));
+      cache.flushAsync().join();
+      int beforeRead = leaseCount(cache);
+      AtomicReference<String> observed = new AtomicReference<>();
+
+      Thread reader = new Thread(() -> observed.set(cache.get("seed")), "read-only-cache-thread");
+      reader.start();
+      reader.join();
+
+      assertEquals(observed.get(), "value");
+      assertEquals(
+          leaseCount(cache),
+          beforeRead,
+          "a read-only thread must not allocate or retain writer budget state");
+    }
+  }
+
+  @Test
+  public void firstWriteLazilyCreatesOnlyOneLeaseForTheThread() throws Exception {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped()) {
+      assertEquals(leaseCount(cache), 0);
+      assertTrue(cache.put("first", "value"));
+      assertTrue(cache.put("second", "value"));
+      assertEquals(leaseCount(cache), 1);
+    }
+  }
+
+  @Test
+  public void closeClearsReaderAndLeaseRegistries() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    assertTrue(cache.put("key", "value"));
+    assertEquals(cache.get("key"), "value");
+    assertTrue(leaseCount(cache) > 0);
+    assertTrue(readerCount(cache) > 0);
+
+    cache.close();
+
+    assertEquals(leaseCount(cache), 0);
+    assertEquals(readerCount(cache), 0);
   }
 
   @Test(timeOut = 30_000L)
@@ -187,6 +249,15 @@ public class WriteAdmissionTest {
       ThreadLocal<ThreadContext> contexts = (ThreadLocal<ThreadContext>) contextsField.get(cache);
       context = contexts.get();
 
+      Field memoryField = OffHeapCache.class.getDeclaredField("memory");
+      memoryField.setAccessible(true);
+      NativeMemory.Memory memory = (NativeMemory.Memory) memoryField.get(cache);
+      Field budgetField = OffHeapCache.class.getDeclaredField("budget");
+      budgetField.setAccessible(true);
+      Budget budget = (Budget) budgetField.get(cache);
+      context.bindWriterResources(
+          memory.writerForCurrentThread(), budget.leaseForCurrentThread());
+
       Field leaseField = ThreadContext.class.getDeclaredField("budgetLease");
       leaseField.setAccessible(true);
       Object lease = leaseField.get(context);
@@ -208,5 +279,23 @@ public class WriteAdmissionTest {
       }
       cache.close();
     }
+  }
+
+  private static int leaseCount(OffHeapCache<?, ?> cache) throws Exception {
+    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
+    budgetField.setAccessible(true);
+    Object budget = budgetField.get(cache);
+    Method count = budget.getClass().getDeclaredMethod("leaseCount");
+    count.setAccessible(true);
+    return (Integer) count.invoke(budget);
+  }
+
+  private static int readerCount(OffHeapCache<?, ?> cache) throws Exception {
+    Field readersField = OffHeapCache.class.getDeclaredField("readers");
+    readersField.setAccessible(true);
+    Object readers = readersField.get(cache);
+    Method count = readers.getClass().getDeclaredMethod("registeredCount");
+    count.setAccessible(true);
+    return (Integer) count.invoke(readers);
   }
 }

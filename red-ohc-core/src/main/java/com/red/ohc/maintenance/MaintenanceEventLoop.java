@@ -830,6 +830,8 @@ public final class MaintenanceEventLoop
   }
 
   private int maintenancePass() {
+    budget.reclaimCollectedLeases(4096);
+    readers.cleanupCollected(4096);
     boolean clockSampled = sampleClockIfDue();
     int work = 0;
     if (budgetPressureRequested.get() && budgetPressureRequested.getAndSet(false)) {
@@ -1424,7 +1426,7 @@ public final class MaintenanceEventLoop
       return 0;
     }
     int work = 0;
-    for (WeakReference<ReaderSlot> reference : readers.snapshot()) {
+    for (WeakReference<ReaderSlot> reference : readers.references()) {
       ReaderSlot slot = reference.get();
       if (slot == null) {
         continue;
@@ -1695,6 +1697,7 @@ public final class MaintenanceEventLoop
     memory.closeArenas();
     budget.returnUnusedCredits();
     budget.clear();
+    readers.clear();
   }
 
   private void clearPendingMutationQueues() {

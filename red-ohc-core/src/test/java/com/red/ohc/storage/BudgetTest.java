@@ -4,14 +4,19 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
@@ -45,25 +50,60 @@ public class BudgetTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void exitedWriterLeaseIsReturnedByMaintenance() throws Exception {
+  public void collectedOwnerLeaseIsRemovedAndCreditIsReturnedOnce() throws Exception {
     Budget budget = new Budget(1 << 20);
-    java.util.concurrent.ExecutorService executor =
-        java.util.concurrent.Executors.newSingleThreadExecutor();
-    java.util.concurrent.Future<Budget.Lease> future =
-        executor.submit(
+    AtomicReference<Budget.Lease> observed = new AtomicReference<>();
+    Thread owner =
+        new Thread(
             () -> {
               Budget.Lease lease = budget.leaseForCurrentThread();
               assertTrue(budget.tryReserve(lease, 64L));
-              return lease;
-            });
-    Budget.Lease lease = future.get(1L, java.util.concurrent.TimeUnit.SECONDS);
-    executor.shutdown();
-    assertTrue(executor.awaitTermination(1L, java.util.concurrent.TimeUnit.SECONDS));
-    budget.reclaimDeadLeases();
-    assertEquals(lease.credit(), 0L);
-    assertEquals(budget.reserved(), 64L, "the admitted native allocation is still resident");
+              observed.set(lease);
+            },
+            "short-lived-budget-owner");
+    owner.start();
+    owner.join();
+
+    Budget.Lease lease = observed.get();
+    Field ownerField = Budget.Lease.class.getDeclaredField("ownerThread");
+    ownerField.setAccessible(true);
+    WeakReference<?> ownerReference = (WeakReference<?>) ownerField.get(lease);
+    ownerReference.clear();
+    assertTrue(
+        ownerReference.enqueue(),
+        "the owner reference must be attached to a ReferenceQueue for event-driven cleanup");
+
+    assertEquals(reclaimCollectedLeases(budget, 16), 1);
+    assertEquals(leaseCount(budget), 0);
+    assertEquals(budget.reserved(), 64L, "only the admitted allocation remains resident");
+
+    assertEquals(reclaimCollectedLeases(budget, 16), 0);
+    assertEquals(budget.reserved(), 64L, "cleanup must not return the same credit twice");
     budget.release(64L);
     assertEquals(budget.reserved(), 0L);
+  }
+
+  @Test
+  public void collectedCleanupLimitCountsAlreadyRemovedQueueRecords() throws Exception {
+    Budget budget = new Budget(1 << 20);
+    Budget.Lease first = budget.leaseForCurrentThread();
+    Budget.Lease second = budget.leaseForCurrentThread();
+    Set<?> leases = leases(budget);
+    assertTrue(leases.remove(first));
+    assertTrue(leases.remove(second));
+    WeakReference<?> firstOwner = ownerReference(first);
+    WeakReference<?> secondOwner = ownerReference(second);
+    firstOwner.clear();
+    secondOwner.clear();
+    assertTrue(firstOwner.enqueue());
+    assertTrue(secondOwner.enqueue());
+
+    assertEquals(reclaimCollectedLeases(budget, 1), 0);
+
+    Field queueField = Budget.class.getDeclaredField("collectedOwners");
+    queueField.setAccessible(true);
+    ReferenceQueue<?> queue = (ReferenceQueue<?>) queueField.get(budget);
+    assertTrue(queue.poll() != null, "one stale queue record must remain after a one-record pass");
   }
 
   @Test
@@ -211,6 +251,29 @@ public class BudgetTest {
     Field stateField = lease.getClass().getDeclaredField("state");
     stateField.setAccessible(true);
     return (AtomicInteger) stateField.get(lease);
+  }
+
+  private static int reclaimCollectedLeases(Budget budget, int limit) throws Exception {
+    Method method = Budget.class.getDeclaredMethod("reclaimCollectedLeases", int.class);
+    method.setAccessible(true);
+    return (Integer) method.invoke(budget, limit);
+  }
+
+  private static int leaseCount(Budget budget) throws Exception {
+    return budget.leaseCount();
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Set<Budget.Lease> leases(Budget budget) throws Exception {
+    Field leasesField = Budget.class.getDeclaredField("leases");
+    leasesField.setAccessible(true);
+    return (Set<Budget.Lease>) leasesField.get(budget);
+  }
+
+  private static WeakReference<?> ownerReference(Budget.Lease lease) throws Exception {
+    Field ownerField = Budget.Lease.class.getDeclaredField("ownerThread");
+    ownerField.setAccessible(true);
+    return (WeakReference<?>) ownerField.get(lease);
   }
 
 }

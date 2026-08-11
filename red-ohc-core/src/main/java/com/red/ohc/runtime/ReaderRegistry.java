@@ -1,7 +1,10 @@
 package com.red.ohc.runtime;
 
+import java.lang.ref.Reference;
+import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Cache-local weak reader registry. A ThreadContext belongs to its thread, not the cache: once a
@@ -9,49 +12,41 @@ import java.util.concurrent.atomic.AtomicReference;
  * ThreadLocal graph alive indefinitely.
  */
 public final class ReaderRegistry {
-  @SuppressWarnings("unchecked")
-  private static final WeakReference<ReaderSlot>[] EMPTY = new WeakReference[0];
+  private static final int REGISTER_CLEANUP_LIMIT = 4;
 
-  private final AtomicReference<WeakReference<ReaderSlot>[]> slots = new AtomicReference<>(EMPTY);
+  private final ReferenceQueue<ReaderSlot> collectedReaders = new ReferenceQueue<>();
+  private final Set<WeakReference<ReaderSlot>> slots = ConcurrentHashMap.newKeySet();
 
   public void register(ReaderSlot slot) {
-    while (true) {
-      WeakReference<ReaderSlot>[] current = slots.get();
-      int live = 0;
-      for (WeakReference<ReaderSlot> reference : current) {
-        ReaderSlot existing = reference.get();
-        if (existing == slot) {
-          return;
-        }
-        if (existing != null) {
-          live++;
-        }
-      }
-      @SuppressWarnings("unchecked")
-      WeakReference<ReaderSlot>[] updated = new WeakReference[live + 1];
-      int index = 0;
-      for (WeakReference<ReaderSlot> reference : current) {
-        if (reference.get() != null) {
-          updated[index++] = reference;
-        }
-      }
-      updated[index] = new WeakReference<>(slot);
-      if (slots.compareAndSet(current, updated)) {
-        return;
-      }
-    }
+    cleanupCollected(REGISTER_CLEANUP_LIMIT);
+    slots.add(new IdentityWeakReference(slot, collectedReaders));
   }
 
-  /**
-   * Actor-side snapshot. Cleared weak references are compacted only when registration or scan runs.
-   */
-  public WeakReference<ReaderSlot>[] snapshot() {
-    compactCleared();
-    return slots.get();
+  /** Weakly consistent live view for actor and close-side scans. */
+  public Iterable<WeakReference<ReaderSlot>> references() {
+    return slots;
+  }
+
+  /** Removes at most {@code limit} reader identities reported by the ReferenceQueue. */
+  public int cleanupCollected(int limit) {
+    if (limit <= 0) {
+      return 0;
+    }
+    int removed = 0;
+    for (int processed = 0; processed < limit; processed++) {
+      Reference<? extends ReaderSlot> reference = collectedReaders.poll();
+      if (reference == null) {
+        break;
+      }
+      if (slots.remove(reference)) {
+        removed++;
+      }
+    }
+    return removed;
   }
 
   public boolean hasActiveReader() {
-    for (WeakReference<ReaderSlot> reference : snapshot()) {
+    for (WeakReference<ReaderSlot> reference : slots) {
       ReaderSlot slot = reference.get();
       if (slot != null && slot.epoch != 0L) {
         return true;
@@ -64,7 +59,7 @@ public final class ReaderRegistry {
    * Close-side scan of distributed writer admission flags; normal writers never share a counter.
    */
   public boolean hasActiveWriter() {
-    for (WeakReference<ReaderSlot> reference : snapshot()) {
+    for (WeakReference<ReaderSlot> reference : slots) {
       ReaderSlot slot = reference.get();
       if (slot != null && slot.writerActive) {
         return true;
@@ -75,7 +70,7 @@ public final class ReaderRegistry {
 
   public int activeWriterCount() {
     int count = 0;
-    for (WeakReference<ReaderSlot> reference : snapshot()) {
+    for (WeakReference<ReaderSlot> reference : slots) {
       ReaderSlot slot = reference.get();
       if (slot != null && slot.writerActive) {
         count++;
@@ -84,29 +79,44 @@ public final class ReaderRegistry {
     return count;
   }
 
-  private void compactCleared() {
-    while (true) {
-      WeakReference<ReaderSlot>[] current = slots.get();
-      int live = 0;
-      for (WeakReference<ReaderSlot> reference : current) {
-        if (reference.get() != null) {
-          live++;
-        }
+  public void clear() {
+    for (WeakReference<ReaderSlot> reference : slots) {
+      reference.clear();
+    }
+    slots.clear();
+    while (collectedReaders.poll() != null) {
+      // Drain references already queued before shutdown.
+    }
+  }
+
+  int registeredCount() {
+    return slots.size();
+  }
+
+  private static final class IdentityWeakReference extends WeakReference<ReaderSlot> {
+    private final int identityHash;
+
+    private IdentityWeakReference(
+        ReaderSlot reader, ReferenceQueue<? super ReaderSlot> collectedReaders) {
+      super(reader, collectedReaders);
+      this.identityHash = System.identityHashCode(reader);
+    }
+
+    @Override
+    public int hashCode() {
+      return identityHash;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
       }
-      if (live == current.length) {
-        return;
+      if (!(other instanceof IdentityWeakReference)) {
+        return false;
       }
-      @SuppressWarnings("unchecked")
-      WeakReference<ReaderSlot>[] updated = new WeakReference[live];
-      int index = 0;
-      for (WeakReference<ReaderSlot> reference : current) {
-        if (reference.get() != null) {
-          updated[index++] = reference;
-        }
-      }
-      if (slots.compareAndSet(current, updated)) {
-        return;
-      }
+      ReaderSlot reader = get();
+      return reader != null && reader == ((IdentityWeakReference) other).get();
     }
   }
 }

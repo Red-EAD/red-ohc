@@ -555,7 +555,7 @@ public final class RetirementQueue {
     }
 
     private static boolean allQuiescentAfter(ReaderRegistry readers, long retireEpoch) {
-      for (WeakReference<ReaderSlot> reference : readers.snapshot()) {
+      for (WeakReference<ReaderSlot> reference : readers.references()) {
         ReaderSlot reader = reference.get();
         if (reader == null) {
           continue;

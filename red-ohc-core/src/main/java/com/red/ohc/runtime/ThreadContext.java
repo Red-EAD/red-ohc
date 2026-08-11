@@ -35,8 +35,8 @@ public final class ThreadContext {
 
   public final ReliableRemovalQueue.Reservation reliableRemoval =
       new ReliableRemovalQueue.Reservation();
-  private final WriterArena writerArena;
-  private final Budget.Lease budgetLease;
+  private WriterArena writerArena;
+  private Budget.Lease budgetLease;
   private long readSequence;
   private long accessSequence;
   private MaintenanceEventLoop maintenance;
@@ -117,6 +117,24 @@ public final class ThreadContext {
 
   public Budget.Lease budgetLease() {
     return budgetLease;
+  }
+
+  public boolean hasWriterResources() {
+    return writerArena != null;
+  }
+
+  public void bindWriterResources(WriterArena writerArena, Budget.Lease budgetLease) {
+    if (writerArena == null || budgetLease == null) {
+      throw new IllegalArgumentException("writer arena and budget lease are required");
+    }
+    if (this.writerArena != null || this.budgetLease != null) {
+      if (this.writerArena != writerArena || this.budgetLease != budgetLease) {
+        throw new IllegalStateException("writer resources are already bound");
+      }
+      return;
+    }
+    this.writerArena = writerArena;
+    this.budgetLease = budgetLease;
   }
 
   public boolean tryActivateWriter() {

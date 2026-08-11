@@ -1,7 +1,9 @@
 package com.red.ohc.storage;
 
+import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -18,7 +20,8 @@ public final class Budget {
   /** Capacity that is neither resident nor temporarily assigned to a writer stripe. */
   private final AtomicLong available;
 
-  private final ConcurrentLinkedQueue<Lease> leases = new ConcurrentLinkedQueue<>();
+  private final ReferenceQueue<Thread> collectedOwners = new ReferenceQueue<>();
+  private final Set<Lease> leases = ConcurrentHashMap.newKeySet();
 
   public Budget(long capacity) {
     if (capacity <= 0L) {
@@ -30,7 +33,7 @@ public final class Budget {
 
   /** Creates the cache-local lease used by a writer thread for small allocations. */
   public Lease leaseForCurrentThread() {
-    Lease lease = new Lease(this, Thread.currentThread());
+    Lease lease = new Lease(this, Thread.currentThread(), collectedOwners);
     leases.add(lease);
     return lease;
   }
@@ -109,6 +112,10 @@ public final class Budget {
     return capacity;
   }
 
+  int leaseCount() {
+    return leases.size();
+  }
+
   /** Returns unused writer leases during shutdown; no writer may be active then. */
   public void returnUnusedCredits() {
     for (Lease lease : leases) {
@@ -119,9 +126,30 @@ public final class Budget {
     }
   }
 
-  /** Reclaims leases whose owning thread has exited; called by the cache worker. */
-  public void reclaimDeadLeases() {
-    reclaimIdleLeases();
+  /** Reclaims collected writer leases without scanning live threads. */
+  public int reclaimCollectedLeases(int limit) {
+    if (limit <= 0) {
+      return 0;
+    }
+    int reclaimed = 0;
+    for (int processed = 0; processed < limit; processed++) {
+      OwnerReference owner = (OwnerReference) collectedOwners.poll();
+      if (owner == null) {
+        break;
+      }
+      Lease lease = owner.lease();
+      owner.clearLease();
+      if (lease == null || !leases.remove(lease)) {
+        continue;
+      }
+      if (!lease.state.compareAndSet(Lease.IDLE, Lease.RECLAIMING)) {
+        throw new IllegalStateException("collected owner still has an active budget lease");
+      }
+      returnCredit(lease);
+      lease.state.set(Lease.IDLE);
+      reclaimed++;
+    }
+    return reclaimed;
   }
 
   /** Returns credit from any lease that is not currently owned by a writer. */
@@ -147,6 +175,12 @@ public final class Budget {
         throw new IllegalStateException("cannot clear an active budget lease");
       }
       lease.credit = 0L;
+      lease.ownerThread.clear();
+      lease.ownerThread.clearLease();
+    }
+    leases.clear();
+    while (collectedOwners.poll() != null) {
+      // Drain references already queued before shutdown.
     }
     available.set(capacity);
   }
@@ -161,16 +195,17 @@ public final class Budget {
 
   public static final class Lease {
     private final Budget owner;
-    private final WeakReference<Thread> ownerThread;
+    private final OwnerReference ownerThread;
     private static final int IDLE = 0;
     private static final int ACTIVE = 1;
     private static final int RECLAIMING = 2;
     private final AtomicInteger state = new AtomicInteger(IDLE);
     private long credit;
 
-    private Lease(Budget owner, Thread ownerThread) {
+    private Lease(
+        Budget owner, Thread ownerThread, ReferenceQueue<? super Thread> collectedOwners) {
       this.owner = owner;
-      this.ownerThread = new WeakReference<>(ownerThread);
+      this.ownerThread = new OwnerReference(ownerThread, collectedOwners, this);
     }
 
     public long credit() {
@@ -203,6 +238,24 @@ public final class Budget {
     public boolean ownerAlive() {
       Thread owner = ownerThread.get();
       return owner != null && owner.isAlive();
+    }
+  }
+
+  private static final class OwnerReference extends WeakReference<Thread> {
+    private Lease lease;
+
+    private OwnerReference(
+        Thread owner, ReferenceQueue<? super Thread> collectedOwners, Lease lease) {
+      super(owner, collectedOwners);
+      this.lease = lease;
+    }
+
+    private Lease lease() {
+      return lease;
+    }
+
+    private void clearLease() {
+      lease = null;
     }
   }
 }
