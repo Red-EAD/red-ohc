@@ -90,20 +90,20 @@ public class OHCSerializedBenchmark {
 
   @Benchmark
   @Threads(1)
-  public void oneThread(ThreadState state, Blackhole blackhole) {
-    access(state, blackhole);
+  public void oneThread(ThreadState state, Blackhole blackhole, WriteResults results) {
+    access(state, blackhole, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
-  public void cpuThreads(ThreadState state, Blackhole blackhole) {
-    access(state, blackhole);
+  public void cpuThreads(ThreadState state, Blackhole blackhole, WriteResults results) {
+    access(state, blackhole, results);
   }
 
-  private void access(ThreadState state, Blackhole blackhole) {
+  private void access(ThreadState state, Blackhole blackhole, WriteResults results) {
     int index = dataset.accessSequence[state.cursor++ & (dataset.accessSequence.length - 1)];
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
-      blackhole.consume(cache.put(dataset.keys[index], dataset.values[index]));
+      results.record(cache.put(dataset.keys[index], dataset.values[index]));
     } else {
       blackhole.consume(SerializedBenchmarkSupport.firstLong(cache.get(dataset.keys[index])));
     }

@@ -56,14 +56,14 @@ public class AllocatorBenchmark {
 
   @Benchmark
   @Threads(1)
-  public boolean putOneThread(KeyState state) {
-    return cache.put(state.next(), value);
+  public void putOneThread(KeyState state, WriteResults results) {
+    results.record(cache.put(state.next(), value));
   }
 
   @Benchmark
   @Threads(Threads.MAX)
-  public boolean putCpuThreads(KeyState state) {
-    return cache.put(state.next(), value);
+  public void putCpuThreads(KeyState state, WriteResults results) {
+    results.record(cache.put(state.next(), value));
   }
 
   @State(Scope.Thread)

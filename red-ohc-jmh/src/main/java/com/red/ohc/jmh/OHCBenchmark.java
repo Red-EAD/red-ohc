@@ -124,14 +124,16 @@ public class OHCBenchmark {
 
   @Benchmark
   @Threads(1)
-  public void ohcDirectOneThread(ThreadState state, Blackhole blackhole) {
-    accessOHC(state, blackhole);
+  public void ohcDirectOneThread(
+      ThreadState state, Blackhole blackhole, WriteResults results) {
+    accessOHC(state, blackhole, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
-  public void ohcDirectCpuThreads(ThreadState state, Blackhole blackhole) {
-    accessOHC(state, blackhole);
+  public void ohcDirectCpuThreads(
+      ThreadState state, Blackhole blackhole, WriteResults results) {
+    accessOHC(state, blackhole, results);
   }
 
   @Benchmark
@@ -141,10 +143,10 @@ public class OHCBenchmark {
     blackhole.consume(ohc.getDirectAll(directBatchKeys, state));
   }
 
-  private void accessOHC(ThreadState state, Blackhole blackhole) {
+  private void accessOHC(ThreadState state, Blackhole blackhole, WriteResults results) {
     int index = state.next(accessSequence);
     if (state.write(workload)) {
-      blackhole.consume(ohc.putEncoded(encodedKeys[index], values[index]));
+      results.record(ohc.putEncoded(encodedKeys[index], values[index]));
       return;
     }
     state.blackhole = blackhole;

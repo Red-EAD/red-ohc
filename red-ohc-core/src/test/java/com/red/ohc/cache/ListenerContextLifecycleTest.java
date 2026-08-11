@@ -1,5 +1,6 @@
 package com.red.ohc.cache;
 
+import static org.testng.Assert.assertNotSame;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
@@ -30,6 +31,13 @@ public final class ListenerContextLifecycleTest {
     }
   }
 
+  @Test
+  public void listenerActorContextIsSeparateFromNestedBusinessContext() throws Exception {
+    try (OffHeapCache<String, String> cache = newCache((key, value, cause) -> {})) {
+      assertNotSame(evictionContext(cache), businessContext(cache));
+    }
+  }
+
   private static OffHeapCache<String, String> newCache(
       com.red.ohc.api.EvictionListener<String, String> listener) {
     OHCacheBuilder<String, String> builder =
@@ -47,5 +55,11 @@ public final class ListenerContextLifecycleTest {
     Field field = OffHeapCache.class.getDeclaredField("evictionContexts");
     field.setAccessible(true);
     return field.get(cache);
+  }
+
+  private static Object businessContext(OffHeapCache<?, ?> cache) throws Exception {
+    Field field = OffHeapCache.class.getDeclaredField("contexts");
+    field.setAccessible(true);
+    return ((ThreadLocal<?>) field.get(cache)).get();
   }
 }

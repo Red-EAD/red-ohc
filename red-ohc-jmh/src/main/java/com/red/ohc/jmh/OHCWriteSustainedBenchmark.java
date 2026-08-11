@@ -92,23 +92,21 @@ public class OHCWriteSustainedBenchmark {
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(WriteCursor cursor) {
-    write(cursor);
+  public void oneThread(WriteCursor cursor, WriteResults results) {
+    write(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(WriteCursor cursor) {
-    write(cursor);
+  public void cpuThreads(WriteCursor cursor, WriteResults results) {
+    write(cursor, results);
   }
 
-  private void write(WriteCursor cursor) {
+  private void write(WriteCursor cursor, WriteResults results) {
     for (int i = 0; i < BATCH_SIZE; i++) {
       int index = cursor.next();
-      if (!cache.putEncoded(keys[index], values[index])) {
-        throw new IllegalStateException("OHC sustained write rejected");
-      }
+      results.record(cache.putEncoded(keys[index], values[index]));
     }
   }
 

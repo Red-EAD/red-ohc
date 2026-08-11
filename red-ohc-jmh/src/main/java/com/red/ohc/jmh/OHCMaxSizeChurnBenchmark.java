@@ -2,7 +2,6 @@ package com.red.ohc.jmh;
 
 import java.util.concurrent.TimeUnit;
 
-import org.openjdk.jmh.annotations.AuxCounters;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -94,25 +93,21 @@ public class OHCMaxSizeChurnBenchmark {
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(Cursor cursor, Results results) {
+  public void oneThread(Cursor cursor, WriteResults results) {
     churn(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(Cursor cursor, Results results) {
+  public void cpuThreads(Cursor cursor, WriteResults results) {
     churn(cursor, results);
   }
 
-  private void churn(Cursor cursor, Results results) {
+  private void churn(Cursor cursor, WriteResults results) {
     for (int index = 0; index < BATCH_SIZE; index++) {
       int slot = cursor.next();
-      if (cache.putEncoded(keys[slot], values[slot])) {
-        results.accepted++;
-      } else {
-        results.rejected++;
-      }
+      results.record(cache.putEncoded(keys[slot], values[slot]));
     }
   }
 
@@ -136,10 +131,4 @@ public class OHCMaxSizeChurnBenchmark {
     }
   }
 
-  @AuxCounters(AuxCounters.Type.EVENTS)
-  @State(Scope.Thread)
-  public static class Results {
-    public long accepted;
-    public long rejected;
-  }
 }

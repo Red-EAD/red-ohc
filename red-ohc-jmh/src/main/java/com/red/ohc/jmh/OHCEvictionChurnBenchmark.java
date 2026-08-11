@@ -121,23 +121,21 @@ public class OHCEvictionChurnBenchmark {
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(Cursor cursor) {
-    churn(cursor);
+  public void oneThread(Cursor cursor, WriteResults results) {
+    churn(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(Cursor cursor) {
-    churn(cursor);
+  public void cpuThreads(Cursor cursor, WriteResults results) {
+    churn(cursor, results);
   }
 
-  private void churn(Cursor cursor) {
+  private void churn(Cursor cursor, WriteResults results) {
     for (int index = 0; index < BATCH_SIZE; index++) {
       int slot = cursor.next();
-      if (!cache.putEncoded(keys[slot], values[slot])) {
-        throw new IllegalStateException("OHC eviction churn write rejected");
-      }
+      results.record(cache.putEncoded(keys[slot], values[slot]));
     }
   }
 
