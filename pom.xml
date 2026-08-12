@@ -85,7 +85,7 @@
                     </dependency>
                 </dependencies>
                 <configuration>
-                    <configLocation>config/checkstyle/checkstyle.xml</configLocation>
+                    <configLocation>${maven.multiModuleProjectDirectory}/config/checkstyle/checkstyle.xml</configLocation>
                     <includeTestSourceDirectory>true</includeTestSourceDirectory>
                     <excludeGeneratedSources>true</excludeGeneratedSources>
                     <consoleOutput>true</consoleOutput>
