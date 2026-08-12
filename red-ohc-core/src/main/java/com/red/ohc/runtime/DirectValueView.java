@@ -12,12 +12,14 @@ public final class DirectValueView implements ValueView {
 
   private long address;
   private int length;
+  private ThreadContext context;
   private ByteBuffer byteBuffer;
 
-  void reset(long address, int length, ByteBuffer byteBuffer) {
+  void reset(long address, int length, ThreadContext context) {
     this.address = address;
     this.length = length;
-    this.byteBuffer = byteBuffer;
+    this.context = context;
+    this.byteBuffer = null;
   }
 
   @Override
@@ -54,9 +56,18 @@ public final class DirectValueView implements ValueView {
   public ByteBuffer asReadOnlyByteBuffer() {
     ByteBuffer current = byteBuffer;
     if (current == null) {
-      throw new IllegalStateException("direct value view is not active");
+      ThreadContext owner = context;
+      if (owner == null) {
+        throw new IllegalStateException("direct value view is not active");
+      }
+      current = owner.readOnlyValueBuffer(address, length);
+      byteBuffer = current;
     }
     return current;
+  }
+
+  boolean hasMaterializedByteBuffer() {
+    return byteBuffer != null;
   }
 
   private void check(int offset, int bytes) {
@@ -66,7 +77,7 @@ public final class DirectValueView implements ValueView {
   }
 
   private void ensureActive() {
-    if (byteBuffer == null) {
+    if (context == null) {
       throw new IllegalStateException("direct value view is not active");
     }
   }

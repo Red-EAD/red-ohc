@@ -23,6 +23,16 @@ import org.testng.annotations.Test;
 
 public class BudgetTest {
   @Test
+  public void successfulReserveAndRefundDoNotUpdateAGlobalIdleHint() {
+    try {
+      Budget.class.getDeclaredField("idleCreditHint");
+      throw new AssertionError("successful stripe operations must not use a global idle hint");
+    } catch (NoSuchFieldException expected) {
+      // The dirty stripe queue is the only producer-to-actor idle-credit signal.
+    }
+  }
+
+  @Test
   public void boundedCasBudgetUsesTheCachedLogicalCpuCount() throws Exception {
     Field field = Budget.class.getDeclaredField("MAX_RESERVE_RETRIES");
     field.setAccessible(true);

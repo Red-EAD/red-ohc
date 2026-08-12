@@ -9,7 +9,12 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractCollection;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -328,6 +333,70 @@ public class CloseConcurrencyTest {
       assertEquals(cache.totalAllocatedBytes(), 0L);
     } finally {
       releaseDeserialize.countDown();
+      callers.shutdownNow();
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void closeWaitsForBulkReadBetweenReaderChunks() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .closeTimeoutMillis(1_000L)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    CountDownLatch boundaryReached = new CountDownLatch(1);
+    CountDownLatch releaseBoundary = new CountDownLatch(1);
+    List<String> keys = new ArrayList<>();
+    for (int index = 0; index < 8_192; index++) {
+      keys.add("missing-bulk-" + index);
+    }
+    Collection<String> blockingKeys =
+        new AbstractCollection<String>() {
+          @Override
+          public Iterator<String> iterator() {
+            Iterator<String> delegate = keys.iterator();
+            return new Iterator<String>() {
+              private int seen;
+
+              @Override
+              public boolean hasNext() {
+                if (seen == 4_096) {
+                  boundaryReached.countDown();
+                  await(releaseBoundary);
+                }
+                return delegate.hasNext();
+              }
+
+              @Override
+              public String next() {
+                seen++;
+                return delegate.next();
+              }
+            };
+          }
+
+          @Override
+          public int size() {
+            return keys.size();
+          }
+        };
+    try {
+      Future<Map<String, String>> read = callers.submit(() -> cache.getAll(blockingKeys));
+      assertTrue(boundaryReached.await(2L, TimeUnit.SECONDS));
+
+      Future<?> close = callers.submit(cache::close);
+      Thread.sleep(100L);
+      assertFalse(close.isDone(), "close must wait for the complete bulk operation");
+
+      releaseBoundary.countDown();
+      assertTrue(read.get(2L, TimeUnit.SECONDS).isEmpty());
+      close.get(2L, TimeUnit.SECONDS);
+    } finally {
+      releaseBoundary.countDown();
       callers.shutdownNow();
       cache.close();
     }

@@ -80,11 +80,7 @@ public final class MaintenancePolicy {
     this.protectedMaximum = Math.max(1L, mainMaximum * 80L / 100L);
     this.hillStep = -Math.max(HILL_MIN_STEP, capacity * HILL_INITIAL_STEP_PERCENT);
     this.ghostMaximum = Math.max(1L, capacity - smallMaximum);
-    this.ghost =
-        eviction == Eviction.S3_FIFO
-            ? new LinkedHashMap<>(
-                (int) Math.min(1_048_576L, Math.max(256L, plannedEntries)) * 4 / 3 + 1)
-            : null;
+    this.ghost = eviction == Eviction.S3_FIFO ? new LinkedHashMap<>() : null;
   }
 
   public void add(Entry entry) {

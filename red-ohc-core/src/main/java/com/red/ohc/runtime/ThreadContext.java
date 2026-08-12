@@ -213,28 +213,22 @@ public final class ThreadContext {
   }
 
   public DirectValueView pushDirectView(long address, int length) {
-    ByteBuffer buffer = readOnlyValueBuffer(address, length);
-    try {
-      if (directViews == null) {
-        directViews = new DirectValueView[4];
-      }
-      if (directViewDepth == directViews.length) {
-        DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
-        System.arraycopy(directViews, 0, expanded, 0, directViews.length);
-        directViews = expanded;
-      }
-      DirectValueView view = directViews[directViewDepth];
-      if (view == null) {
-        view = new DirectValueView();
-        directViews[directViewDepth] = view;
-      }
-      directViewDepth++;
-      view.reset(address, length, buffer);
-      return view;
-    } catch (Throwable failure) {
-      releaseReadOnlyValueBuffer();
-      throw failure;
+    if (directViews == null) {
+      directViews = new DirectValueView[4];
     }
+    if (directViewDepth == directViews.length) {
+      DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
+      System.arraycopy(directViews, 0, expanded, 0, directViews.length);
+      directViews = expanded;
+    }
+    DirectValueView view = directViews[directViewDepth];
+    if (view == null) {
+      view = new DirectValueView();
+      directViews[directViewDepth] = view;
+    }
+    directViewDepth++;
+    view.reset(address, length, this);
+    return view;
   }
 
   public void popDirectView() {
@@ -243,9 +237,11 @@ public final class ThreadContext {
     }
     DirectValueView view = directViews[--directViewDepth];
     try {
-      view.reset(0L, 0, null);
+      if (view.hasMaterializedByteBuffer()) {
+        releaseReadOnlyValueBuffer();
+      }
     } finally {
-      releaseReadOnlyValueBuffer();
+      view.reset(0L, 0, null);
     }
   }
 
@@ -259,7 +255,9 @@ public final class ThreadContext {
     boolean reusable = expected <= MAX_REUSABLE_BULK_KEYS;
     Set<Entry> entries = bulkEntrySets[depth];
     if (!reusable || entries == null || bulkEntrySetCapacities[depth] < expected) {
-      entries = Collections.newSetFromMap(new IdentityHashMap<>(expected));
+      entries =
+          Collections.newSetFromMap(
+              new IdentityHashMap<>(Math.min(expected, MAX_REUSABLE_BULK_KEYS)));
       bulkEntrySets[depth] = entries;
       bulkEntrySetCapacities[depth] = reusable ? expected : 0;
     } else {

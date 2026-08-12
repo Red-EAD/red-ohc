@@ -598,6 +598,74 @@ public class BulkCacheTest {
   }
 
   @Test
+  public void bulkReadsReleaseTheReaderLeaseAtTheBoundedChunkBoundary() throws Exception {
+    try (OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>)
+            OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build()) {
+      List<String> missing = new ArrayList<>();
+      for (int index = 0; index < 8_192; index++) {
+        missing.add("missing-bulk-" + index);
+      }
+      com.red.ohc.runtime.ThreadContext context = threadContext(cache);
+      AtomicBoolean directLeaseReleased = new AtomicBoolean();
+      assertEquals(
+          cache.getDirectAll(
+              observingChunkBoundary(missing, context, directLeaseReleased),
+              (key, value) -> {}),
+          0);
+      assertTrue(directLeaseReleased.get());
+
+      AtomicBoolean deserializedLeaseReleased = new AtomicBoolean();
+      assertTrue(
+          cache
+              .getAll(observingChunkBoundary(missing, context, deserializedLeaseReleased))
+              .isEmpty());
+      assertTrue(deserializedLeaseReleased.get());
+      assertEquals(context.readerDepth(), 0);
+    }
+  }
+
+  private static Collection<String> observingChunkBoundary(
+      List<String> keys,
+      com.red.ohc.runtime.ThreadContext context,
+      AtomicBoolean released) {
+    return new AbstractCollection<String>() {
+      @Override
+      public Iterator<String> iterator() {
+        Iterator<String> delegate = keys.iterator();
+        return new Iterator<String>() {
+          private int seen;
+          private boolean observed;
+
+          @Override
+          public boolean hasNext() {
+            if (seen == 4_096 && !observed) {
+              observed = true;
+              released.set(context.readerDepth() == 0);
+            }
+            return delegate.hasNext();
+          }
+
+          @Override
+          public String next() {
+            seen++;
+            return delegate.next();
+          }
+        };
+      }
+
+      @Override
+      public int size() {
+        return keys.size();
+      }
+    };
+  }
+
+  @Test
   public void nestedDirectAllKeepsTheOuterViewUsable() {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()

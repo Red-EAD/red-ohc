@@ -46,6 +46,9 @@ public final class MaintenanceEventLoop
   private static final long EVICTION_RETRY_MAX_NANOS = 10_000_000L;
   private static final long RECLAIM_RETRY_INITIAL_NANOS = WINDOW_NANOS;
   private static final long RECLAIM_RETRY_MAX_NANOS = 10_000_000L;
+  private static final long ACTOR_TIME_BUDGET_NANOS = 250_000L;
+  private static final int ACTOR_MAX_WORK_PER_PASS = 4_096;
+  private static final int ACTOR_TIME_CHECK_INTERVAL = 64;
 
   /**
    * A deferred mutation has a writer in progress. Retry it with bounded backoff rather than
@@ -406,7 +409,8 @@ public final class MaintenanceEventLoop
   }
 
   public long asyncMutationQueueDepth() {
-    return asyncMutations.size();
+    long depth = asyncSubmitted.get() - asyncCompletedSequence;
+    return Math.max(0L, depth);
   }
 
   public long asyncMutationFailedCount() {
@@ -869,55 +873,76 @@ public final class MaintenanceEventLoop
     if (plan.hasPolicyMutations()) {
       policy.beginWriteBatch();
     }
-    if (plan.removals) {
-      work += drainReliableRemovals(batchLimits.general);
-    }
-    if (plan.mutations) {
-      work += drainMutations(batchLimits.general);
-    }
-    if (plan.repair) {
-      work += repairMutations(batchLimits.general);
-    }
-    if (plan.deferred) {
-      work += drainDeferredMutations(batchLimits.general);
-    }
-    if (plan.access) {
-      work += drainAccesses(batchLimits.access);
-    }
-    // Expiry/eviction runs after mutation repair so actor policy never observes a stale
-    // pointer or pending flag.
-    if (plan.ttl) {
-      work += wheel.advance(nowMillis, batchLimits.general, this);
-    }
-    if (plan.seal) {
-      work += sealRetirements(batchLimits.general);
-    }
-    if (plan.reclaim) {
-      if (advanceEpochIfDue(nowNanos)) {
-        work++;
+    long deadline = saturatingAdd(System.nanoTime(), ACTOR_TIME_BUDGET_NANOS);
+    while (true) {
+      int roundWork = 0;
+      if (plan.removals) {
+        roundWork += drainReliableRemovals(roundLimit(batchLimits.general, work, roundWork));
       }
-      if (reclaimWorkDue(nowNanos)) {
-        work += reclaim(batchLimits.general);
+      if (plan.mutations) {
+        roundWork += drainMutations(roundLimit(batchLimits.general, work, roundWork));
       }
-    }
-    if (plan.eviction) {
-      try {
-        work += evictIfNeeded(batchLimits.eviction);
-      } finally {
-        finishActorRetirementBatch();
+      if (plan.repair) {
+        roundWork += repairMutations(roundLimit(batchLimits.general, work, roundWork));
       }
-    }
-    if (plan.allocation && allocationPressureRequested.getAndSet(false)) {
-      work += memory.trimIdlePages() > 0L ? 1 : 0;
-    }
-    if (plan.async) {
-      work += drainAsyncMutations(batchLimits.async);
+      if (plan.deferred) {
+        roundWork += drainDeferredMutations(roundLimit(batchLimits.general, work, roundWork));
+      }
+      if (plan.access) {
+        roundWork += drainAccesses(roundLimit(batchLimits.access, work, roundWork));
+      }
+      // Expiry/eviction runs after mutation repair so actor policy never observes a stale
+      // pointer or pending flag.
+      if (plan.ttl) {
+        roundWork +=
+            wheel.advance(
+                nowMillis, roundLimit(batchLimits.general, work, roundWork), this);
+      }
+      if (plan.seal) {
+        roundWork += sealRetirements(roundLimit(batchLimits.general, work, roundWork));
+      }
+      if (plan.reclaim) {
+        if (advanceEpochIfDue(nowNanos)) {
+          roundWork++;
+        }
+        if (reclaimWorkDue(nowNanos)) {
+          roundWork += reclaim(roundLimit(batchLimits.general, work, roundWork));
+        }
+      }
+      if (plan.eviction) {
+        try {
+          roundWork +=
+              evictIfNeeded(roundLimit(batchLimits.eviction, work, roundWork));
+        } finally {
+          finishActorRetirementBatch();
+        }
+      }
+      if (plan.allocation && allocationPressureRequested.getAndSet(false)) {
+        roundWork += memory.trimIdlePages() > 0L ? 1 : 0;
+      }
+      if (plan.async) {
+        roundWork +=
+            drainAsyncMutations(roundLimit(batchLimits.async, work, roundWork));
+      }
+      work += roundWork;
+      if (roundWork == 0
+          || work >= ACTOR_MAX_WORK_PER_PASS
+          || (work >= ACTOR_TIME_CHECK_INTERVAL && System.nanoTime() >= deadline)
+          || (!hasContinuationWork() && requestedWork.get() == 0)) {
+        break;
+      }
     }
     publishLiveWeight();
     if (plan.flush) {
       completeFlushIfIdle();
     }
     return work;
+  }
+
+  private static int roundLimit(int configured, int work, int roundWork) {
+    int remainingQuantum = ACTOR_TIME_CHECK_INTERVAL - roundWork;
+    int remainingPass = ACTOR_MAX_WORK_PER_PASS - work - roundWork;
+    return Math.min(configured, Math.max(0, Math.min(remainingQuantum, remainingPass)));
   }
 
   private void publishLiveWeight() {
@@ -2040,7 +2065,7 @@ public final class MaintenanceEventLoop
         nextPassNanos = Long.MIN_VALUE;
         return;
       }
-      long next = saturatingAdd(passEndNanos, WINDOW_NANOS);
+      long next = passEndNanos;
       if (retryDeadlineNanos != Long.MIN_VALUE && retryDeadlineNanos > next) {
         next = retryDeadlineNanos;
       }

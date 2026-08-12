@@ -51,7 +51,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void windowSchedulerNeverRunsAFirstOrFollowupPassBeforeOneMillisecond() {
+  public void windowSchedulerKeepsInitialCoalescingButRunsBacklogImmediately() {
     MaintenanceEventLoop.WindowScheduler scheduler = new MaintenanceEventLoop.WindowScheduler();
 
     scheduler.request(100L);
@@ -60,9 +60,40 @@ public class MaintenanceEventLoopTest {
     assertTrue(scheduler.isDue(1_000_100L));
 
     scheduler.complete(1_000_100L, true, Long.MIN_VALUE);
-    assertEquals(scheduler.nextPassNanos(), 2_000_100L);
-    assertFalse(scheduler.isDue(2_000_099L));
-    assertTrue(scheduler.isDue(2_000_100L));
+    assertEquals(scheduler.nextPassNanos(), 1_000_100L);
+    assertTrue(scheduler.isDue(1_000_100L));
+  }
+
+  @Test
+  public void actorWorkQuantumAlsoAppliesToTheFirstRound() throws Exception {
+    Method method =
+        MaintenanceEventLoop.class.getDeclaredMethod("roundLimit", int.class, int.class, int.class);
+    method.setAccessible(true);
+
+    assertEquals((int) method.invoke(null, 256, 0, 0), 64);
+    assertEquals((int) method.invoke(null, 256, 0, 63), 1);
+    assertEquals((int) method.invoke(null, 256, 4_096, 0), 0);
+  }
+
+  @Test
+  public void asyncDepthUsesSubmittedAndCompletedSequences() throws Exception {
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            new NativeMemory.Memory(AllocatorType.JNA),
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    try {
+      AtomicLong submitted = (AtomicLong) getField(loop, "asyncSubmitted");
+      submitted.set(100L);
+      setLongField(loop, "asyncCompletedSequence", 37L);
+      assertEquals(loop.asyncMutationQueueDepth(), 63L);
+    } finally {
+      ((NativeMemory.Memory) getField(loop, "memory")).closeArenas();
+    }
   }
 
   @Test

@@ -1,5 +1,6 @@
 package com.red.ohc.runtime;
 
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertSame;
@@ -73,6 +74,12 @@ public final class ThreadContextLifecycleTest {
     assertNotNull(field("readOnlyValueBuffers").get(context));
 
     DirectValueView view = context.pushDirectView(0L, 0);
+    assertEquals(
+        field("readOnlyValueDepth").getInt(context),
+        0,
+        "primitive direct access must not materialize a ByteBuffer shell");
+    assertEquals(view.length(), 0);
+    assertNotNull(view.asReadOnlyByteBuffer());
     context.popDirectView();
     assertNotNull(view);
     assertNotNull(field("directViews").get(context));

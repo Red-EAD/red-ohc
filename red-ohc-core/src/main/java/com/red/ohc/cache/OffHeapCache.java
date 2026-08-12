@@ -45,6 +45,7 @@ import com.red.ohc.storage.WriterArena;
 /** CHM authority with native payloads and one asynchronous maintenance worker. */
 public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private static final long DEFAULT_TTL = Long.MIN_VALUE;
+  private static final int BULK_READ_CHUNK_SIZE = 4_096;
   private static final int OPEN = 0;
   private static final int CLOSING = 1;
   private static final int CLOSED = 2;
@@ -75,6 +76,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final AtomicInteger closeState = new AtomicInteger(OPEN);
   private final AtomicBoolean shutdownStarted = new AtomicBoolean();
   private final AtomicReference<Thread> closeLeader = new AtomicReference<>();
+  private final AtomicInteger activeBulkOperations = new AtomicInteger();
   private volatile Thread closeWaiter;
   private volatile boolean closing;
   private volatile Runnable flushAdmissionHookForTest;
@@ -329,7 +331,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   private boolean admitNewEntry() {
-    if (data.mappingCount() >= maxSizeHighWatermark) {
+    if (maxSizeHighWatermark != Long.MAX_VALUE
+        && data.mappingCount() >= maxSizeHighWatermark) {
       worker.requestMaintenance();
       return false;
     }
@@ -806,51 +809,60 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   public int getDirectAll(Collection<? extends K> keys, DirectEntryConsumer<K> consumer) {
     Objects.requireNonNull(keys, "keys");
     Objects.requireNonNull(consumer, "consumer");
-    if (closing || keys.isEmpty()) {
+    if (keys.isEmpty() || !beginBulkOperation()) {
       return 0;
     }
 
-    ThreadContext context = contexts.get();
-    int hits = 0;
-    int expected = keys.size();
-    Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
-    boolean guarded = false;
     try {
-      if (!enter(context)) {
-        return 0;
-      }
-      guarded = true;
-      context.beginBulkRead();
-      for (K key : keys) {
-        Objects.requireNonNull(key, "key");
-        KeyEncoder.encode(keySerializer, key, context);
-        Entry entry = data.get(context.lookupKey);
-        long value = valueIfLive(entry);
-        if (value == 0L) {
-          context.bulkMiss();
-        } else {
-          if (!uniqueEntries.add(entry)) {
-            continue;
+      ThreadContext context = contexts.get();
+      int hits = 0;
+      int expected = keys.size();
+      Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
+      try {
+        Iterator<? extends K> iterator = keys.iterator();
+        while (iterator.hasNext()) {
+          if (!enterAfterBulkAdmission(context)) {
+            return hits;
           }
-          context.bulkHit(entry);
-          com.red.ohc.runtime.DirectValueView view =
-              context.pushDirectView(ValueBlock.payloadAddress(value), ValueBlock.length(value));
+          context.beginBulkRead();
           try {
-            consumer.accept(key, view);
-            hits++;
+            int processed = 0;
+            while (processed < BULK_READ_CHUNK_SIZE && iterator.hasNext()) {
+              processed++;
+              K key = Objects.requireNonNull(iterator.next(), "key");
+              KeyEncoder.encode(keySerializer, key, context);
+              Entry entry = data.get(context.lookupKey);
+              long value = valueIfLive(entry);
+              if (value == 0L) {
+                context.bulkMiss();
+              } else {
+                if (!uniqueEntries.add(entry)) {
+                  continue;
+                }
+                context.bulkHit(entry);
+                com.red.ohc.runtime.DirectValueView view =
+                    context.pushDirectView(
+                        ValueBlock.payloadAddress(value), ValueBlock.length(value));
+                try {
+                  consumer.accept(key, view);
+                  hits++;
+                } finally {
+                  context.popDirectView();
+                }
+              }
+            }
           } finally {
-            context.popDirectView();
+            context.finishBulkRead();
+            exit(context);
           }
         }
+      } finally {
+        context.releaseBulkEntries(uniqueEntries);
       }
+      return hits;
     } finally {
-      if (guarded) {
-        context.finishBulkRead();
-        exit(context);
-      }
-      context.releaseBulkEntries(uniqueEntries);
+      endBulkOperation();
     }
-    return hits;
   }
 
   @Override
@@ -899,72 +911,82 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   @Override
   public Map<K, V> getAll(Collection<? extends K> keys) {
     Objects.requireNonNull(keys, "keys");
-    if (closing || keys.isEmpty()) {
+    if (keys.isEmpty() || !beginBulkOperation()) {
       return new HashMap<>();
     }
-    int expected = keys.size();
-    Map<K, V> result = new HashMap<>(resultCapacity(expected));
-    ThreadContext context = contexts.get();
-    Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
-    boolean guarded = false;
+
     try {
-      if (!enter(context)) {
-        return result;
-      }
-      guarded = true;
-      context.beginBulkRead();
-      for (K key : keys) {
-        Objects.requireNonNull(key, "key");
-        KeyEncoder.encode(keySerializer, key, context);
-        Entry entry = data.get(context.lookupKey);
-        long value = valueIfLive(entry);
-        if (value == 0L) {
-          context.bulkMiss();
-        } else {
-          if (!uniqueEntries.add(entry)) {
-            continue;
+      int expected = keys.size();
+      Map<K, V> result = new HashMap<>(resultCapacity(expected));
+      ThreadContext context = contexts.get();
+      Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
+      try {
+        Iterator<? extends K> iterator = keys.iterator();
+        while (iterator.hasNext()) {
+          if (!enterAfterBulkAdmission(context)) {
+            return result;
           }
-          context.bulkHit(entry);
-          Entry.ValueState observedState = entry.valueState();
-          V cached = weakValue(entry, value, observedState);
-          if (cached != null) {
-            result.put(key, cached);
-            continue;
-          }
-          long taggedValue = observedState == null ? 0L : observedState.taggedValueAddress();
-          if (Entry.rawValueAddress(taggedValue) != value || entry.valueAddress != taggedValue) {
-            taggedValue = 0L;
-          }
-          int length = ValueBlock.length(value);
-          ByteBuffer serializedValue =
-              context.readOnlyValueBuffer(ValueBlock.payloadAddress(value), length);
+          context.beginBulkRead();
           try {
-            V deserialized = valueSerializer.deserialize(serializedValue);
-            rejectByteBufferValue(deserialized);
-            result.put(key, deserialized);
-            if (taggedValue != 0L) {
-              publishWeakValueIfCurrent(entry, deserialized, taggedValue, observedState);
+            int processed = 0;
+            while (processed < BULK_READ_CHUNK_SIZE && iterator.hasNext()) {
+              processed++;
+              K key = Objects.requireNonNull(iterator.next(), "key");
+              KeyEncoder.encode(keySerializer, key, context);
+              Entry entry = data.get(context.lookupKey);
+              long value = valueIfLive(entry);
+              if (value == 0L) {
+                context.bulkMiss();
+              } else {
+                if (!uniqueEntries.add(entry)) {
+                  continue;
+                }
+                context.bulkHit(entry);
+                Entry.ValueState observedState = entry.valueState();
+                V cached = weakValue(entry, value, observedState);
+                if (cached != null) {
+                  result.put(key, cached);
+                  continue;
+                }
+                long taggedValue = observedState == null ? 0L : observedState.taggedValueAddress();
+                if (Entry.rawValueAddress(taggedValue) != value || entry.valueAddress != taggedValue) {
+                  taggedValue = 0L;
+                }
+                int length = ValueBlock.length(value);
+                ByteBuffer serializedValue =
+                    context.readOnlyValueBuffer(ValueBlock.payloadAddress(value), length);
+                try {
+                  V deserialized = valueSerializer.deserialize(serializedValue);
+                  rejectByteBufferValue(deserialized);
+                  result.put(key, deserialized);
+                  if (taggedValue != 0L) {
+                    publishWeakValueIfCurrent(entry, deserialized, taggedValue, observedState);
+                  }
+                } finally {
+                  context.releaseReadOnlyValueBuffer();
+                }
+              }
             }
           } finally {
-            context.releaseReadOnlyValueBuffer();
+            context.finishBulkRead();
+            exit(context);
           }
         }
+      } finally {
+        context.releaseBulkEntries(uniqueEntries);
       }
+      return result;
     } finally {
-      if (guarded) {
-        context.finishBulkRead();
-        exit(context);
-      }
-      context.releaseBulkEntries(uniqueEntries);
+      endBulkOperation();
     }
-    return result;
   }
 
   private static int resultCapacity(int requestedEntries) {
-    if (requestedEntries < 3) {
-      return requestedEntries + 1;
+    int boundedEntries = Math.min(requestedEntries, BULK_READ_CHUNK_SIZE);
+    if (boundedEntries < 3) {
+      return boundedEntries + 1;
     }
-    long requested = ((long) requestedEntries * 4L + 2L) / 3L + 1L;
+    long requested = ((long) boundedEntries * 4L + 2L) / 3L + 1L;
     return (int) Math.min(1L << 30, requested);
   }
 
@@ -1530,9 +1552,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     Thread current = Thread.currentThread();
     if (closeLeader.compareAndSet(null, current)) {
       try {
-        if (!awaitWriters(deadline)) {
+        if (!awaitCloseAdmissions(deadline)) {
           throw new IllegalStateException(
-              "close timed out with active writers=" + readers.activeWriterCount());
+              "close timed out with active writers="
+                  + readers.activeWriterCount()
+                  + ", bulk operations="
+                  + activeBulkOperations.get());
         }
         if (shutdownStarted.compareAndSet(false, true)) {
           worker.stop();
@@ -1553,7 +1578,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     if (worker.isAlive()) {
       throw new IllegalStateException(
-          "close timed out with active readers or writers=" + readers.activeWriterCount());
+          "close timed out with active readers, writers, or bulk operations="
+              + readers.activeWriterCount()
+              + ", bulk operations="
+              + activeBulkOperations.get());
     }
     synchronized (lifecycleLock) {
       closeState.compareAndSet(CLOSING, CLOSED);
@@ -1577,8 +1605,31 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return readerGuard.enter(context);
   }
 
+  private boolean enterAfterBulkAdmission(ThreadContext context) {
+    return readerGuard.enterAfterAdmission(context);
+  }
+
   private void exit(ThreadContext context) {
     readerGuard.exit(context);
+  }
+
+  private boolean beginBulkOperation() {
+    synchronized (lifecycleLock) {
+      if (closeState.get() != OPEN) {
+        return false;
+      }
+      activeBulkOperations.incrementAndGet();
+      return true;
+    }
+  }
+
+  private void endBulkOperation() {
+    if (activeBulkOperations.decrementAndGet() == 0) {
+      Thread waiter = closeWaiter;
+      if (waiter != null) {
+        LockSupport.unpark(waiter);
+      }
+    }
   }
 
   private boolean mappingIsCurrent(Entry entry) {
@@ -1713,15 +1764,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
   }
 
-  private boolean awaitWriters(long deadlineNanos) {
+  private boolean awaitCloseAdmissions(long deadlineNanos) {
     closeWaiter = Thread.currentThread();
     try {
-      while (readers.hasActiveWriter()) {
+      while (readers.hasActiveWriter() || activeBulkOperations.get() != 0) {
         long remaining = deadlineNanos - System.nanoTime();
         if (remaining <= 0L) {
           return false;
         }
-        if (readers.hasActiveWriter()) {
+        if (readers.hasActiveWriter() || activeBulkOperations.get() != 0) {
           LockSupport.parkNanos(this, remaining);
         }
         if (Thread.interrupted()) {

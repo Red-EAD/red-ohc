@@ -2,15 +2,42 @@ package com.red.ohc.storage;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotEquals;
+import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
 
 public class PageIdReuseTest {
+  @Test
+  public void freePageIdHeadUsesAStampForEveryStackMutation() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      Field headField = NativeMemory.Memory.class.getDeclaredField("freePageIdHead");
+      headField.setAccessible(true);
+      Object headValue = headField.get(memory);
+      assertTrue(headValue instanceof AtomicLong, "free page ids require a stamped head");
+      AtomicLong head = (AtomicLong) headValue;
+
+      WriterArena.Page first = memory.acquireEntryPage(0);
+      int initialStamp = (int) (head.get() >>> 32);
+      memory.returnUnusedPage(first);
+      int pushedStamp = (int) (head.get() >>> 32);
+      assertEquals(pushedStamp, initialStamp + 1);
+
+      WriterArena.Page second = memory.acquireEntryPage(0);
+      int poppedStamp = (int) (head.get() >>> 32);
+      assertEquals(poppedStamp, pushedStamp + 1);
+      memory.returnUnusedPage(second);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
   @Test
   public void physicallyFreedPageReusesItsSparseIdWithANewVersionStamp() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);

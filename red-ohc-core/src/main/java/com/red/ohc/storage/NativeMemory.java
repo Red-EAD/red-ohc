@@ -84,8 +84,9 @@ public final class NativeMemory {
 
     /**
      * Sparse page-id free stack; nodes are indices in fixed primitive arrays, never Page objects.
+     * The low 32 bits are the page id; the high 32 bits advance on every stack mutation.
      */
-    private final AtomicInteger freePageIdHead = new AtomicInteger();
+    private final AtomicLong freePageIdHead = new AtomicLong();
 
     private final AtomicIntegerArray freePageIdNext = new AtomicIntegerArray(MAX_PAGE_ID + 1);
     private final AtomicIntegerArray pageVersions = new AtomicIntegerArray(MAX_PAGE_ID + 1);
@@ -354,25 +355,32 @@ public final class NativeMemory {
 
     private int takeFreePageId() {
       while (true) {
-        int head = freePageIdHead.get();
-        if (head == 0) {
+        long head = freePageIdHead.get();
+        int pageId = (int) head;
+        if (pageId == 0) {
           return 0;
         }
-        int next = freePageIdNext.get(head);
-        if (freePageIdHead.compareAndSet(head, next)) {
-          return head;
+        int next = freePageIdNext.get(pageId);
+        long updated = packPageIdHead(((int) (head >>> 32)) + 1, next);
+        if (freePageIdHead.compareAndSet(head, updated)) {
+          return pageId;
         }
       }
     }
 
     private void recyclePageId(int pageId) {
       while (true) {
-        int head = freePageIdHead.get();
-        freePageIdNext.set(pageId, head);
-        if (freePageIdHead.compareAndSet(head, pageId)) {
+        long head = freePageIdHead.get();
+        freePageIdNext.set(pageId, (int) head);
+        long updated = packPageIdHead(((int) (head >>> 32)) + 1, pageId);
+        if (freePageIdHead.compareAndSet(head, updated)) {
           return;
         }
       }
+    }
+
+    private static long packPageIdHead(int stamp, int pageId) {
+      return ((long) stamp << 32) | (pageId & 0xffff_ffffL);
     }
 
     private void reservePhysical(long bytes) {

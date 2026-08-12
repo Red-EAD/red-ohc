@@ -22,8 +22,6 @@ public final class Budget {
   /** At most one token per stripe can be outstanding, so fixed reusable storage is sufficient. */
   private final MpscArrayQueue<StripeToken> dirtyStripeQueue;
   private final int stripeMask;
-  /** Approximate total idle credit; its only purpose is to suppress empty pressure scans. */
-  private final AtomicLong idleCreditHint = new AtomicLong();
 
   /** Test and low-level callers that do not have a NativeMemory stripe count use one stripe. */
   public Budget(long capacity) {
@@ -60,7 +58,6 @@ public final class Budget {
       long credit = stripeCredits.get(offset);
       if (credit >= bytes) {
         if (stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
-          idleCreditHint.addAndGet(-bytes);
           return true;
         }
         Thread.onSpinWait();
@@ -75,7 +72,6 @@ public final class Budget {
         credit = stripeCredits.get(offset);
         if (credit >= bytes) {
           if (stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
-            idleCreditHint.addAndGet(-bytes);
             return true;
           }
           Thread.onSpinWait();
@@ -93,7 +89,6 @@ public final class Budget {
             credit = stripeCredits.get(offset);
             if (credit >= bytes
                 && stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
-              idleCreditHint.addAndGet(-bytes);
               return true;
             }
             continue;
@@ -137,7 +132,7 @@ public final class Budget {
 
   /** Returns idle credit from every fixed stripe to the global balance. */
   public long reclaimIdleCredits() {
-    if (idleCreditHint.get() == 0L) {
+    if (dirtyStripeQueue.isEmpty()) {
       return 0L;
     }
     long reclaimed = 0L;
@@ -155,15 +150,15 @@ public final class Budget {
         dirtyStripeQueue.offer(token);
       }
     }
-    if (reclaimed != 0L) {
-      idleCreditHint.addAndGet(-reclaimed);
-    }
     return reclaimed;
   }
 
   /** A stats-only snapshot; producers are not stopped, so a concurrent value is approximate. */
   public long reserved() {
-    long free = available.get() + Math.max(0L, idleCreditHint.get());
+    long free = available.get();
+    for (int stripe = 0; stripe <= stripeMask; stripe++) {
+      free += stripeCredits.get(stripeOffset(stripe));
+    }
     long resident = capacity - free;
     return resident <= 0L ? 0L : Math.min(capacity, resident);
   }
@@ -180,7 +175,6 @@ public final class Budget {
     }
     dirtyStripeQueue.clear();
     available.set(capacity);
-    idleCreditHint.set(0L);
   }
 
   int stripeCount() {
@@ -200,7 +194,7 @@ public final class Budget {
   }
 
   public boolean hasIdleCreditHint() {
-    return idleCreditHint.get() != 0L;
+    return !dirtyStripeQueue.isEmpty();
   }
 
   private int stripeOffset(long threadId) {
@@ -219,7 +213,6 @@ public final class Budget {
         throw new IllegalStateException("native budget stripe overflow: " + updated + ">" + capacity);
       }
       if (stripeCredits.compareAndSet(offset, credit, updated)) {
-        idleCreditHint.addAndGet(bytes);
         int stripe = offset / CACHE_LINE_LONGS;
         if (dirtyStripes.compareAndSet(stripe, 0, 1)) {
           dirtyStripeQueue.offer(stripeTokens[stripe]);
@@ -239,7 +232,6 @@ public final class Budget {
             "native budget stripe overflow: " + updated + ">" + capacity);
       }
       if (stripeCredits.compareAndSet(offset, credit, updated)) {
-        idleCreditHint.addAndGet(bytes);
         int stripe = offset / CACHE_LINE_LONGS;
         if (dirtyStripes.compareAndSet(stripe, 0, 1)) {
           dirtyStripeQueue.offer(stripeTokens[stripe]);

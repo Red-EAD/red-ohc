@@ -21,6 +21,15 @@ public final class ReaderGuard {
   }
 
   public boolean enter(ThreadContext context) {
+    return enter(context, true);
+  }
+
+  /** Enters a reader admitted by an operation-level lifecycle guard before close began. */
+  public boolean enterAfterAdmission(ThreadContext context) {
+    return enter(context, false);
+  }
+
+  private boolean enter(ThreadContext context, boolean rejectClosing) {
     if (!context.isRegistered()) {
       context.bindMaintenance(worker);
       context.markRegistered();
@@ -30,13 +39,13 @@ public final class ReaderGuard {
       context.enterReader();
       return true;
     }
-    while (!closing.getAsBoolean()) {
+    while (!rejectClosing || !closing.getAsBoolean()) {
       long observed = worker.epoch();
       context.slot.epoch = observed;
       // This closes the admission race with shutdown: a close that starts after the loop
       // condition but before epoch publication must observe us as quiescent, not let this
       // reader pass through to a native pointer that its actor has already freed.
-      if (closing.getAsBoolean()) {
+      if (rejectClosing && closing.getAsBoolean()) {
         context.slot.epoch = 0L;
         worker.readerQuiescent();
         return false;
