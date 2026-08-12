@@ -25,13 +25,14 @@ public class TimerWheelTest {
   }
 
   @Test
-  public void longTtlParksUntilTheNextCascadeInsteadOfWakingEveryBaseTick() {
+  public void idleCatchUpSkipsEmptyTicksToReachALongOverdueDeadline() {
     TimerWheel wheel = new TimerWheel(0L);
-    wheel.add(new Entry(0L, 0, 2, 0L), 130_000L);
+    wheel.add(new Entry(0L, 0, 23, 0L), 10_000L * 64L);
 
-    assertTrue(
-        wheel.nextDelayNanos(0L) > 64_000_000L,
-        "a TTL outside L0 must schedule the L1 cascade rather than a 64ms poll");
+    assertEquals(
+        wheel.advance(10_000L * 64L, (ignored, generation, address) -> {}),
+        1);
+    assertEquals(wheel.scheduled(), 0L);
   }
 
   @Test
@@ -92,17 +93,15 @@ public class TimerWheelTest {
   }
 
   @Test
-  public void levelZeroWakeSearchFindsSameWordSlotAfterWheelWrap() {
+  public void idleCatchUpFindsALevelZeroSlotAfterWheelWrap() {
     long nowMillis = 100L * 64L;
     TimerWheel wheel = new TimerWheel(nowMillis);
     // tick=100 starts the search at slot 101. target=1114 maps back to slot 90, which is
     // in the same bitmap word but below the starting bit after one L0 rotation.
     wheel.add(new Entry(0L, 0, 6, 0L), 1_114L * 64L);
 
-    assertEquals(
-        wheel.nextDelayNanos(nowMillis),
-        1_014L * 64L * 1_000_000L,
-        "a same-word slot after the L0 wrap must not be mistaken for no deadline");
+    assertEquals(wheel.advance(1_114L * 64L, (ignored, generation, address) -> {}), 1);
+    assertEquals(wheel.scheduled(), 0L);
   }
 
   @Test

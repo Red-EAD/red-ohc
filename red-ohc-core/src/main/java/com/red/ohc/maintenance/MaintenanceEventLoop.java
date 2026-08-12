@@ -40,6 +40,10 @@ public final class MaintenanceEventLoop
   }
 
   private static final long EPOCH_ADVANCE_INTERVAL_NANOS = 1_000_000L;
+  private static final long EVICTION_RETRY_INITIAL_NANOS = 50_000L;
+  private static final long EVICTION_RETRY_MAX_NANOS = 10_000_000L;
+  private static final long RECLAIM_RETRY_INITIAL_NANOS = 1_000_000L;
+  private static final long RECLAIM_RETRY_MAX_NANOS = 10_000_000L;
 
   /**
    * After draining a producer burst, stay in REQUIRED and sleep briefly before returning to an
@@ -50,19 +54,22 @@ public final class MaintenanceEventLoop
   private static final long WRITE_BATCH_GRACE_NANOS = 1_000_000L;
 
   /**
-   * The timer owns physical cleanup only; reads perform the strict TTL check. Sampling the actor
-   * clock once per bounded group of passes therefore preserves safety while avoiding a native
-   * wall/monotonic-clock trip for every tiny retirement batch.
+   * The timer owns physical cleanup only; reads perform the strict TTL check. Probe the monotonic
+   * clock only once per bounded group of passes, and sample the physical TTL wall clock no more
+   * often than once per second unless a flush or resource-pressure event explicitly asks for it.
    */
-  private static final int CLOCK_SAMPLE_INTERVAL_PASSES = 16;
+  private static final int CLOCK_PROBE_INTERVAL_PASSES = 16;
+  private static final long PHYSICAL_TTL_CLOCK_SAMPLE_INTERVAL_NANOS = 1_000_000_000L;
 
   private static final int RETIREMENT_BATCH_RECORDS = 128;
   private static final int ASYNC_MUTATION_BATCH = 64;
 
   /**
-   * A deferred mutation has a writer in progress; retry it without turning idle into a poll loop.
+   * A deferred mutation has a writer in progress. Retry it with bounded backoff rather than
+   * converting one long writer publication into a microsecond poll loop.
    */
-  private static final long DEFERRED_MUTATION_RETRY_NANOS = 1_000L;
+  private static final long DEFERRED_MUTATION_RETRY_INITIAL_NANOS = 50_000L;
+  private static final long DEFERRED_MUTATION_RETRY_MAX_NANOS = 10_000_000L;
 
   private final ConcurrentHashMap<Entry, Entry> data;
   private final NativeMemory.Memory memory;
@@ -100,6 +107,7 @@ public final class MaintenanceEventLoop
   private final ArrayDeque<Entry> deferredMutations = new ArrayDeque<>();
 
   private long deferredMutationRetryNanos = Long.MAX_VALUE;
+  private long deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
   private final AtomicBoolean accessHint = new AtomicBoolean();
   /** Reusable normal-path storage; a steady access stream must not allocate queue nodes. */
   private final MpscArrayQueue<ReaderSlot> dirtyReaderQueue;
@@ -149,6 +157,7 @@ public final class MaintenanceEventLoop
   private volatile long publishedLiveWeight;
 
   private long nowNanos;
+  private long lastPhysicalClockSampleNanos;
   private int clockSampleCountdown;
   private boolean monotonicSampledThisPass;
   private volatile long hits;
@@ -166,10 +175,12 @@ public final class MaintenanceEventLoop
   private final AtomicBoolean unhealthy = new AtomicBoolean();
 
   private long evictionRetryNanos = Long.MAX_VALUE;
-  private long evictionRetryBackoffNanos = 1_000L;
+  private long evictionRetryBackoffNanos = EVICTION_RETRY_INITIAL_NANOS;
 
   /** A sealed retirement could not pass QSBR; recheck it on the bounded epoch deadline. */
   private boolean reclaimBlocked;
+  private long reclaimRetryNanos = Long.MAX_VALUE;
+  private long reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
 
   /** A bounded reclaim pass hit its limit and must be continued before the worker can park. */
   private boolean reclaimContinuation;
@@ -312,6 +323,7 @@ public final class MaintenanceEventLoop
     long initialNowMillis = ticker.currentTimeMillis();
     this.wheel = new TimerWheel(initialNowMillis);
     this.nowMillis = initialNowMillis;
+    this.lastPhysicalClockSampleNanos = ticker.nanos();
     this.thread = new Thread(this, "red-ohc-maintenance-event-loop");
     this.thread.setDaemon(true);
   }
@@ -643,6 +655,7 @@ public final class MaintenanceEventLoop
 
   /** Requests an actor pass after a writer-side resource pressure event. */
   public void requestMaintenance() {
+    clockRefreshRequested = true;
     signal();
   }
 
@@ -838,6 +851,7 @@ public final class MaintenanceEventLoop
         finishActorRetirementBatch();
       }
       if (stopping) {
+        wakeGate.requireProcessing();
         passRequired = true;
       } else if (work == 0) {
         passRequired = false;
@@ -874,7 +888,7 @@ public final class MaintenanceEventLoop
     if (repairNeeded.get()) {
       work += repairMutations(4096);
     }
-    if (!deferredMutations.isEmpty()) {
+    if (!deferredMutations.isEmpty() && deferredMutationWorkDue()) {
       work += drainDeferredMutations(4096);
     }
     if (accessHint.get()) {
@@ -888,11 +902,15 @@ public final class MaintenanceEventLoop
     if (retirements.hasReadyHint()) {
       work += sealRetirements(1024);
     }
-    if (advanceEpochIfDue(nowNanos)) {
-      work++;
-    }
     if (retirements.hasPendingReclaim()) {
-      work += reclaim(1024);
+      long reclaimNow = sampleMonotonicNow();
+      nowNanos = reclaimNow;
+      if (advanceEpochIfDue(reclaimNow)) {
+        work++;
+      }
+      if (reclaimWorkDue(reclaimNow)) {
+        work += reclaim(1024);
+      }
     }
     long evictionNow = nowNanos;
     if (!stopping
@@ -933,8 +951,7 @@ public final class MaintenanceEventLoop
     return hasSourceWork()
         || reliableRemovals.hasCommittedHint()
         || pendingRemovalRetirement
-        || !asyncMutations.isEmpty()
-        || retirements.hasPendingReclaim();
+        || !asyncMutations.isEmpty();
   }
 
   private boolean hasSourceWork() {
@@ -998,13 +1015,9 @@ public final class MaintenanceEventLoop
     if (batchGrace) {
       parked = true;
       try {
-        long wheelDelay = wheel.nextDelayNanos(nowMillis);
-        long timerDelay = nextParkDelayNanos(wheelDelay);
+        long timerDelay = nextParkDelayNanos();
         long parkDelay = Math.min(WRITE_BATCH_GRACE_NANOS, timerDelay);
         LockSupport.parkNanos(this, parkDelay);
-        if (timerDelay <= parkDelay) {
-          clockRefreshRequested = true;
-        }
       } finally {
         parked = false;
       }
@@ -1039,14 +1052,11 @@ public final class MaintenanceEventLoop
     }
     parked = true;
     try {
-      long wheelDelay = wheel.nextDelayNanos(nowMillis);
-      long delay = nextParkDelayNanos(wheelDelay);
+      long delay = nextParkDelayNanos();
       if (delay == Long.MAX_VALUE) {
         LockSupport.park(this);
       } else {
         LockSupport.parkNanos(this, delay);
-        // A finite park is always bounded by real timer, retry, or QSBR work.
-        clockRefreshRequested = true;
       }
     } finally {
       parked = false;
@@ -1281,7 +1291,7 @@ public final class MaintenanceEventLoop
       if (entry.requeueMutation(flags)) {
         deferredMutations.addLast(entry);
       }
-      deferredMutationRetryNanos = sampleMonotonicNow() + DEFERRED_MUTATION_RETRY_NANOS;
+      scheduleDeferredMutationRetry();
       return;
     }
     processEntry(entry, flags);
@@ -1290,6 +1300,7 @@ public final class MaintenanceEventLoop
   private int drainDeferredMutations(int limit) {
     int attempts = deferredMutations.size();
     int work = 0;
+    boolean progressed = false;
     while (attempts-- > 0 && work < limit) {
       Entry entry = deferredMutations.removeFirst();
       int flags = entry.takePending();
@@ -1304,17 +1315,33 @@ public final class MaintenanceEventLoop
         processEntry(entry, flags);
         work++;
       }
+      progressed = true;
     }
-    deferredMutationRetryNanos =
-        deferredMutations.isEmpty()
-            ? Long.MAX_VALUE
-            : sampleMonotonicNow() + DEFERRED_MUTATION_RETRY_NANOS;
+    if (deferredMutations.isEmpty()) {
+      resetDeferredMutationRetry();
+    } else {
+      if (progressed) {
+        deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
+      }
+      scheduleDeferredMutationRetry();
+    }
     return work;
   }
 
   private void deferMutation(Entry entry) {
     deferredMutations.addLast(entry);
-    deferredMutationRetryNanos = sampleMonotonicNow() + DEFERRED_MUTATION_RETRY_NANOS;
+    scheduleDeferredMutationRetry();
+  }
+
+  private void scheduleDeferredMutationRetry() {
+    deferredMutationRetryNanos = sampleMonotonicNow() + deferredMutationRetryBackoffNanos;
+    deferredMutationRetryBackoffNanos =
+        Math.min(DEFERRED_MUTATION_RETRY_MAX_NANOS, deferredMutationRetryBackoffNanos << 1);
+  }
+
+  private void resetDeferredMutationRetry() {
+    deferredMutationRetryNanos = Long.MAX_VALUE;
+    deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
   }
 
   private void decrementRepairDebt(Entry entry) {
@@ -1417,24 +1444,20 @@ public final class MaintenanceEventLoop
     return true;
   }
 
-  private boolean forceAdvanceEpoch() {
-    if (!retirements.hasPendingReclaim() || latestRetireEpoch < epoch) {
-      return false;
-    }
-    epoch++;
-    lastEpochAdvanceNanos = nowNanos;
-    hasAdvancedEpoch = true;
-    return true;
-  }
-
   private boolean sampleClockIfDue() {
     if (!clockRefreshRequested && clockSampleCountdown-- > 0) {
       return false;
     }
+    long sampledNanos = sampleMonotonicNow();
+    if (!clockRefreshRequested
+        && sampledNanos - lastPhysicalClockSampleNanos < PHYSICAL_TTL_CLOCK_SAMPLE_INTERVAL_NANOS) {
+      clockSampleCountdown = CLOCK_PROBE_INTERVAL_PASSES - 1;
+      return false;
+    }
     clockRefreshRequested = false;
-    nowNanos = sampleMonotonicNow();
     nowMillis = ticker.currentTimeMillis();
-    clockSampleCountdown = CLOCK_SAMPLE_INTERVAL_PASSES - 1;
+    lastPhysicalClockSampleNanos = sampledNanos;
+    clockSampleCountdown = CLOCK_PROBE_INTERVAL_PASSES - 1;
     return true;
   }
 
@@ -1446,43 +1469,41 @@ public final class MaintenanceEventLoop
     return nowNanos;
   }
 
-  /** A QSBR epoch deadline is real work; an idle cache with no retirements still parks forever. */
-  private long epochAdvanceDelayNanos(long nowNanos) {
-    if (!retirements.hasPendingReclaim()) {
-      return Long.MAX_VALUE;
-    }
-    if (latestRetireEpoch < epoch) {
-      return reclaimBlocked ? EPOCH_ADVANCE_INTERVAL_NANOS : Long.MAX_VALUE;
-    }
-    if (!hasAdvancedEpoch) {
-      return 0L;
-    }
-    long elapsed = nowNanos - lastEpochAdvanceNanos;
-    return elapsed >= EPOCH_ADVANCE_INTERVAL_NANOS ? 0L : EPOCH_ADVANCE_INTERVAL_NANOS - elapsed;
+  private boolean reclaimWorkDue(long nowNanos) {
+    return !reclaimBlocked
+        || reclaimRetryNanos == Long.MAX_VALUE
+        || reclaimRetryNanos <= nowNanos;
   }
 
-  private long nextParkDelayNanos(long wheelDelay) {
+  private boolean deferredMutationWorkDue() {
+    return deferredMutationRetryNanos == Long.MAX_VALUE
+        || deferredMutationRetryNanos <= sampleMonotonicNow();
+  }
+
+  /** Only non-TTL control-plane retries may bound an actor park. */
+  private long nextParkDelayNanos() {
     boolean evictionDeadline =
         policy.usedWeight() > capacity && evictionRetryNanos != Long.MAX_VALUE;
-    boolean epochDeadline = retirements.hasPendingReclaim();
+    boolean reclaimDeadline =
+        retirements.hasPendingReclaim() && reclaimRetryNanos != Long.MAX_VALUE;
     boolean pendingRemovalDeadline =
         pendingRemovalRetirement && pendingRemovalRetryNanos != Long.MAX_VALUE;
     if (deferredMutationRetryNanos == Long.MAX_VALUE
         && !evictionDeadline
-        && !epochDeadline
+        && !reclaimDeadline
         && !pendingRemovalDeadline) {
-      return wheelDelay;
+      return Long.MAX_VALUE;
     }
     long monotonicNow = sampleMonotonicNow();
-    long delay = wheelDelay;
+    long delay = Long.MAX_VALUE;
     if (deferredMutationRetryNanos != Long.MAX_VALUE) {
       delay = Math.min(delay, deadlineDelayNanos(deferredMutationRetryNanos, monotonicNow));
     }
     if (evictionDeadline) {
       delay = Math.min(delay, deadlineDelayNanos(evictionRetryNanos, monotonicNow));
     }
-    if (epochDeadline) {
-      delay = Math.min(delay, epochAdvanceDelayNanos(monotonicNow));
+    if (reclaimDeadline) {
+      delay = Math.min(delay, deadlineDelayNanos(reclaimRetryNanos, monotonicNow));
     }
     if (pendingRemovalRetirement && pendingRemovalRetryNanos != Long.MAX_VALUE) {
       delay = Math.min(delay, deadlineDelayNanos(pendingRemovalRetryNanos, monotonicNow));
@@ -1512,7 +1533,8 @@ public final class MaintenanceEventLoop
   private void scheduleEvictionRetry() {
     long now = sampleMonotonicNow();
     evictionRetryNanos = now + evictionRetryBackoffNanos;
-    evictionRetryBackoffNanos = Math.min(1_000_000L, evictionRetryBackoffNanos << 1);
+    evictionRetryBackoffNanos =
+        Math.min(EVICTION_RETRY_MAX_NANOS, evictionRetryBackoffNanos << 1);
   }
 
   private int drainAccesses(int limit) {
@@ -1589,11 +1611,31 @@ public final class MaintenanceEventLoop
     // CAS on every cache operation. This is deadline-driven reclaim work, not idle polling.
     // A reclaim pass can make progress in one stripe and then stop at the first record in a
     // later stripe whose reader is still active. Treat that partial-progress case as blocked
-    // too; otherwise latestRetireEpoch < epoch makes epochAdvanceDelayNanos() return
-    // Long.MAX_VALUE and the worker can park forever with a full retirement ring.
-    reclaimBlocked = reclaimed < limit && retirements.hasPendingReclaim();
-    reclaimContinuation = reclaimed == limit && retirements.hasPendingReclaim();
+    // too; otherwise a blocked retirement could lose its bounded reclaim retry and the worker
+    // could park forever with a full retirement ring.
+    boolean pending = retirements.hasPendingReclaim();
+    reclaimContinuation = reclaimed == limit && pending;
+    reclaimBlocked = !reclaimContinuation && pending;
+    if (!pending || reclaimContinuation) {
+      resetReclaimRetry();
+    } else {
+      if (reclaimed != 0) {
+        reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
+      }
+      scheduleReclaimRetry();
+    }
     return reclaimed;
+  }
+
+  private void scheduleReclaimRetry() {
+    reclaimRetryNanos = sampleMonotonicNow() + reclaimRetryBackoffNanos;
+    reclaimRetryBackoffNanos =
+        Math.min(RECLAIM_RETRY_MAX_NANOS, reclaimRetryBackoffNanos << 1);
+  }
+
+  private void resetReclaimRetry() {
+    reclaimRetryNanos = Long.MAX_VALUE;
+    reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
   }
 
   @Override
@@ -1625,6 +1667,7 @@ public final class MaintenanceEventLoop
     int scans = 0;
     long target = capacity;
     boolean scanExhausted = false;
+    boolean removed = false;
     while (work < limit && scans < limit && policy.usedWeight() > target) {
       MaintenancePolicy.Selection selection = policy.selectVictim(limit - scans);
       int selectionScans = policy.lastVictimScanCount();
@@ -1640,30 +1683,39 @@ public final class MaintenanceEventLoop
       long victimHash = victim.keyHash64();
       long expectedGeneration = victim.generation();
       long expectedValueAddress = victim.valueAddress;
-      if (!removeFromMap(
+      boolean removedCurrent =
+          removeFromMap(
               victim,
               true,
               expectedGeneration,
               expectedValueAddress,
               victimHash,
-              RemovalCause.SIZE)
+              RemovalCause.SIZE);
+      if (!removedCurrent
           && (victim.valueAddress == 0L || !isCurrent(victim))) {
         policy.remove(victim, false);
         policyDirty = true;
+        removed = true;
         work++;
       } else {
-        if (victim.valueAddress != 0L && isCurrent(victim) && victim.isWriterLocked()) {
+        if (removedCurrent) {
+          removed = true;
+        }
+        if (!removedCurrent
+            && victim.valueAddress != 0L
+            && isCurrent(victim)
+            && victim.isWriterLocked()) {
           policy.skipLocked(victim);
           scheduleEvictionRetry();
-        } else {
+        } else if (!removedCurrent) {
           scheduleEvictionRetry();
           break;
         }
       }
     }
-    if (policy.usedWeight() <= target) {
+    if (removed || policy.usedWeight() <= target) {
       evictionRetryNanos = Long.MAX_VALUE;
-      evictionRetryBackoffNanos = 1_000L;
+      evictionRetryBackoffNanos = EVICTION_RETRY_INITIAL_NANOS;
     } else {
       if (scanExhausted || evictionRetryNanos == Long.MAX_VALUE) {
         scheduleEvictionRetry();
@@ -1888,9 +1940,12 @@ public final class MaintenanceEventLoop
     if (retirements.hasReadyHint()) {
       sealRetirements(1024);
     }
-    forceAdvanceEpoch();
+    long recoveryNow = sampleMonotonicNow();
+    advanceEpochIfDue(recoveryNow);
     if (retirements.hasPendingReclaim()) {
-      reclaim(1024);
+      if (reclaimWorkDue(recoveryNow)) {
+        reclaim(1024);
+      }
     }
     return retirements.reserve(actorRetirement, Math.max(records, batchRecords));
   }
@@ -1907,6 +1962,7 @@ public final class MaintenanceEventLoop
 
   private void signal() {
     if (wakeGate.signal()) {
+      clockRefreshRequested = true;
       LockSupport.unpark(thread);
     }
   }

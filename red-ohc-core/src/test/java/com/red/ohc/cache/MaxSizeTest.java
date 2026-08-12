@@ -142,6 +142,63 @@ public final class MaxSizeTest {
   }
 
   @Test(timeOut = 10_000L)
+  public void flushDrainsEveryDueTtlContinuationBeforeCompleting() {
+    MutableTicker ticker = new MutableTicker();
+    try (OHCache<String, String> cache = newMaxSizeCache(2_048, ticker)) {
+      for (int index = 0; index < 1_025; index++) {
+        assertTrue(cache.put("expires-" + index, "value", 64L));
+      }
+      cache.flushAsync().join();
+
+      ticker.now = 128L;
+      cache.flushAsync().join();
+
+      assertEquals(cache.size(), 0L);
+      assertEquals(cache.stats().getPhysicalExpired(), 1_025L);
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void resourceMaintenanceDrainsEveryDueTtlContinuation() throws Exception {
+    MutableTicker ticker = new MutableTicker();
+    try (OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker)) {
+      for (int index = 0; index < 1_025; index++) {
+        assertTrue(cache.put("expires-" + index, "value", 64L));
+      }
+      cache.flushAsync().join();
+
+      ticker.now = 128L;
+      worker(cache).requestMaintenance();
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+      while (cache.stats().getPhysicalExpired() < 1_025L && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
+
+      assertEquals(cache.stats().getPhysicalExpired(), 1_025L);
+      assertEquals(cache.size(), 0L);
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void resourceMaintenanceRetainsFutureTtl() throws Exception {
+    MutableTicker ticker = new MutableTicker();
+    try (OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker)) {
+      assertTrue(cache.put("future", "value", 10_000L));
+      cache.flushAsync().join();
+
+      ticker.now = 128L;
+      worker(cache).requestMaintenance();
+      cache.flushAsync().join();
+
+      assertEquals(cache.get("future"), "value");
+      assertEquals(cache.size(), 1L);
+      assertEquals(cache.stats().getPhysicalExpired(), 0L);
+    }
+  }
+
+  @Test(timeOut = 10_000L)
   public void concurrentWritesEventuallyConvergeToMaxSize() throws Exception {
     ExecutorService writers = Executors.newFixedThreadPool(4);
     try (OHCache<String, String> cache = newMaxSizeCache(8)) {
@@ -212,7 +269,7 @@ public final class MaxSizeTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void highWaterRejectionDoesNotWakeTheIdleActor() throws Exception {
+  public void highWaterRejectionWakesTheIdleActorForAsyncRecovery() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .maxSize(1)
@@ -229,13 +286,14 @@ public final class MaxSizeTest {
       long generation = idleGeneration(worker);
 
       assertFalse(cache.put("rejected", "value"));
-      Thread.sleep(20L);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+      while (idleGeneration(worker) == generation && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
 
-      assertTrue(worker.isParked(), "a rejected write did not create maintenance work");
-      assertEquals(
-          idleGeneration(worker),
-          generation,
-          "a rejected write must not send a stateless maintenance signal");
+      assertTrue(
+          idleGeneration(worker) > generation,
+          "a rejected write must wake the actor to recover expired or evictable capacity");
     } finally {
       cache.dataForTest().remove(first, first);
       cache.dataForTest().remove(second, second);

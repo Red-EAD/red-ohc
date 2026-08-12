@@ -71,7 +71,7 @@ public class MaintenanceAccountingTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void idleTimerWakeRefreshesItsClockBeforeSchedulingAnotherDeadline() throws Exception {
+  public void idleTtlRemainsPhysicalUntilTheNextMaintenanceEvent() throws Exception {
     MutableTicker ticker = new MutableTicker();
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
@@ -84,15 +84,14 @@ public class MaintenanceAccountingTest {
       cache.flushAsync().join();
 
       ticker.millis = 128L;
-      long deadline = System.nanoTime() + 400_000_000L;
-      while (cache.size() != 0L && System.nanoTime() < deadline) {
-        Thread.sleep(1L);
-      }
+      Thread.sleep(130L);
 
       assertEquals(
-          cache.size(),
-          0L,
-          "a timer wake must refresh the actor clock instead of replaying the old deadline");
+          cache.get("key"), null, "strict reads must reject an idle cache's logically expired value");
+      assertEquals(cache.size(), 1L, "idle TTL cleanup must wait for a maintenance event");
+
+      cache.flushAsync().join();
+      assertEquals(cache.size(), 0L);
     }
   }
 

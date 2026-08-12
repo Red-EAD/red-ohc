@@ -4,9 +4,9 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.storage.ValueBlock;
 
 /**
- * Worker-owned hierarchical TTL wheel. Long deadlines sleep until their next cascade boundary
- * instead of forcing a 64ms wakeup. A stale node is harmless because generation and value pointer
- * are checked by the maintenance consumer.
+ * Worker-owned hierarchical TTL wheel. Occupancy bitmaps let an opportunistic maintenance pass
+ * skip empty ticks while preserving each cascade boundary. A stale node is harmless because
+ * generation and value pointer are checked by the maintenance consumer.
  */
 public final class TimerWheel {
   private static final long TICK_MILLIS = 64L;
@@ -111,7 +111,6 @@ public final class TimerWheel {
       return 0;
     }
     promoteOverflow();
-    long steps = Math.min(4096L, target - tick);
     int work = 0;
     if (pendingExpirySlot >= 0) {
       work += expireLevel0(pendingExpirySlot, nowMillis, expiryLimit, consumer);
@@ -119,8 +118,13 @@ public final class TimerWheel {
         return work;
       }
     }
-    while (steps-- > 0L && work < expiryLimit) {
-      tick++;
+    while (tick < target && work < expiryLimit) {
+      long next = nextWakeTick();
+      if (next == Long.MAX_VALUE || next > target) {
+        tick = target;
+        break;
+      }
+      tick = Math.max(tick + 1L, next);
       if ((tick & (L0_SIZE - 1L)) == 0L) {
         cascade(1, (int) ((tick >>> 10) & (L1_SIZE - 1)));
       }
@@ -137,22 +141,6 @@ public final class TimerWheel {
       }
     }
     return work;
-  }
-
-  long nextDelayNanos(long nowMillis) {
-    if (scheduled == 0L) {
-      return Long.MAX_VALUE;
-    }
-    long next = nextWakeTick();
-    if (next <= tick) {
-      next = tick + 1L;
-    }
-    long nextMillis = multiplySaturated(next, TICK_MILLIS);
-    if (nextMillis <= nowMillis) {
-      return 1L;
-    }
-    long delayMillis = nextMillis - nowMillis;
-    return delayMillis > Long.MAX_VALUE / 1_000_000L ? Long.MAX_VALUE : delayMillis * 1_000_000L;
   }
 
   private void cascade(int level, int slot) {
@@ -394,10 +382,6 @@ public final class TimerWheel {
   private static long ceilTick(long millis) {
     long quotient = millis / TICK_MILLIS;
     return millis % TICK_MILLIS == 0L ? quotient : quotient + 1L;
-  }
-
-  private static long multiplySaturated(long left, long right) {
-    return left > Long.MAX_VALUE / right ? Long.MAX_VALUE : left * right;
   }
 
   private static void clearLinks(Entry entry) {

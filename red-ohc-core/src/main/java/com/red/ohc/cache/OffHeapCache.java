@@ -399,6 +399,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return result > 0;
     }
     if (data.mappingCount() >= maxSizeHighWatermark) {
+      worker.requestMaintenance();
       return false;
     }
     Entry candidate =
@@ -1622,6 +1623,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (budget.tryReserve(weight, context.budgetStripeIndex())) {
       return true;
     }
+    worker.requestMaintenance();
     if (budget.hasIdleCreditHint()) {
       worker.requestBudgetPressure();
     }
