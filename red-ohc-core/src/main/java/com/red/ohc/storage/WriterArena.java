@@ -21,6 +21,7 @@ public final class WriterArena {
 
   private final NativeMemory.Memory memory;
   private final int id;
+  private volatile Runnable retirementHookForTest;
 
   /** At most one partial page per size class remains owned by a stripe. */
   private final AtomicReferenceArray<Page> currentPages =
@@ -76,11 +77,19 @@ public final class WriterArena {
     }
     page.freeSlot(block, handle);
     if (page.isEmptyAndQuiescent()) {
-      currentPages.compareAndSet(sizeClass, page, null);
+      Runnable hook = retirementHookForTest;
+      if (hook != null) {
+        hook.run();
+      }
       if (page.beginRetirement()) {
+        currentPages.compareAndSet(sizeClass, page, null);
         memory.releaseEmptyPage(page);
       }
     }
+  }
+
+  void setRetirementHookForTest(Runnable hook) {
+    retirementHookForTest = hook;
   }
 
   /** Close has already excluded all writers/readers; physical page freeing is owned by Memory. */

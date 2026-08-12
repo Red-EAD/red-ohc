@@ -20,7 +20,6 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
 import com.red.ohc.api.AllocatorType;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
@@ -49,29 +48,28 @@ public class OHCWriteAdmissionBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-  private EncodedKey[] keys;
+  private byte[][] keys;
   private byte[][] values;
   private OffHeapCache<byte[], byte[]> cache;
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new EncodedKey[KEY_COUNT];
+    keys = new byte[KEY_COUNT][];
     values = new byte[KEY_COUNT][];
     long payloadCapacity = (long) KEY_COUNT * (keyBytes + valueBytes) * 2L;
     cache =
         (OffHeapCache<byte[], byte[]>)
             OHCacheBuilder.<byte[], byte[]>newBuilder()
                 .capacity(payloadCapacity)
-                .expectedEntries(KEY_COUNT)
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
                 .allocator(allocator)
                 .build();
     for (int i = 0; i < KEY_COUNT; i++) {
-      keys[i] = EncodedKey.copyOf(bytes(keyBytes, i));
+      keys[i] = bytes(keyBytes, i);
       values[i] = bytes(valueBytes, i * 31 + 7);
-      if (!cache.putEncoded(keys[i], values[i])) {
+      if (!cache.put(keys[i], values[i])) {
         throw new IllegalStateException("OHC preload rejected");
       }
     }
@@ -106,7 +104,7 @@ public class OHCWriteAdmissionBenchmark {
   void write(WriteCursor cursor, WriteResults results) {
     for (int i = 0; i < BATCH_SIZE; i++) {
       int index = cursor.next();
-      results.record(cache.putEncoded(keys[index], values[index]));
+      results.record(cache.put(keys[index], values[index]));
     }
   }
 

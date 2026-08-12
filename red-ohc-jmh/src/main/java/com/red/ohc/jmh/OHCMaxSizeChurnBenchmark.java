@@ -19,7 +19,6 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
 import com.red.ohc.api.AllocatorType;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
@@ -41,26 +40,25 @@ public class OHCMaxSizeChurnBenchmark {
   private static final int KEY_BYTES = 16;
   private static final int VALUE_BYTES = 256;
 
-  private EncodedKey[] keys;
+  private byte[][] keys;
   private byte[][] values;
   private OffHeapCache<byte[], byte[]> cache;
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new EncodedKey[WORKING_SET];
+    keys = new byte[WORKING_SET][];
     values = new byte[WORKING_SET][];
     cache =
         (OffHeapCache<byte[], byte[]>)
             OHCacheBuilder.<byte[], byte[]>newBuilder()
                 .maxSize(MAX_SIZE)
-                .expectedEntries(MAX_SIZE)
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
                 .allocator(AllocatorType.UNSAFE)
                 .build();
     for (int index = 0; index < WORKING_SET; index++) {
-      keys[index] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(KEY_BYTES, index));
+      keys[index] = OHCWriteAdmissionBenchmark.bytes(KEY_BYTES, index);
       values[index] = OHCWriteAdmissionBenchmark.bytes(VALUE_BYTES, index * 31 + 7);
       if (index < MAX_SIZE) {
         putEventually(index);
@@ -107,12 +105,12 @@ public class OHCMaxSizeChurnBenchmark {
   private void churn(Cursor cursor, WriteResults results) {
     for (int index = 0; index < BATCH_SIZE; index++) {
       int slot = cursor.next();
-      results.record(cache.putEncoded(keys[slot], values[slot]));
+      results.record(cache.put(keys[slot], values[slot]));
     }
   }
 
   private void putEventually(int index) {
-    while (!cache.putEncoded(keys[index], values[index])) {
+    while (!cache.put(keys[index], values[index])) {
       Thread.yield();
     }
   }

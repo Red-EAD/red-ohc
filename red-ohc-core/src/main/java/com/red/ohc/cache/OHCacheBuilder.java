@@ -16,11 +16,9 @@ public final class OHCacheBuilder<K, V> {
   private long maxSize;
   private boolean capacityConfigured;
   private boolean maxSizeConfigured;
-  private long expectedEntries;
   private CacheSerializer<K> keySerializer;
   private CacheSerializer<V> valueSerializer;
   private long defaultTtlMillis;
-  private double ttlJitterPercent = 0.01d;
   private Ticker ticker = Ticker.DEFAULT;
   private Eviction eviction = Eviction.S3_FIFO;
   private EvictionListener<K, V> evictionListener;
@@ -65,14 +63,6 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
-  public OHCacheBuilder<K, V> expectedEntries(long expectedEntries) {
-    if (expectedEntries <= 0L) {
-      throw new IllegalArgumentException("expectedEntries must be positive");
-    }
-    this.expectedEntries = expectedEntries;
-    return this;
-  }
-
   public OHCacheBuilder<K, V> keySerializer(CacheSerializer<K> serializer) {
     this.keySerializer = Objects.requireNonNull(serializer, "keySerializer");
     return this;
@@ -88,14 +78,6 @@ public final class OHCacheBuilder<K, V> {
       throw new IllegalArgumentException("defaultTTLmillis must not be negative");
     }
     this.defaultTtlMillis = millis;
-    return this;
-  }
-
-  public OHCacheBuilder<K, V> ttlJitterPercent(double percent) {
-    if (percent < 0d || percent > .5d) {
-      throw new IllegalArgumentException("ttlJitterPercent must be in [0, 0.5]");
-    }
-    this.ttlJitterPercent = percent;
     return this;
   }
 
@@ -164,7 +146,6 @@ public final class OHCacheBuilder<K, V> {
         keySerializer,
         valueSerializer,
         defaultTtlMillis,
-        ttlJitterPercent,
         loaderExecutor,
         closeTimeoutMillis,
         allocatorType,
@@ -173,8 +154,7 @@ public final class OHCacheBuilder<K, V> {
         evictionListener,
         weakValues,
         capacity,
-        maxSize,
-        expectedEntries);
+        maxSize);
   }
 
   long capacityValue() {
@@ -183,10 +163,6 @@ public final class OHCacheBuilder<K, V> {
 
   long maxSizeValue() {
     return maxSize;
-  }
-
-  long expectedEntriesValue() {
-    return expectedEntries;
   }
 
   CacheSerializer<K> keySerializerValue() {
@@ -199,10 +175,6 @@ public final class OHCacheBuilder<K, V> {
 
   long defaultTtlMillisValue() {
     return defaultTtlMillis;
-  }
-
-  double ttlJitterPercentValue() {
-    return ttlJitterPercent;
   }
 
   Ticker tickerValue() {

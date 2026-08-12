@@ -136,7 +136,9 @@ public class AsyncControlTest {
       CompletableFuture<Boolean> second =
           cache.putIfAbsentAsync("second-key", "second", 0L);
       CompletableFuture<Void> secondFlush = cache.flushAsync();
-      assertSame(secondFlush, firstFlush);
+      assertNotSame(secondFlush, firstFlush);
+      assertTrue(firstFlush.cancel(false));
+      assertFalse(secondFlush.isCancelled());
 
       releaseFirst.countDown();
       assertTrue(secondStarted.await(2L, TimeUnit.SECONDS));
@@ -324,6 +326,42 @@ public class AsyncControlTest {
     }
   }
 
+  @Test(timeOut = 10_000L)
+  public void loaderWaitersAreIndependentAndCancellationIsLocal() throws Exception {
+    ExecutorService loaderExecutor = Executors.newSingleThreadExecutor();
+    CountDownLatch loaderStarted = new CountDownLatch(1);
+    CountDownLatch releaseLoader = new CountDownLatch(1);
+    AtomicInteger loads = new AtomicInteger();
+    try (OHCache<String, String> cache = newCache(loaderExecutor)) {
+      CompletableFuture<String> first =
+          cache.getOrLoadAsync(
+              "cancel-local",
+              key -> {
+                loads.incrementAndGet();
+                loaderStarted.countDown();
+                await(releaseLoader);
+                return "loaded";
+              },
+              0L);
+      CompletableFuture<String> second =
+          cache.getOrLoadAsync("cancel-local", key -> "must-not-run", 0L);
+
+      assertNotSame(first, second);
+      assertTrue(loaderStarted.await(5L, TimeUnit.SECONDS));
+      assertTrue(first.cancel(true));
+      assertTrue(first.isCancelled());
+      assertFalse(second.isCancelled());
+      assertEquals(loads.get(), 1);
+
+      releaseLoader.countDown();
+      assertEquals(second.get(5L, TimeUnit.SECONDS), "loaded");
+      assertEquals(loads.get(), 1);
+    } finally {
+      releaseLoader.countDown();
+      loaderExecutor.shutdownNow();
+    }
+  }
+
   @Test
   public void loaderReturnsTheValueThatWonPutIfAbsent() throws Exception {
     ExecutorService loaderExecutor = Executors.newSingleThreadExecutor();
@@ -348,6 +386,32 @@ public class AsyncControlTest {
       assertEquals(loaded.get(5, TimeUnit.SECONDS), "external");
     } finally {
       loaderExecutor.shutdownNow();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void asyncMutationCompletesAfterWriterExitForSynchronousCallbacks() {
+    AtomicReference<OffHeapCache<String, String>> cacheRef = new AtomicReference<>();
+    AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+    try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newCache(Runnable::run)) {
+      cacheRef.set(cache);
+      cache
+          .putIfAbsentAsync("callback-key", "callback-value", 0L)
+          .thenApply(
+              accepted -> {
+                assertTrue(accepted);
+                assertTrue(cacheRef.get().put("nested-key", "nested-value"));
+                try {
+                  cacheRef.get().close();
+                } catch (Throwable failure) {
+                  closeFailure.set(failure);
+                }
+                return accepted;
+              })
+          .join();
+
+      assertEquals(cache.get("nested-key"), "nested-value");
+      assertTrue(closeFailure.get() instanceof IllegalStateException);
     }
   }
 

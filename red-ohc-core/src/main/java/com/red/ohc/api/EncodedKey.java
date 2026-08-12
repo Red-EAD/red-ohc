@@ -17,17 +17,18 @@ public final class EncodedKey {
     this.hash = (int) (hash64 ^ (hash64 >>> 32));
   }
 
-  public static EncodedKey fromSerialized(byte[] bytes, int length, long hash64) {
+  public static EncodedKey copyOf(byte[] bytes, int length) {
+    Objects.requireNonNull(bytes, "bytes");
     if (length < 0 || length > bytes.length) {
       throw new IllegalArgumentException("invalid encoded key length");
     }
-    return new EncodedKey(Arrays.copyOf(bytes, length), hash64);
+    byte[] copy = Arrays.copyOf(bytes, length);
+    return new EncodedKey(copy, Hashing.xxHash64(copy, 0, copy.length));
   }
 
   public static EncodedKey copyOf(byte[] bytes) {
     Objects.requireNonNull(bytes, "bytes");
-    byte[] copy = Arrays.copyOf(bytes, bytes.length);
-    return new EncodedKey(copy, Hashing.xxHash64(copy, 0, copy.length));
+    return copyOf(bytes, bytes.length);
   }
 
   public int length() {

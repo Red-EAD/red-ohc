@@ -17,7 +17,6 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 
 import com.red.ohc.api.AllocatorType;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
@@ -54,7 +53,7 @@ public class OHCTimeoutDrainBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-  private EncodedKey[] keys;
+  private byte[][] keys;
   private byte[][] values;
   private MutableTicker ticker;
   private OffHeapCache<byte[], byte[]> cache;
@@ -62,10 +61,10 @@ public class OHCTimeoutDrainBenchmark {
 
   @Setup(Level.Trial)
   public void createPayloads() {
-    keys = new EncodedKey[entries];
+    keys = new byte[entries][];
     values = new byte[entries][];
     for (int index = 0; index < entries; index++) {
-      keys[index] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, index));
+      keys[index] = OHCWriteAdmissionBenchmark.bytes(keyBytes, index);
       values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
     }
   }
@@ -78,17 +77,15 @@ public class OHCTimeoutDrainBenchmark {
         (OffHeapCache<byte[], byte[]>)
             OHCacheBuilder.<byte[], byte[]>newBuilder()
                 .capacity(capacity)
-                .expectedEntries(entries)
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
                 .allocator(allocator)
                 .ticker(ticker)
                 .defaultTTLmillis(TTL_MILLIS)
-                .ttlJitterPercent(0d)
                 .build();
     for (int index = 0; index < entries; index++) {
-      if (!cache.putEncoded(keys[index], values[index])) {
+      if (!cache.put(keys[index], values[index])) {
         OHCacheStats stats = cache.stats();
         throw new IllegalStateException(
             "OHC TTL setup rejected entry "

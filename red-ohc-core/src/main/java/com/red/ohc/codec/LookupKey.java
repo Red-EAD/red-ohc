@@ -17,20 +17,6 @@ public final class LookupKey {
     this.hash = (int) (hash64 ^ (hash64 >>> 32));
   }
 
-  public void setPrecomputed(byte[] bytes, int length, int hash) {
-    this.bytes = bytes;
-    this.length = length;
-    this.hash = hash;
-    this.hash64 = hash & 0xffffffffL;
-  }
-
-  public void setPrecomputed(byte[] bytes, int length, long hash64) {
-    this.bytes = bytes;
-    this.length = length;
-    this.hash64 = hash64;
-    this.hash = (int) (hash64 ^ (hash64 >>> 32));
-  }
-
   public byte[] bytes() {
     return bytes;
   }

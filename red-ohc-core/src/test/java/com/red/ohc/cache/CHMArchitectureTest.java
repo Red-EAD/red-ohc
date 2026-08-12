@@ -42,7 +42,6 @@ public final class CHMArchitectureTest {
     try (OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
-            .expectedEntries(64)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped()) {
@@ -54,18 +53,18 @@ public final class CHMArchitectureTest {
   }
 
   @Test
-  public void expectedEntriesSizingLeavesHeadroomBeforeTheChmThreshold() {
+  public void entryEstimateSizingLeavesHeadroomBeforeTheChmThreshold() {
     assertEquals(ChmSizing.plannedEntries(1_000_000L), 1_125_000L);
     assertEquals(ChmSizing.tableLengthFor(1_000_000L, 1L), 2_097_152);
   }
 
   @Test
-  public void expectedEntriesSizingDoesNotWrapBeforeApplyingHeadroom() {
+  public void entryEstimateSizingDoesNotWrapBeforeApplyingHeadroom() {
     assertEquals(ChmSizing.plannedEntries(2_000_000_000_000_000_000L), 2_250_000_000_000_000_000L);
   }
 
   @Test
-  public void byteCapacitySizingStaysConservativeWithoutExpectedEntries() {
+  public void byteCapacitySizingStaysConservativeWithoutEntryEstimate() {
     assertEquals(ChmSizing.initialCapacity(0L, 64L << 20), 64L);
   }
 

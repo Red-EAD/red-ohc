@@ -133,7 +133,6 @@ public class OHCGetAllPutAllBenchmark {
       ohc =
           OHCacheBuilder.<Integer, byte[]>newBuilder()
               .capacity(CAPACITY)
-              .expectedEntries(KEY_COUNT)
               .keySerializer(INT_SERIALIZER)
               .valueSerializer(BYTES_SERIALIZER)
               .eviction(Eviction.S3_FIFO)

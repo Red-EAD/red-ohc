@@ -4,6 +4,7 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
@@ -363,6 +364,61 @@ public final class EvictionListenerTest {
       callers.shutdownNow();
       cache.close();
     }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void actorListenerCannotSynchronouslyFlushOrCloseItself() throws Exception {
+    AtomicReference<OffHeapCache<String, String>> cacheRef = new AtomicReference<>();
+    AtomicReference<Throwable> flushFailure = new AtomicReference<>();
+    AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+    CountDownLatch callback = new CountDownLatch(1);
+    OffHeapCache<String, String> cache =
+        newSmallCache(
+            countingSerializer(new AtomicInteger()),
+            countingSerializer(new AtomicInteger()),
+            (key, value, cause) -> {
+              try {
+                cacheRef.get().flushAsync().join();
+              } catch (Throwable failure) {
+                flushFailure.set(failure);
+              }
+              try {
+                cacheRef.get().close();
+              } catch (Throwable failure) {
+                closeFailure.set(failure);
+              }
+              callback.countDown();
+            });
+    cacheRef.set(cache);
+    try {
+      evictOne(cache);
+      assertTrue(callback.await(2L, TimeUnit.SECONDS));
+      assertTrue(flushFailure.get() instanceof IllegalStateException);
+      assertTrue(closeFailure.get() instanceof IllegalStateException);
+    } finally {
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void closedListenerCacheCanBeCollected() throws Exception {
+    WeakReference<OffHeapCache<String, String>> reference = createClosedListenerCache();
+    for (int attempt = 0; attempt < 40 && reference.get() != null; attempt++) {
+      System.gc();
+      Thread.sleep(25L);
+    }
+    assertEquals(reference.get(), null);
+  }
+
+  private static WeakReference<OffHeapCache<String, String>> createClosedListenerCache() {
+    OffHeapCache<String, String> cache =
+        newSmallCache(
+            countingSerializer(new AtomicInteger()),
+            countingSerializer(new AtomicInteger()),
+            (key, value, cause) -> {});
+    WeakReference<OffHeapCache<String, String>> reference = new WeakReference<>(cache);
+    cache.close();
+    return reference;
   }
 
   private static void evictOne(OffHeapCache<String, String> cache) {

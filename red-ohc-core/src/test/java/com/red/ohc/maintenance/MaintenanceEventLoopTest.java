@@ -492,7 +492,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void scheduledTtlContinuesOnTheOneMillisecondCadenceWithoutEarlyExpiry() throws Exception {
+  public void futureTtlSleepsByWheelTickWithoutEarlyExpiry() throws Exception {
     AtomicInteger wallCalls = new AtomicInteger();
     Ticker ticker =
         new Ticker() {
@@ -524,7 +524,10 @@ public class MaintenanceEventLoopTest {
 
       assertTrue(
           wallCalls.get() > 1,
-          "a scheduled TTL must keep the actor on the one-millisecond maintenance cadence");
+          "a scheduled TTL must wake the actor at least once for its wheel tick");
+      assertTrue(
+          wallCalls.get() <= 12,
+          "a future TTL must not drive one-millisecond maintenance passes: " + wallCalls.get());
       assertTrue(
           data.containsKey(entry),
           "physical TTL cleanup must not remove an entry before the semantic ticker reaches expiry");

@@ -47,7 +47,6 @@ public final class ConcurrentLifecycleFuzzTest {
             // fixed retirement ledger. Native hard-limit rejection is intentionally a
             // best-effort write result and is covered by the allocator-specific tests.
             .capacity(1L << 20)
-            .expectedEntries(KEYS)
             .keySerializer(KEY)
             .valueSerializer(VALUE)
             .allocator(allocator)
@@ -122,7 +121,6 @@ public final class ConcurrentLifecycleFuzzTest {
     OffHeapCache<Integer, Integer> cache =
         OHCacheBuilder.<Integer, Integer>newBuilder()
             .capacity(1L << 20)
-            .expectedEntries(KEYS)
             .keySerializer(KEY)
             .valueSerializer(VALUE)
             .allocator(allocator)

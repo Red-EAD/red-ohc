@@ -68,7 +68,7 @@ public final class MaintenanceEventLoop
   private final Budget budget;
   private final Ticker ticker;
   private final long capacity;
-  private final EvictionNotifier evictionNotifier;
+  private volatile EvictionNotifier evictionNotifier;
   private final int queueCapacity;
   private final MpscArrayQueue<Entry> queue;
 
@@ -945,7 +945,7 @@ public final class MaintenanceEventLoop
         || reliableRemovals.hasCommittedHint()
         || !asyncMutations.isEmpty()
         || !deferredMutations.isEmpty()
-        || (!stopping && wheel.hasPending())
+        || ((!stopping || flushRequest.get() != null) && ttlWorkDue())
         || ((!stopping || flushRequest.get() != null) && policy.usedWeight() > capacity)
         || flushRequest.get() != null;
   }
@@ -982,7 +982,7 @@ public final class MaintenanceEventLoop
         || reliableRemovals.hasCommittedHint()
         || !asyncMutations.isEmpty()
         || !deferredMutations.isEmpty()
-        || ((!stopping || flushRequest.get() != null) && wheel.hasPending())
+        || ((!stopping || flushRequest.get() != null) && ttlWorkDue())
         || ((!stopping || flushRequest.get() != null) && policy.usedWeight() > capacity)
         || flushRequest.get() != null;
   }
@@ -1005,7 +1005,7 @@ public final class MaintenanceEventLoop
     plan.repair = (plan.requested & WORK_MUTATION) != 0 || repairNeeded.get();
     plan.deferred = !deferredMutations.isEmpty() && deferredMutationWorkDue();
     plan.access = (plan.requested & WORK_ACCESS) != 0 || accessHint.get();
-    plan.ttl = wheel.hasPending() && (!stopping || plan.flush);
+    plan.ttl = ttlWorkDue() && (!stopping || plan.flush);
     plan.seal = (plan.requested & WORK_RETIREMENT) != 0 || retirements.hasReadyHint();
     plan.reclaim =
         (retirements.hasPendingReclaim() || reclaimContinuation) && reclaimWorkDue(nowNanos);
@@ -1029,7 +1029,13 @@ public final class MaintenanceEventLoop
     }
     parked = true;
     try {
-      LockSupport.park(this);
+      long ttlWakeNanos = nextTtlWakeNanos();
+      if (ttlWakeNanos == Long.MAX_VALUE) {
+        LockSupport.park(this);
+      } else {
+        long delay = ttlWakeNanos - System.nanoTime();
+        LockSupport.parkNanos(this, Math.max(1L, delay));
+      }
     } finally {
       parked = false;
       wakeGate.requireProcessing();
@@ -1047,11 +1053,44 @@ public final class MaintenanceEventLoop
         || retirements.hasReadyHint()
         || !queue.isEmpty()
         || !deferredMutations.isEmpty()
-        || wheel.hasPending()
+        || ttlWorkDue()
         || flushRequest.get() != null
         || pendingRemovalRetirement
         || reclaimContinuation
         || policy.usedWeight() > capacity;
+  }
+
+  private boolean ttlWorkDue() {
+    if (!wheel.hasPending()) {
+      return false;
+    }
+    if (wheel.hasPendingExpiry()) {
+      return true;
+    }
+    long nextTick = wheel.nextWakeTick();
+    return nextTick != Long.MAX_VALUE && nextTick <= ticker.currentTimeMillis() / 64L;
+  }
+
+  private long nextTtlWakeNanos() {
+    if (!wheel.hasPending() || wheel.hasPendingExpiry()) {
+      return Long.MAX_VALUE;
+    }
+    long nextTick = wheel.nextWakeTick();
+    if (nextTick == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
+    }
+    long nextMillis = nextTick > Long.MAX_VALUE / 64L ? Long.MAX_VALUE : nextTick * 64L;
+    long nowMillis = ticker.currentTimeMillis();
+    if (nextMillis <= nowMillis) {
+      return System.nanoTime();
+    }
+    long delayMillis = nextMillis - nowMillis;
+    long delayNanos =
+        delayMillis > Long.MAX_VALUE / 1_000_000L
+            ? Long.MAX_VALUE
+            : delayMillis * 1_000_000L;
+    long nowNanos = System.nanoTime();
+    return Long.MAX_VALUE - nowNanos < delayNanos ? Long.MAX_VALUE : nowNanos + delayNanos;
   }
 
   private void parkUntilWindow(long nowNanos) {
@@ -1887,6 +1926,7 @@ public final class MaintenanceEventLoop
     budget.reclaimIdleCredits();
     budget.clear();
     readers.clear();
+    evictionNotifier = null;
   }
 
   private void releaseReliableRemovalRecord() {

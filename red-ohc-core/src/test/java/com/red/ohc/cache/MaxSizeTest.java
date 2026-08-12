@@ -10,6 +10,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -265,6 +266,43 @@ public final class MaxSizeTest {
       } finally {
         cache.close();
       }
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void asyncAndLoaderAdmissionShareTheSynchronousHighWatermark() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(1)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .loaderExecutor(Runnable::run)
+            .buildTyped();
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    pauseMaintenance(cache, paused, release);
+    try {
+      assertTrue(cache.put("one", "value-one"));
+      assertTrue(cache.put("two", "value-two"));
+      long nativeBytes = cache.totalAllocatedBytes();
+
+      CompletableFuture<Boolean> asyncPut =
+          cache.putIfAbsentAsync("three", "value-three", 0L);
+      CompletableFuture<String> asyncLoad =
+          cache.getOrLoadAsync("four", ignored -> "value-four", 0L);
+
+      assertFalse(asyncPut.isDone());
+      assertEquals(asyncLoad.get(2L, TimeUnit.SECONDS), "value-four");
+      assertEquals(cache.size(), 2L);
+      assertEquals(cache.totalAllocatedBytes(), nativeBytes);
+
+      release.countDown();
+      assertFalse(asyncPut.get(2L, TimeUnit.SECONDS));
+      assertEquals(cache.size(), 2L);
+      assertEquals(cache.totalAllocatedBytes(), nativeBytes);
+    } finally {
+      release.countDown();
+      cache.close();
     }
   }
 

@@ -24,7 +24,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
@@ -332,15 +331,15 @@ public final class WeakValuesTest {
   }
 
   @Test
-  public void encodedReplacementClearsTheOldWeakValue() {
+  public void serializerBackedReplacementPublishesTheNewWeakValue() {
     CountingPojoSerializer serializer = new CountingPojoSerializer();
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
       assertTrue(cache.put("key", new Pojo("old")));
-      EncodedKey encodedKey = EncodedKey.copyOf("key".getBytes(StandardCharsets.UTF_8));
-      assertTrue(cache.putEncoded(encodedKey, "new".getBytes(StandardCharsets.UTF_8)));
+      Pojo replacement = new Pojo("new");
+      assertTrue(cache.put("key", replacement));
       Pojo result = cache.get("key");
-      assertEquals(result.text, "new");
-      assertTrue(serializer.deserializeCalls.get() > 0);
+      assertSame(result, replacement);
+      assertEquals(serializer.deserializeCalls.get(), 0);
     }
   }
 

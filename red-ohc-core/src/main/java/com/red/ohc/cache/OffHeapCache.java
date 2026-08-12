@@ -56,7 +56,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final boolean weakValues;
   private final Ticker ticker;
   private final long defaultTtlMillis;
-  private final double ttlJitterPercent;
   private final Executor loaderExecutor;
   private final long closeTimeoutMillis;
   private final long capacity;
@@ -71,18 +70,19 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final ThreadContext evictionContexts;
   private final MaintenanceEventLoop worker;
   private final ReaderGuard readerGuard;
-  private final ConcurrentHashMap<EncodedKey, CompletableFuture<V>> loadFlights = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<EncodedKey, LoadFlight<V>> loadFlights = new ConcurrentHashMap<>();
+  private final Object lifecycleLock = new Object();
   private final AtomicInteger closeState = new AtomicInteger(OPEN);
   private final AtomicBoolean shutdownStarted = new AtomicBoolean();
   private final AtomicReference<Thread> closeLeader = new AtomicReference<>();
   private volatile Thread closeWaiter;
   private volatile boolean closing;
+  private volatile Runnable flushAdmissionHookForTest;
 
   OffHeapCache(
       CacheSerializer<K> keySerializer,
       CacheSerializer<V> valueSerializer,
       long defaultTtlMillis,
-      double ttlJitterPercent,
       java.util.concurrent.Executor loaderExecutor,
       long closeTimeoutMillis,
       AllocatorType allocatorType,
@@ -91,8 +91,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       EvictionListener<K, V> evictionListener,
       boolean weakValues,
       long capacity,
-      long maxSize,
-      long expectedEntries) {
+      long maxSize) {
     ThreadContext.verifyNativeByteBufferSupported();
     this.keySerializer = keySerializer;
     this.valueSerializer = valueSerializer;
@@ -100,7 +99,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.weakValues = weakValues;
     this.ticker = ticker;
     this.defaultTtlMillis = defaultTtlMillis;
-    this.ttlJitterPercent = ttlJitterPercent;
     this.loaderExecutor = loaderExecutor;
     this.closeTimeoutMillis = closeTimeoutMillis;
     boolean countBounded = maxSize > 0L;
@@ -129,9 +127,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       this.nativeHardLimit =
           saturatedAdd(saturatedAdd(residentHardLimit, allocatorSlack), 512L << 10);
     }
-    long sizingExpectedEntries =
-        expectedEntries > 0L ? expectedEntries : (countBounded ? maxSize : 0L);
-    int initialCapacity = ChmSizing.constructorCapacity(sizingExpectedEntries, limit);
+    long entryEstimate = countBounded ? maxSize : 0L;
+    int initialCapacity = ChmSizing.constructorCapacity(entryEstimate, limit);
     this.data = new ConcurrentHashMap<>(initialCapacity, 0.75f, 1);
     Entry bootstrap = Entry.bootstrap();
     data.put(bootstrap, bootstrap);
@@ -150,7 +147,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             eviction,
             evictionListener == null ? null : this::notifyEviction,
             readers,
-            ChmSizing.maintenanceQueueCapacity(sizingExpectedEntries, limit),
+            ChmSizing.maintenanceQueueCapacity(entryEstimate, limit),
                 countBounded);
     this.readerGuard = new ReaderGuard(worker, this::isClosing);
     worker.start();
@@ -254,6 +251,23 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
   }
 
+  private static final class LoadFlight<T> {
+    private final CompletableFuture<T> shared = new CompletableFuture<>();
+
+    private CompletableFuture<T> waiter() {
+      CompletableFuture<T> waiter = new CompletableFuture<>();
+      shared.whenComplete(
+          (value, failure) -> {
+            if (failure != null) {
+              waiter.completeExceptionally(failure);
+            } else {
+              waiter.complete(value);
+            }
+          });
+      return waiter;
+    }
+  }
+
   @Override
   public boolean put(K key, V value) {
     return putInternal(key, value, DEFAULT_TTL);
@@ -314,44 +328,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     worker.afterWrite(context);
   }
 
-  /**
-   * Encoded benchmark path: neither serializer is touched and the precomputed int hash is reused.
-   */
-  public boolean putEncoded(EncodedKey key, byte[] value) {
-    Objects.requireNonNull(key, "key");
-    Objects.requireNonNull(value, "value");
-    ThreadContext context = enterWriter();
-    if (context == null) {
-      if (isClosing()) {
-        throw new IllegalStateException("cache is closed");
-      }
-      worker.recordNonBlockingPutFailure();
+  private boolean admitNewEntry() {
+    if (data.mappingCount() >= maxSizeHighWatermark) {
+      worker.requestMaintenance();
       return false;
     }
-    try {
-      context.ensureKey(key.length());
-      key.copyTo(context.keyBytes, 0);
-      byte[] encodedKey = context.keyBytes;
-      context.lookupKey.setPrecomputed(encodedKey, key.length(), key.hash64());
-      boolean accepted =
-          putSerialized(
-              context,
-              context.lookupKey,
-              encodedKey,
-              key.length(),
-              null,
-              value,
-              value.length,
-              DEFAULT_TTL,
-              false);
-      if (!accepted) {
-        worker.recordNonBlockingPutFailure();
-      }
-      finishWrite(context, accepted);
-      return accepted;
-    } finally {
-      exitWriter(context);
-    }
+    return true;
   }
 
   private boolean putSerialized(
@@ -367,8 +349,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (value != null) {
       rejectByteBufferValue(value);
     }
-    long expireAtMillis =
-        requestedExpiry == DEFAULT_TTL ? defaultExpiry(lookup.hash64()) : requestedExpiry;
+    long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
     worker.throwIfUnavailable();
     Entry existing;
     if (!enter(context)) {
@@ -398,8 +379,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       }
       return result > 0;
     }
-    if (data.mappingCount() >= maxSizeHighWatermark) {
-      worker.requestMaintenance();
+    if (!admitNewEntry()) {
       return false;
     }
     Entry candidate =
@@ -748,7 +728,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void bindEncodedKey(ThreadContext context, EncodedKey key) {
     context.ensureKey(key.length());
     key.copyTo(context.keyBytes, 0);
-    context.lookupKey.setPrecomputed(context.keyBytes, key.length(), key.hash64());
+    context.lookupKey.set(context.keyBytes, key.length());
   }
 
   private V getEncoded(EncodedKey key) {
@@ -980,11 +960,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return result;
   }
 
-  private static int resultCapacity(int expectedEntries) {
-    if (expectedEntries < 3) {
-      return expectedEntries + 1;
+  private static int resultCapacity(int requestedEntries) {
+    if (requestedEntries < 3) {
+      return requestedEntries + 1;
     }
-    long requested = ((long) expectedEntries * 4L + 2L) / 3L + 1L;
+    long requested = ((long) requestedEntries * 4L + 2L) / 3L + 1L;
     return (int) Math.min(1L << 30, requested);
   }
 
@@ -1041,14 +1021,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             result.complete(false);
             return;
           }
+          boolean accepted = false;
           try {
             int keyLength = KeyEncoder.encode(keySerializer, key, context);
-            result.complete(
+            accepted =
                 putIfAbsentValue(
-                    context, context.lookupKey, context.keyBytes, keyLength, value, expireAtMillis));
+                    context, context.lookupKey, context.keyBytes, keyLength, value, expireAtMillis);
           } finally {
             exitWriter(context);
           }
+          result.complete(accepted);
         });
     return result;
   }
@@ -1082,6 +1064,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (removal <= 0) {
         return false;
       }
+    }
+    if (!admitNewEntry()) {
+      return false;
     }
     int valueLength = serializedSize(valueSerializer, value);
     Entry candidate =
@@ -1360,20 +1345,20 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return failed;
     }
     EncodedKey flightKey =
-        EncodedKey.fromSerialized(
-            context.keyBytes, context.lookupKey.length(), context.lookupKey.hash64());
-    CompletableFuture<V> result = new CompletableFuture<>();
-    CompletableFuture<V> previous = loadFlights.putIfAbsent(flightKey, result);
+        EncodedKey.copyOf(context.keyBytes, context.lookupKey.length());
+    LoadFlight<V> created = new LoadFlight<>();
+    LoadFlight<V> previous = loadFlights.putIfAbsent(flightKey, created);
     if (previous != null) {
-      return previous;
+      return previous.waiter();
     }
-    result.whenComplete((value, failure) -> loadFlights.remove(flightKey, result));
+    created.shared.whenComplete((value, failure) -> loadFlights.remove(flightKey, created));
     try {
-      loaderExecutor.execute(() -> loadAndPublish(key, flightKey, loader, expireAtMillis, result));
+      loaderExecutor.execute(
+          () -> loadAndPublish(key, flightKey, loader, expireAtMillis, created.shared));
     } catch (Throwable failure) {
-      result.completeExceptionally(failure);
+      created.shared.completeExceptionally(failure);
     }
-    return result;
+    return created.waiter();
   }
 
   private void loadAndPublish(
@@ -1431,14 +1416,27 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   @Override
   public CompletableFuture<Void> flushAsync() {
-    if (closeState.get() != OPEN) {
-      return CompletableFuture.completedFuture(null);
+    if (worker.thread() == Thread.currentThread()) {
+      throw new IllegalStateException("flushAsync cannot be called from the maintenance actor");
     }
-    ThreadContext context = contexts.get();
-    if (context.isRegistered()) {
-      context.flushRead();
+    synchronized (lifecycleLock) {
+      if (closeState.get() != OPEN) {
+        return CompletableFuture.completedFuture(null);
+      }
+      Runnable hook = flushAdmissionHookForTest;
+      if (hook != null) {
+        hook.run();
+      }
+      ThreadContext context = contexts.get();
+      if (context.isRegistered()) {
+        context.flushRead();
+      }
+      return independentWaiter(worker.flush());
     }
-    return worker.flush();
+  }
+
+  void setFlushAdmissionHookForTest(Runnable hook) {
+    flushAdmissionHookForTest = hook;
   }
 
   @Override
@@ -1513,12 +1511,19 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   @Override
   public void close() {
-    if (closeState.get() == CLOSED) {
-      return;
+    if (worker.thread() == Thread.currentThread()) {
+      throw new IllegalStateException("close cannot be called from the maintenance actor");
     }
-    closeState.compareAndSet(OPEN, CLOSING);
-    closing = true;
-    worker.beginClosing();
+    synchronized (lifecycleLock) {
+      if (closeState.get() == CLOSED) {
+        return;
+      }
+      if (closeState.get() == OPEN) {
+        closeState.set(CLOSING);
+        closing = true;
+        worker.beginClosing();
+      }
+    }
     long deadline =
         System.nanoTime()
             + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(1L, closeTimeoutMillis));
@@ -1550,7 +1555,22 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalStateException(
           "close timed out with active readers or writers=" + readers.activeWriterCount());
     }
-    closeState.compareAndSet(CLOSING, CLOSED);
+    synchronized (lifecycleLock) {
+      closeState.compareAndSet(CLOSING, CLOSED);
+    }
+  }
+
+  private static <T> CompletableFuture<T> independentWaiter(CompletableFuture<T> shared) {
+    CompletableFuture<T> waiter = new CompletableFuture<>();
+    shared.whenComplete(
+        (value, failure) -> {
+          if (failure != null) {
+            waiter.completeExceptionally(failure);
+          } else {
+            waiter.complete(value);
+          }
+        });
+    return waiter;
   }
 
   private boolean enter(ThreadContext context) {
@@ -1751,22 +1771,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         && NativeMemory.equals(ValueBlock.payloadAddress(value), expectedAddress, expectedLength);
   }
 
-  private long defaultExpiry(long hash) {
+  private long defaultExpiry() {
     if (defaultTtlMillis <= 0L) {
       return 0L;
     }
     long now = ticker.currentTimeMillis();
-    long jitterRange = (long) (defaultTtlMillis * ttlJitterPercent);
-    if (jitterRange > 0L) {
-      long span = jitterRange > (Long.MAX_VALUE - 1L) / 2L ? Long.MAX_VALUE : jitterRange * 2L + 1L;
-      long mixed = mix64(hash);
-      long jitter = Math.floorMod(mixed, span) - jitterRange;
-      if (jitter > 0L && defaultTtlMillis > Long.MAX_VALUE - jitter) {
-        return Long.MAX_VALUE;
-      }
-      long duration = defaultTtlMillis + jitter;
-      return now > Long.MAX_VALUE - duration ? Long.MAX_VALUE : now + duration;
-    }
     return Long.MAX_VALUE - now < defaultTtlMillis ? Long.MAX_VALUE : now + defaultTtlMillis;
   }
 
@@ -1822,13 +1831,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     } catch (OutOfMemoryError ignored) {
       // Weak-value backfill is an optimization; the native-deserialized result remains valid.
     }
-  }
-
-  private static long mix64(long value) {
-    value += 0x9e3779b97f4a7c15L;
-    value = (value ^ (value >>> 30)) * 0xbf58476d1ce4e5b9L;
-    value = (value ^ (value >>> 27)) * 0x94d049bb133111ebL;
-    return value ^ (value >>> 31);
   }
 
   @SuppressWarnings("rawtypes")

@@ -84,6 +84,39 @@ public class CloseConcurrencyTest {
   }
 
   @Test(timeOut = 5_000L)
+  public void flushAdmissionAndCloseAreLinearized() throws Exception {
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
+    CountDownLatch flushCheckedOpen = new CountDownLatch(1);
+    CountDownLatch releaseFlush = new CountDownLatch(1);
+    cache.setFlushAdmissionHookForTest(
+        () -> {
+          flushCheckedOpen.countDown();
+          await(releaseFlush);
+        });
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      Future<?> flush = callers.submit(() -> cache.flushAsync().join());
+      assertTrue(flushCheckedOpen.await(2L, TimeUnit.SECONDS));
+      Future<?> close = callers.submit(cache::close);
+      Thread.sleep(100L);
+      assertFalse(close.isDone(), "close must not pass flush admission while the lock is held");
+
+      releaseFlush.countDown();
+      flush.get(2L, TimeUnit.SECONDS);
+      close.get(2L, TimeUnit.SECONDS);
+    } finally {
+      releaseFlush.countDown();
+      callers.shutdownNow();
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
   public void closeWaitsForAWriterAdmittedBeforeClosing() throws Exception {
     CountDownLatch serializeStarted = new CountDownLatch(1);
     CountDownLatch releaseSerialize = new CountDownLatch(1);

@@ -23,7 +23,6 @@ import org.openjdk.jmh.infra.Blackhole;
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.DirectEntryConsumer;
 import com.red.ohc.api.DirectValueConsumer;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.ValueView;
 import com.red.ohc.cache.OHCacheBuilder;
@@ -67,7 +66,6 @@ public class OHCBenchmark {
 
   private static final int WORKING_SET = 24_576;
   private byte[][] rawKeys;
-  private EncodedKey[] encodedKeys;
   private byte[][] values;
   private List<byte[]> directBatchKeys;
   private int[] accessSequence;
@@ -77,11 +75,9 @@ public class OHCBenchmark {
   public void setup() {
     long payloadCapacity = capacityFor(residency, keyBytes, valueBytes);
     rawKeys = new byte[WORKING_SET][];
-    encodedKeys = new EncodedKey[WORKING_SET];
     values = new byte[WORKING_SET][];
     for (int i = 0; i < WORKING_SET; i++) {
       rawKeys[i] = bytes(keyBytes, i);
-      encodedKeys[i] = EncodedKey.copyOf(rawKeys[i]);
       values[i] = bytes(valueBytes, i * 31 + 7);
     }
     directBatchKeys = Arrays.asList(Arrays.copyOf(rawKeys, 512));
@@ -93,12 +89,11 @@ public class OHCBenchmark {
                 .capacity(payloadCapacity)
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
-                .expectedEntries(WORKING_SET)
                 .eviction(eviction)
                 .allocator(allocator)
                 .build();
     for (int i = 0; i < WORKING_SET; i++) {
-      ohc.putEncoded(encodedKeys[i], values[i]);
+      ohc.put(rawKeys[i], values[i]);
       if ((i & 1023) == 1023) {
         ohc.flushAsync().join();
       }
@@ -148,7 +143,7 @@ public class OHCBenchmark {
   private void accessOHC(ThreadState state, Blackhole blackhole, WriteResults results) {
     int index = state.next(accessSequence);
     if (state.write(workload)) {
-      results.record(ohc.putEncoded(encodedKeys[index], values[index]));
+      results.record(ohc.put(rawKeys[index], values[index]));
       return;
     }
     state.blackhole = blackhole;

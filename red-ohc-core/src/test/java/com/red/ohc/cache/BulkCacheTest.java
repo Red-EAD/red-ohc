@@ -532,7 +532,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 23)
-                .expectedEntries(2_048)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .build()) {
@@ -692,7 +691,6 @@ public class BulkCacheTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
-            .expectedEntries(64)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
@@ -717,7 +715,6 @@ public class BulkCacheTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 23)
-            .expectedEntries(2_048)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
@@ -745,7 +742,6 @@ public class BulkCacheTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 24)
-            .expectedEntries(4_096)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
@@ -820,7 +816,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 22)
-                .expectedEntries(1_024)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .build()) {
@@ -893,7 +888,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 23)
-                .expectedEntries(1_024)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .build()) {
@@ -993,7 +987,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 24)
-                .expectedEntries(1)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
@@ -1024,7 +1017,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 24)
-                .expectedEntries(1)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
@@ -1056,7 +1048,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 26)
-                .expectedEntries(1)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
@@ -1083,7 +1074,6 @@ public class BulkCacheTest {
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
                 .capacity(1 << 24)
-                .expectedEntries(1)
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped();
@@ -1117,7 +1107,6 @@ public class BulkCacheTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 22)
-            .expectedEntries(2_048)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
@@ -1181,7 +1170,6 @@ public class BulkCacheTest {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 23)
-            .expectedEntries(1_024)
             .keySerializer(countingKeySerializer)
             .valueSerializer(observingValueSerializer)
             .build()) {

@@ -82,9 +82,10 @@ public final class HashingTest {
     try {
       NativeMemory.putLong(address, 0x12345678L);
       NativeMemory.copy(storedBytes, 0, address + Long.BYTES, storedBytes.length);
-      Entry entry = new Entry(address, storedBytes.length, 0x12345678, 0L);
       LookupKey lookup = new LookupKey();
-      lookup.setPrecomputed(lookupBytes, lookupBytes.length, 0x12345678);
+      lookup.set(lookupBytes, lookupBytes.length);
+      NativeMemory.putLong(address, lookup.hash64());
+      Entry entry = new Entry(address, storedBytes.length, lookup.hash(), 0L);
 
       assertFalse(lookup.equals(entry));
     } finally {

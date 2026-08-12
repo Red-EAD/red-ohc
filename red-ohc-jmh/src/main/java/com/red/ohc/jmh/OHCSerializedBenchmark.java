@@ -60,7 +60,6 @@ public class OHCSerializedBenchmark {
         (OffHeapCache<byte[], byte[]>)
             OHCacheBuilder.<byte[], byte[]>newBuilder()
                 .capacity(capacity)
-                .expectedEntries(SerializedBenchmarkSupport.WORKING_SET)
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)

@@ -3,6 +3,8 @@ package com.red.ohc.storage;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 
@@ -198,6 +200,55 @@ public class WriterArenaTest {
       long reused = arena.allocate(bytes);
       memory.releaseEntry(reused, bytes);
       Assert.assertTrue(memory.allocated() >= 0L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void retirementKeepsTheCurrentPageWhenAllocationRacesAfterEmptyCheck() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      long first = arena.allocate(bytes);
+      CountDownLatch hookEntered = new CountDownLatch(1);
+      CountDownLatch releaseHook = new CountDownLatch(1);
+      arena.setRetirementHookForTest(
+          new Runnable() {
+            private boolean firstCall = true;
+
+            @Override
+            public synchronized void run() {
+              if (!firstCall) {
+                return;
+              }
+              firstCall = false;
+              hookEntered.countDown();
+              try {
+                releaseHook.await(2L, TimeUnit.SECONDS);
+              } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(interrupted);
+              }
+            }
+          });
+
+      Thread freeing = new Thread(() -> memory.releaseEntry(first, bytes));
+      freeing.start();
+      Assert.assertTrue(hookEntered.await(2L, TimeUnit.SECONDS));
+      long second = arena.allocate(bytes);
+      Assert.assertNotEquals(second, 0L);
+      releaseHook.countDown();
+      freeing.join(2_000L);
+      Assert.assertFalse(freeing.isAlive());
+
+      Field pagesField = WriterArena.class.getDeclaredField("currentPages");
+      pagesField.setAccessible(true);
+      Assert.assertNotNull(((AtomicReferenceArray<?>) pagesField.get(arena)).get(sizeClass));
+
+      memory.releaseEntry(second, bytes);
     } finally {
       memory.closeArenas();
     }

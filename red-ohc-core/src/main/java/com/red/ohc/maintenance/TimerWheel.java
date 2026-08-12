@@ -56,6 +56,10 @@ public final class TimerWheel {
     return scheduled != 0L;
   }
 
+  boolean hasPendingExpiry() {
+    return pendingExpirySlot >= 0;
+  }
+
   public void add(Entry entry, long expireAtMillis) {
     if (expireAtMillis <= 0L || entry.timerScheduled()) {
       return;
@@ -320,7 +324,8 @@ public final class TimerWheel {
     }
   }
 
-  private long nextWakeTick() {
+  /** Returns the next actor-owned tick that can require timer work. */
+  long nextWakeTick() {
     if (pendingExpirySlot >= 0) {
       return tick + 1L;
     }

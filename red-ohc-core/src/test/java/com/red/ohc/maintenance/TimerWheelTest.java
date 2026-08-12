@@ -25,6 +25,14 @@ public class TimerWheelTest {
   }
 
   @Test
+  public void nextWakeTickPointsAtTheNextSixtyFourMillisecondBoundary() {
+    TimerWheel wheel = new TimerWheel(0L);
+    wheel.add(new Entry(0L, 0, 2, 0L), 10_000L);
+
+    assertEquals(wheel.nextWakeTick(), 157L);
+  }
+
+  @Test
   public void idleCatchUpSkipsEmptyTicksToReachALongOverdueDeadline() {
     TimerWheel wheel = new TimerWheel(0L);
     wheel.add(new Entry(0L, 0, 23, 0L), 10_000L * 64L);
