@@ -82,7 +82,7 @@ public final class CHMArchitectureTest {
   public void maintenanceClockHasNoCallerRefreshEntryPoint() {
     for (Method method : MaintenanceEventLoop.class.getDeclaredMethods()) {
       assertTrue(
-          !method.getName().equals("refreshClock"),
+          !method.getName().equals("refreshClock") || java.lang.reflect.Modifier.isPrivate(method.getModifiers()),
           "business and loader threads must not write the actor-owned clock");
     }
   }

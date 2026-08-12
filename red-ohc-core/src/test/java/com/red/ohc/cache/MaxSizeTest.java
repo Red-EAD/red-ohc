@@ -270,9 +270,11 @@ public final class MaxSizeTest {
 
   @Test(timeOut = 2_000L)
   public void highWaterRejectionWakesTheIdleActorForAsyncRecovery() throws Exception {
+    BlockingPassTicker ticker = new BlockingPassTicker();
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .maxSize(1)
+            .ticker(ticker)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
@@ -283,18 +285,14 @@ public final class MaxSizeTest {
       waitUntilParked(worker);
       cache.dataForTest().put(first, first);
       cache.dataForTest().put(second, second);
-      long generation = idleGeneration(worker);
-
+      ticker.blockPass = true;
       assertFalse(cache.put("rejected", "value"));
-      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-      while (idleGeneration(worker) == generation && System.nanoTime() < deadline) {
-        Thread.yield();
-      }
 
       assertTrue(
-          idleGeneration(worker) > generation,
-          "a rejected write must wake the actor to recover expired or evictable capacity");
+          ticker.passStarted.await(1L, TimeUnit.SECONDS),
+          "a rejected write must enter the next strictly scheduled maintenance pass");
     } finally {
+      ticker.releasePass.countDown();
       cache.dataForTest().remove(first, first);
       cache.dataForTest().remove(second, second);
       cache.close();
@@ -361,12 +359,6 @@ public final class MaxSizeTest {
     return (MaintenanceEventLoop) workerField.get(cache);
   }
 
-  private static long idleGeneration(MaintenanceEventLoop worker) throws Exception {
-    Field field = MaintenanceEventLoop.class.getDeclaredField("idleGeneration");
-    field.setAccessible(true);
-    return field.getLong(worker);
-  }
-
   private static void waitUntilParked(MaintenanceEventLoop worker) throws InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
     while (!worker.isParked() && System.nanoTime() < deadline) {
@@ -395,6 +387,26 @@ public final class MaxSizeTest {
     @Override
     public long currentTimeMillis() {
       return now;
+    }
+  }
+
+  private static final class BlockingPassTicker implements Ticker {
+    final CountDownLatch passStarted = new CountDownLatch(1);
+    final CountDownLatch releasePass = new CountDownLatch(1);
+    volatile boolean blockPass;
+
+    @Override
+    public long nanos() {
+      if (blockPass) {
+        passStarted.countDown();
+        await(releasePass);
+      }
+      return System.nanoTime();
+    }
+
+    @Override
+    public long currentTimeMillis() {
+      return System.currentTimeMillis();
     }
   }
 }

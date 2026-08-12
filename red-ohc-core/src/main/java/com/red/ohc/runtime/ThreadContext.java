@@ -52,7 +52,6 @@ public final class ThreadContext {
     private int budgetStripeIndex = -1;
     private boolean writerEntered;
     private boolean retirementPublished;
-    private long maintenanceWakeGeneration = Long.MIN_VALUE;
 
     private WriterState(WriterArena writerArena) {
       this.writerArena = writerArena;
@@ -419,20 +418,6 @@ public final class ThreadContext {
   public void publish() {
     slot.publishedHits = slot.localHits;
     slot.publishedMisses = slot.localMisses;
-  }
-
-  /**
-   * The maintenance actor increments its idle generation only as it commits to an idle park. A
-   * writer signals at most once per such generation, removing a global WakeGate access from steady
-   * replacement traffic while retaining the park-before-publish handshake.
-   */
-  public boolean needsMaintenanceWake(long idleGeneration) {
-    WriterState state = ensureWriterState();
-    if (state.maintenanceWakeGeneration == idleGeneration) {
-      return false;
-    }
-    state.maintenanceWakeGeneration = idleGeneration;
-    return true;
   }
 
   private AccessRing accessRing() {

@@ -71,7 +71,7 @@ public class MaintenanceAccountingTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void idleTtlRemainsPhysicalUntilTheNextMaintenanceEvent() throws Exception {
+  public void scheduledTtlIsPhysicallyCleanedOnTheMaintenanceCadence() throws Exception {
     MutableTicker ticker = new MutableTicker();
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
@@ -88,10 +88,7 @@ public class MaintenanceAccountingTest {
 
       assertEquals(
           cache.get("key"), null, "strict reads must reject an idle cache's logically expired value");
-      assertEquals(cache.size(), 1L, "idle TTL cleanup must wait for a maintenance event");
-
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 0L);
+      assertEquals(cache.size(), 0L, "scheduled TTL cleanup must converge without a later producer event");
     }
   }
 
