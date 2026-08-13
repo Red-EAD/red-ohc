@@ -46,9 +46,10 @@ public final class WakeGate {
     while (true) {
       int current = state.get();
       if (current == PROCESSING_TO_IDLE) {
-        return state.compareAndSet(PROCESSING_TO_IDLE, IDLE);
-      }
-      if (current == PROCESSING_TO_REQUIRED) {
+        if (state.compareAndSet(PROCESSING_TO_IDLE, IDLE)) {
+          return true;
+        }
+      } else if (current == PROCESSING_TO_REQUIRED) {
         if (state.compareAndSet(PROCESSING_TO_REQUIRED, REQUIRED)) {
           return false;
         }
