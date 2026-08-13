@@ -39,7 +39,28 @@ final class PageDepot {
       return;
     }
     if (idlePages.incrementAndGet() <= maxIdlePages) {
-      pages[page.sizeClass].offer(page);
+      boolean offered;
+      try {
+        offered = pages[page.sizeClass].offer(page);
+      } catch (OutOfMemoryError failure) {
+        idlePages.decrementAndGet();
+        try {
+          memory.freeEntryPage(page);
+        } catch (Throwable cleanupFailure) {
+          if (cleanupFailure != failure) {
+            cleanupFailure.addSuppressed(failure);
+          }
+          throw cleanupFailure;
+        }
+        // The caller transfers ownership to the depot. Once the fallback free succeeds,
+        // release is complete: rethrowing the queue failure would make an enclosing
+        // retirement record retry an address whose native page no longer exists.
+        return;
+      }
+      if (!offered) {
+        idlePages.decrementAndGet();
+        memory.freeEntryPage(page);
+      }
       return;
     }
     idlePages.decrementAndGet();

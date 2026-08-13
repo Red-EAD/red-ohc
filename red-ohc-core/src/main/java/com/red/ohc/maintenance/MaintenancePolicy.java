@@ -1,8 +1,6 @@
 package com.red.ohc.maintenance;
 
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 
 import com.red.ohc.api.Eviction;
 import com.red.ohc.index.Entry;
@@ -34,7 +32,7 @@ public final class MaintenancePolicy {
   private final EntryDeque window = new EntryDeque();
   private final EntryDeque probation = new EntryDeque();
   private final EntryDeque protectedQueue = new EntryDeque();
-  private final LinkedHashMap<Long, Long> ghost;
+  private final GhostMap ghost;
   private final long ghostMaximum;
   private final long smallMaximum;
   private long windowMaximum;
@@ -48,7 +46,6 @@ public final class MaintenancePolicy {
   private long probationWeight;
   private long protectedWeight;
   private volatile long evictions;
-  private long ghostHits;
   private long ghostWeight;
   private long hitsInSample;
   private long missesInSample;
@@ -80,7 +77,12 @@ public final class MaintenancePolicy {
     this.protectedMaximum = Math.max(1L, mainMaximum * 80L / 100L);
     this.hillStep = -Math.max(HILL_MIN_STEP, capacity * HILL_INITIAL_STEP_PERCENT);
     this.ghostMaximum = Math.max(1L, capacity - smallMaximum);
-    this.ghost = eviction == Eviction.S3_FIFO ? new LinkedHashMap<>() : null;
+    if (eviction == Eviction.S3_FIFO) {
+      this.ghost = new GhostMap();
+      this.ghost.defaultReturnValue(Long.MIN_VALUE);
+    } else {
+      this.ghost = null;
+    }
   }
 
   public void add(Entry entry) {
@@ -97,10 +99,9 @@ public final class MaintenancePolicy {
     switch (eviction) {
       case S3_FIFO:
         long hash = entry.keyHash64();
-        Long ghostEntryWeight = ghost.remove(hash);
-        if (ghostEntryWeight != null) {
+        long ghostEntryWeight = ghost.remove(hash);
+        if (ghostEntryWeight != Long.MIN_VALUE) {
           ghostWeight -= ghostEntryWeight;
-          ghostHits++;
           link(main, entry, Entry.POLICY_S3_MAIN);
           mainWeight += entry.policyWeight;
         } else {
@@ -279,11 +280,7 @@ public final class MaintenancePolicy {
   }
 
   long ghostHeapBytes() {
-    return ghost == null ? 0L : (long) ghost.size() * Long.BYTES * 2L;
-  }
-
-  long ghostHits() {
-    return ghostHits;
+    return ghost == null ? 0L : ghost.heapBytes();
   }
 
   /** A successfully consumed access event, not a delayed global cache-stat delta. */
@@ -311,10 +308,6 @@ public final class MaintenancePolicy {
 
   public int lastVictimScanCount() {
     return lastVictimScanCount;
-  }
-
-  boolean containsEntry(Entry entry) {
-    return entry.policyState() != Entry.POLICY_NONE;
   }
 
   private Selection s3Victim(int scanLimit) {
@@ -519,18 +512,15 @@ public final class MaintenancePolicy {
   }
 
   private void addGhost(Entry entry, long fingerprint) {
-    Long previous = ghost.remove(fingerprint);
-    if (previous != null) {
+    long previous = ghost.remove(fingerprint);
+    if (previous != Long.MIN_VALUE) {
       ghostWeight -= previous;
     }
     ghost.put(fingerprint, entry.policyWeight);
     ghostWeight += entry.policyWeight;
     if (ghostWeight > ghostMaximum) {
-      Iterator<Map.Entry<Long, Long>> oldest = ghost.entrySet().iterator();
-      while (ghostWeight > ghostMaximum && oldest.hasNext()) {
-        Map.Entry<Long, Long> entryToRemove = oldest.next();
-        ghostWeight -= entryToRemove.getValue();
-        oldest.remove();
+      while (ghostWeight > ghostMaximum && !ghost.isEmpty()) {
+        ghostWeight -= ghost.removeFirstLong();
       }
     }
   }
@@ -631,6 +621,17 @@ public final class MaintenancePolicy {
       }
       unlink(entry);
       linkHead(entry);
+    }
+  }
+
+  /**
+   * Fastutil owns three primitive arrays for this linked map. Report their payload capacity rather
+   * than the logical entry count; like the other internal-memory statistics, JVM object and array
+   * headers are deliberately excluded because their sizes are VM-specific.
+   */
+  private static final class GhostMap extends Long2LongLinkedOpenHashMap {
+    long heapBytes() {
+      return ((long) key.length + value.length + link.length) * Long.BYTES;
     }
   }
 }

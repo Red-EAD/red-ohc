@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -64,19 +65,43 @@ public class MaintenanceEventLoopTest {
     assertTrue(scheduler.isDue(1_000_100L));
   }
 
-  @Test
-  public void actorWorkQuantumAlsoAppliesToTheFirstRound() throws Exception {
-    Method method =
-        MaintenanceEventLoop.class.getDeclaredMethod("roundLimit", int.class, int.class, int.class);
-    method.setAccessible(true);
+  @Test(timeOut = 5_000L)
+  public void removalBacklogCannotStarveAsyncMutationsWithinOnePass() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry(),
+            8_192);
+    try {
+      ReliableRemovalQueue removals =
+          (ReliableRemovalQueue) getField(loop, "reliableRemovals");
+      int general = (Integer) getField(getField(loop, "batchLimits"), "general");
+      int removalCount = 4_096 + 1;
+      ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
+      for (int index = 0; index < removalCount; index++) {
+        assertTrue(removals.tryReserve(reservation));
+        removals.commit(reservation, null);
+      }
 
-    assertEquals((int) method.invoke(null, 256, 0, 0), 64);
-    assertEquals((int) method.invoke(null, 256, 0, 63), 1);
-    assertEquals((int) method.invoke(null, 256, 4_096, 0), 0);
+      CountDownLatch asyncExecuted = new CountDownLatch(1);
+      assertTrue(loop.submitAsyncMutation(asyncExecuted::countDown, Throwable::printStackTrace));
+
+      invokeMaintenancePassWork(loop);
+      assertEquals(asyncExecuted.getCount(), 0L);
+      assertEquals(removals.size(), (long) removalCount - general);
+    } finally {
+      memory.closeArenas();
+    }
   }
 
-  @Test
-  public void asyncDepthUsesSubmittedAndCompletedSequences() throws Exception {
+  @Test(timeOut = 5_000L)
+  public void asyncDepthReportsPhysicalQueueSize() throws Exception {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -86,13 +111,322 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
+    CountDownLatch started = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
     try {
-      AtomicLong submitted = (AtomicLong) getField(loop, "asyncSubmitted");
-      submitted.set(100L);
-      setLongField(loop, "asyncCompletedSequence", 37L);
-      assertEquals(loop.asyncMutationQueueDepth(), 63L);
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {
+                started.countDown();
+                await(release);
+              },
+              Throwable::printStackTrace));
+      assertEquals(loop.asyncMutationQueueDepth(), 1L);
+
+      loop.start();
+      assertTrue(started.await(2L, TimeUnit.SECONDS));
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+      release.countDown();
+      loop.flush().join();
     } finally {
+      release.countDown();
+      loop.stop();
+      loop.join(1_000L);
       ((NativeMemory.Memory) getField(loop, "memory")).closeArenas();
+    }
+  }
+
+  @Test
+  public void asyncDepthDoesNotTraverseTheMutationQueue() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    Field field = MaintenanceEventLoop.class.getDeclaredField("asyncMutations");
+    field.setAccessible(true);
+    field.set(loop, new SizeForbiddenQueue<>());
+    try {
+      assertEquals(
+          loop.asyncMutationQueueDepth(),
+          0L,
+          "an eventually consistent statistic must not traverse an unbounded concurrent queue");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void closingWaitsForAnAdmittedAsyncTaskToPublish() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    BlockingOfferQueue<Object> queue = new BlockingOfferQueue<>();
+    Field field = MaintenanceEventLoop.class.getDeclaredField("asyncMutations");
+    field.setAccessible(true);
+    field.set(loop, queue);
+    AtomicBoolean submitted = new AtomicBoolean();
+    CompletableFuture<Void> terminal = new CompletableFuture<>();
+    CountDownLatch closeReturned = new CountDownLatch(1);
+    Thread submitter =
+        new Thread(
+            () ->
+                submitted.set(
+                    loop.submitAsyncMutation(
+                        () -> terminal.complete(null), terminal::completeExceptionally)));
+    Thread closer =
+        new Thread(
+            () -> {
+              loop.beginClosing();
+              loop.stop();
+              closeReturned.countDown();
+            });
+    loop.start();
+    try {
+      submitter.start();
+      assertTrue(queue.offerEntered.await(1L, TimeUnit.SECONDS));
+      closer.start();
+      assertFalse(
+          closeReturned.await(100L, TimeUnit.MILLISECONDS),
+          "close must linearize after a submission that already passed admission");
+
+      queue.releaseOffer.countDown();
+      submitter.join(1_000L);
+      closer.join(1_000L);
+      loop.join(1_000L);
+
+      assertTrue(submitted.get());
+      assertTrue(terminal.isDone(), "the admitted task must execute or be rejected before shutdown");
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      queue.releaseOffer.countDown();
+      loop.beginClosing();
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void failedAsyncOfferDoesNotPublishAPhantomSequence() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    Field field = MaintenanceEventLoop.class.getDeclaredField("asyncMutations");
+    field.setAccessible(true);
+    field.set(loop, new ThrowingOfferQueue<>());
+    CompletableFuture<Void> rejected = new CompletableFuture<>();
+    try {
+      assertFalse(loop.submitAsyncMutation(() -> {}, rejected::completeExceptionally));
+      assertTrue(rejected.isCompletedExceptionally());
+      assertEquals(((AtomicLong) getField(loop, "asyncSubmitted")).get(), 0L);
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+      loop.start();
+    } finally {
+      loop.beginClosing();
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void terminalDrainCanRaceAnActorPeekWithoutRegressingQueueDepth() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    PeekBlockingQueue<Object> queue = new PeekBlockingQueue<>();
+    Field field = MaintenanceEventLoop.class.getDeclaredField("asyncMutations");
+    field.setAccessible(true);
+    field.set(loop, queue);
+    CompletableFuture<Void> first = new CompletableFuture<>();
+    CompletableFuture<Void> second = new CompletableFuture<>();
+    AtomicReference<Throwable> drainFailure = new AtomicReference<>();
+    Thread draining =
+        new Thread(
+            () -> {
+              try {
+                invokeDrainAsyncMutations(loop, 2);
+              } catch (Throwable failure) {
+                drainFailure.set(failure);
+              }
+            });
+    try {
+      assertTrue(loop.submitAsyncMutation(() -> {}, first::completeExceptionally));
+      assertTrue(loop.submitAsyncMutation(() -> {}, second::completeExceptionally));
+      draining.start();
+      assertTrue(queue.peekEntered.await(1L, TimeUnit.SECONDS));
+
+      loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
+      queue.releasePeek.countDown();
+      draining.join(1_000L);
+
+      assertEquals(drainFailure.get(), null);
+      assertTrue(first.isCompletedExceptionally());
+      assertTrue(second.isCompletedExceptionally());
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      queue.releasePeek.countDown();
+      draining.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void oneBrokenRejectCallbackCannotStrandLaterAsyncTasks() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    CompletableFuture<Void> later = new CompletableFuture<>();
+    try {
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {},
+              failure -> {
+                throw new IllegalStateException("broken rejection callback");
+              }));
+      assertTrue(loop.submitAsyncMutation(() -> {}, later::completeExceptionally));
+
+      loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
+
+      assertTrue(
+          later.isCompletedExceptionally(),
+          "one rejection callback must not prevent later tasks from reaching a terminal state");
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void terminalFailurePublishedBeforeAsyncExecutionRejectsTheTask() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    AtomicBoolean executed = new AtomicBoolean();
+    CompletableFuture<Void> rejected = new CompletableFuture<>();
+    try {
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> executed.set(true), rejected::completeExceptionally));
+      ((AtomicReference<Throwable>) getField(loop, "terminalFailure"))
+          .set(new IllegalStateException("maintenance boom"));
+
+      assertEquals(invokeDrainAsyncMutations(loop, 1), 1);
+
+      assertFalse(executed.get(), "an unavailable cache must not execute a queued mutation");
+      assertTrue(rejected.isCompletedExceptionally());
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void brokenAsyncRejectCallbackDoesNotBecomeAMaintenanceFailure() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    try {
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {
+                throw new IllegalStateException("mutation failed");
+              },
+              failure -> {
+                throw new IllegalStateException("broken rejection callback");
+              }));
+
+      assertEquals(invokeDrainAsyncMutations(loop, 1), 1);
+
+      assertEquals(((AtomicReference<?>) getField(loop, "terminalFailure")).get(), null);
+      assertEquals(loop.asyncMutationFailedCount(), 1L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void flushBarrierOrdersAsyncSequencesAcrossSignedLongWrap() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    AtomicLong submitted = (AtomicLong) getField(loop, "asyncSubmitted");
+    submitted.set(Long.MAX_VALUE - 1L);
+    setLongField(loop, "asyncCompletedSequence", Long.MAX_VALUE - 1L);
+    AtomicInteger executed = new AtomicInteger();
+    try {
+      assertTrue(loop.submitAsyncMutation(executed::incrementAndGet, Throwable::printStackTrace));
+      assertTrue(loop.submitAsyncMutation(executed::incrementAndGet, Throwable::printStackTrace));
+      CompletableFuture<Void> flush = loop.flush();
+
+      loop.start();
+      flush.get(2L, TimeUnit.SECONDS);
+
+      assertEquals(
+          executed.get(),
+          2,
+          "a wrapped flush sequence must wait for every task included by its barrier");
+    } finally {
+      loop.beginClosing();
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
     }
   }
 
@@ -2083,6 +2417,14 @@ public class MaintenanceEventLoopTest {
     return (Integer) method.invoke(loop);
   }
 
+  private static int invokeDrainAsyncMutations(MaintenanceEventLoop loop, int limit)
+      throws Exception {
+    Method method =
+        MaintenanceEventLoop.class.getDeclaredMethod("drainAsyncMutations", int.class);
+    method.setAccessible(true);
+    return (Integer) method.invoke(loop, limit);
+  }
+
   private static void invokeScheduleEvictionRetry(MaintenanceEventLoop loop) throws Exception {
     Method method = MaintenanceEventLoop.class.getDeclaredMethod("scheduleEvictionRetry");
     method.setAccessible(true);
@@ -2173,6 +2515,48 @@ public class MaintenanceEventLoopTest {
     public boolean isEmpty() {
       emptyChecks.incrementAndGet();
       return super.isEmpty();
+    }
+  }
+
+  private static final class SizeForbiddenQueue<E> extends ConcurrentLinkedQueue<E> {
+    @Override
+    public int size() {
+      throw new AssertionError("queue traversal is forbidden");
+    }
+  }
+
+  private static final class BlockingOfferQueue<E> extends ConcurrentLinkedQueue<E> {
+    final CountDownLatch offerEntered = new CountDownLatch(1);
+    final CountDownLatch releaseOffer = new CountDownLatch(1);
+
+    @Override
+    public boolean offer(E element) {
+      offerEntered.countDown();
+      await(releaseOffer);
+      return super.offer(element);
+    }
+  }
+
+  private static final class ThrowingOfferQueue<E> extends ConcurrentLinkedQueue<E> {
+    @Override
+    public boolean offer(E element) {
+      throw new OutOfMemoryError("injected async queue offer failure");
+    }
+  }
+
+  private static final class PeekBlockingQueue<E> extends ConcurrentLinkedQueue<E> {
+    final CountDownLatch peekEntered = new CountDownLatch(1);
+    final CountDownLatch releasePeek = new CountDownLatch(1);
+    final AtomicBoolean blockFirstPeek = new AtomicBoolean(true);
+
+    @Override
+    public E peek() {
+      E element = super.peek();
+      if (element != null && blockFirstPeek.compareAndSet(true, false)) {
+        peekEntered.countDown();
+        await(releasePeek);
+      }
+      return element;
     }
   }
 

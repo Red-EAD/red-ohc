@@ -157,43 +157,4 @@ public final class OHCacheBuilder<K, V> {
         maxSize);
   }
 
-  long capacityValue() {
-    return capacity;
-  }
-
-  long maxSizeValue() {
-    return maxSize;
-  }
-
-  CacheSerializer<K> keySerializerValue() {
-    return keySerializer;
-  }
-
-  CacheSerializer<V> valueSerializerValue() {
-    return valueSerializer;
-  }
-
-  long defaultTtlMillisValue() {
-    return defaultTtlMillis;
-  }
-
-  Ticker tickerValue() {
-    return ticker;
-  }
-
-  Eviction evictionValue() {
-    return eviction;
-  }
-
-  AllocatorType allocatorTypeValue() {
-    return allocatorType;
-  }
-
-  Executor loaderExecutorValue() {
-    return loaderExecutor;
-  }
-
-  long closeTimeoutMillisValue() {
-    return closeTimeoutMillis;
-  }
 }

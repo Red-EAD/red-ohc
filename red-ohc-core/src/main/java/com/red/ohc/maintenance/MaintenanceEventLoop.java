@@ -46,10 +46,6 @@ public final class MaintenanceEventLoop
   private static final long EVICTION_RETRY_MAX_NANOS = 10_000_000L;
   private static final long RECLAIM_RETRY_INITIAL_NANOS = WINDOW_NANOS;
   private static final long RECLAIM_RETRY_MAX_NANOS = 10_000_000L;
-  private static final long ACTOR_TIME_BUDGET_NANOS = 250_000L;
-  private static final int ACTOR_MAX_WORK_PER_PASS = 4_096;
-  private static final int ACTOR_TIME_CHECK_INTERVAL = 64;
-
   /**
    * A deferred mutation has a writer in progress. Retry it with bounded backoff rather than
    * converting one long writer publication into a microsecond poll loop.
@@ -96,6 +92,8 @@ public final class MaintenanceEventLoop
   private final AtomicLong asyncSubmitted = new AtomicLong();
   private final AtomicLong asyncFailed = new AtomicLong();
   private final AtomicLong asyncRejected = new AtomicLong();
+  /** Last FIFO sequence removed from the physical queue; executing work is already dequeued. */
+  private final AtomicLong asyncDequeuedSequence = new AtomicLong();
   private volatile long asyncCompletedSequence;
 
   /** Actor-owned Entries whose transport item arrived while a writer owns the Entry mutex. */
@@ -326,13 +324,17 @@ public final class MaintenanceEventLoop
   }
 
   public void stop() {
-    stopping = true;
+    synchronized (asyncSubmissionLock) {
+      stopping = true;
+    }
     signal();
     LockSupport.unpark(thread);
   }
 
   public void beginClosing() {
-    closing = true;
+    synchronized (asyncSubmissionLock) {
+      closing = true;
+    }
   }
 
   public void join(long timeoutMillis) throws InterruptedException {
@@ -409,7 +411,7 @@ public final class MaintenanceEventLoop
   }
 
   public long asyncMutationQueueDepth() {
-    long depth = asyncSubmitted.get() - asyncCompletedSequence;
+    long depth = asyncSubmitted.get() - asyncDequeuedSequence.get();
     return Math.max(0L, depth);
   }
 
@@ -437,20 +439,24 @@ public final class MaintenanceEventLoop
             rejection =
                 new com.red.ohc.api.CacheMaintenanceException(unavailable);
           } else {
-            long sequence = asyncSubmitted.incrementAndGet();
-            asyncMutations.offer(new AsyncMutationTask(sequence, action, reject));
+            long sequence = asyncSubmitted.get() + 1L;
+            AsyncMutationTask task = new AsyncMutationTask(sequence, action, reject);
+            asyncMutations.offer(task);
+            // Publish the sequence only after the queue owns the task. Flush submission takes
+            // this same monitor, so it cannot capture a sequence with no corresponding task.
+            asyncSubmitted.set(sequence);
           }
         }
       }
     } catch (OutOfMemoryError error) {
       asyncRejected.incrementAndGet();
       recordTerminalFailure(error);
-      reject.accept(error);
+      notifyAsyncRejection(reject, error);
       return false;
     }
     if (rejection != null) {
       asyncRejected.incrementAndGet();
-      reject.accept(rejection);
+      notifyAsyncRejection(reject, rejection);
       return false;
     }
     requestWork(WORK_ASYNC);
@@ -873,76 +879,55 @@ public final class MaintenanceEventLoop
     if (plan.hasPolicyMutations()) {
       policy.beginWriteBatch();
     }
-    long deadline = saturatingAdd(System.nanoTime(), ACTOR_TIME_BUDGET_NANOS);
-    while (true) {
-      int roundWork = 0;
-      if (plan.removals) {
-        roundWork += drainReliableRemovals(roundLimit(batchLimits.general, work, roundWork));
+    if (plan.removals) {
+      work += drainReliableRemovals(batchLimits.general);
+    }
+    if (plan.mutations) {
+      work += drainMutations(batchLimits.general);
+    }
+    if (plan.repair) {
+      work += repairMutations(batchLimits.general);
+    }
+    if (plan.deferred) {
+      work += drainDeferredMutations(batchLimits.general);
+    }
+    if (plan.access) {
+      work += drainAccesses(batchLimits.access);
+    }
+    // Expiry/eviction runs after mutation repair so actor policy never observes a stale
+    // pointer or pending flag.
+    if (plan.ttl) {
+      work += wheel.advance(nowMillis, batchLimits.general, this);
+    }
+    if (plan.seal) {
+      work += sealRetirements(batchLimits.general);
+    }
+    if (plan.reclaim) {
+      if (advanceEpochIfDue(nowNanos)) {
+        work++;
       }
-      if (plan.mutations) {
-        roundWork += drainMutations(roundLimit(batchLimits.general, work, roundWork));
+      if (reclaimWorkDue(nowNanos)) {
+        work += reclaim(batchLimits.general);
       }
-      if (plan.repair) {
-        roundWork += repairMutations(roundLimit(batchLimits.general, work, roundWork));
+    }
+    if (plan.eviction) {
+      try {
+        work += evictIfNeeded(batchLimits.eviction);
+      } finally {
+        finishActorRetirementBatch();
       }
-      if (plan.deferred) {
-        roundWork += drainDeferredMutations(roundLimit(batchLimits.general, work, roundWork));
-      }
-      if (plan.access) {
-        roundWork += drainAccesses(roundLimit(batchLimits.access, work, roundWork));
-      }
-      // Expiry/eviction runs after mutation repair so actor policy never observes a stale
-      // pointer or pending flag.
-      if (plan.ttl) {
-        roundWork +=
-            wheel.advance(
-                nowMillis, roundLimit(batchLimits.general, work, roundWork), this);
-      }
-      if (plan.seal) {
-        roundWork += sealRetirements(roundLimit(batchLimits.general, work, roundWork));
-      }
-      if (plan.reclaim) {
-        if (advanceEpochIfDue(nowNanos)) {
-          roundWork++;
-        }
-        if (reclaimWorkDue(nowNanos)) {
-          roundWork += reclaim(roundLimit(batchLimits.general, work, roundWork));
-        }
-      }
-      if (plan.eviction) {
-        try {
-          roundWork +=
-              evictIfNeeded(roundLimit(batchLimits.eviction, work, roundWork));
-        } finally {
-          finishActorRetirementBatch();
-        }
-      }
-      if (plan.allocation && allocationPressureRequested.getAndSet(false)) {
-        roundWork += memory.trimIdlePages() > 0L ? 1 : 0;
-      }
-      if (plan.async) {
-        roundWork +=
-            drainAsyncMutations(roundLimit(batchLimits.async, work, roundWork));
-      }
-      work += roundWork;
-      if (roundWork == 0
-          || work >= ACTOR_MAX_WORK_PER_PASS
-          || (work >= ACTOR_TIME_CHECK_INTERVAL && System.nanoTime() >= deadline)
-          || (!hasContinuationWork() && requestedWork.get() == 0)) {
-        break;
-      }
+    }
+    if (plan.allocation && allocationPressureRequested.getAndSet(false)) {
+      work += memory.trimIdlePages() > 0L ? 1 : 0;
+    }
+    if (plan.async) {
+      work += drainAsyncMutations(batchLimits.async);
     }
     publishLiveWeight();
     if (plan.flush) {
       completeFlushIfIdle();
     }
     return work;
-  }
-
-  private static int roundLimit(int configured, int work, int roundWork) {
-    int remainingQuantum = ACTOR_TIME_CHECK_INTERVAL - roundWork;
-    int remainingPass = ACTOR_MAX_WORK_PER_PASS - work - roundWork;
-    return Math.min(configured, Math.max(0, Math.min(remainingQuantum, remainingPass)));
   }
 
   private void publishLiveWeight() {
@@ -1159,7 +1144,7 @@ public final class MaintenanceEventLoop
           || !queue.isEmpty()
           || !deferredMutations.isEmpty()
           || repairNeeded.get()
-          || asyncCompletedSequence < request.sequence
+          || sequenceAfter(request.sequence, asyncCompletedSequence)
           || allocationPressureRequested.get()
           || budgetPressureRequested.get()
           || accessHint.get()
@@ -1185,19 +1170,29 @@ public final class MaintenanceEventLoop
     while (work < limit) {
       FlushRequest barrier = flushRequest.get();
       AsyncMutationTask next = asyncMutations.peek();
-      if (next == null || (barrier != null && next.sequence > barrier.sequence)) {
+      if (next == null || (barrier != null && sequenceAfter(next.sequence, barrier.sequence))) {
         break;
       }
       AsyncMutationTask task = asyncMutations.poll();
-      if (closing || stopping) {
+      if (task == null) {
+        continue;
+      }
+      advanceAsyncDequeuedSequence(task.sequence);
+      Throwable unavailable = terminalFailure.get();
+      if (unavailable != null) {
         asyncRejected.incrementAndGet();
-        task.reject.accept(new IllegalStateException("cache is closing"));
+        notifyAsyncRejection(
+            task.reject,
+            new com.red.ohc.api.CacheMaintenanceException(unavailable));
+      } else if (closing || stopping) {
+        asyncRejected.incrementAndGet();
+        notifyAsyncRejection(task.reject, new IllegalStateException("cache is closing"));
       } else {
         try {
           task.action.run();
         } catch (Throwable failure) {
           asyncFailed.incrementAndGet();
-          task.reject.accept(failure);
+          notifyAsyncRejection(task.reject, failure);
         }
       }
       asyncCompletedSequence = task.sequence;
@@ -1214,6 +1209,7 @@ public final class MaintenanceEventLoop
     List<AsyncMutationTask> pending = new ArrayList<>();
     AsyncMutationTask task;
     while ((task = asyncMutations.poll()) != null) {
+      advanceAsyncDequeuedSequence(task.sequence);
       asyncCompletedSequence = task.sequence;
       pending.add(task);
     }
@@ -1223,7 +1219,32 @@ public final class MaintenanceEventLoop
   private void rejectAsyncTasks(List<AsyncMutationTask> tasks, Throwable failure) {
     for (AsyncMutationTask task : tasks) {
       asyncRejected.incrementAndGet();
-      task.reject.accept(failure);
+      notifyAsyncRejection(task.reject, failure);
+    }
+  }
+
+  private static void notifyAsyncRejection(Consumer<Throwable> reject, Throwable failure) {
+    try {
+      reject.accept(failure);
+    } catch (Throwable callbackFailure) {
+      if (callbackFailure != failure) {
+        failure.addSuppressed(callbackFailure);
+      }
+    }
+  }
+
+  /** Sequence ordering modulo 2^64; live async backlog is always far below half the sequence space. */
+  private static boolean sequenceAfter(long sequence, long reference) {
+    return sequence != reference && sequence - reference > 0L;
+  }
+
+  private void advanceAsyncDequeuedSequence(long sequence) {
+    long current = asyncDequeuedSequence.get();
+    while (sequenceAfter(sequence, current)) {
+      if (asyncDequeuedSequence.compareAndSet(current, sequence)) {
+        return;
+      }
+      current = asyncDequeuedSequence.get();
     }
   }
 

@@ -3,6 +3,7 @@ package com.red.ohc.storage;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -12,6 +13,8 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
+import com.red.ohc.maintenance.RetirementQueue;
+import com.red.ohc.runtime.ReaderRegistry;
 
 public class WriterArenaTest {
   @Test
@@ -298,6 +301,48 @@ public class WriterArenaTest {
     }
   }
 
+  @Test
+  public void retirementConsumesARecordWhenDepotOfferFallsBackToFree() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    RetirementQueue retirements = new RetirementQueue(memory, 1, 2);
+    long allocation = ValueBlock.allocationLength(8);
+    int sizeClass = SizeClasses.indexForEntry(allocation);
+    Field depotField = NativeMemory.Memory.class.getDeclaredField("pageDepot");
+    depotField.setAccessible(true);
+    PageDepot depot = (PageDepot) depotField.get(memory);
+    Field pagesField = PageDepot.class.getDeclaredField("pages");
+    pagesField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    ConcurrentLinkedQueue<WriterArena.Page>[] pages =
+        (ConcurrentLinkedQueue<WriterArena.Page>[]) pagesField.get(depot);
+    ConcurrentLinkedQueue<WriterArena.Page> original = pages[sizeClass];
+    pages[sizeClass] = new ThrowingOfferQueue<>();
+    try {
+      long address = memory.newWriterArena().allocate(allocation);
+      RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
+      Assert.assertTrue(retirements.reserve(reservation, 1));
+      retirements.append(reservation, address, allocation);
+      Assert.assertEquals(retirements.seal(1, 1L), 1);
+
+      Assert.assertEquals(retirements.reclaim(new ReaderRegistry(), 1), 1);
+      Assert.assertEquals(retirements.queuedRecords(), 0L);
+      Assert.assertEquals(retirements.retiredEntries(), 0);
+      Assert.assertEquals(
+          memory.allocated(),
+          retirements.allocatedBytes(),
+          "a failed depot enqueue must consume the empty page without stranding its retirement"
+              + " record");
+      Field idleField = PageDepot.class.getDeclaredField("idlePages");
+      idleField.setAccessible(true);
+      Assert.assertEquals(((java.util.concurrent.atomic.AtomicInteger) idleField.get(depot)).get(), 0);
+      Assert.assertNull(depot.acquire(sizeClass));
+    } finally {
+      pages[sizeClass] = original;
+      retirements.close();
+      memory.closeArenas();
+    }
+  }
+
   private static long headState(WriterArena arena, int sizeClass) throws Exception {
     Field pagesField = WriterArena.class.getDeclaredField("currentPages");
     pagesField.setAccessible(true);
@@ -311,5 +356,12 @@ public class WriterArenaTest {
     Field field = NativeMemory.Memory.class.getDeclaredField("arenas");
     field.setAccessible(true);
     return ((WriterArena[]) field.get(memory))[index];
+  }
+
+  private static final class ThrowingOfferQueue<E> extends ConcurrentLinkedQueue<E> {
+    @Override
+    public boolean offer(E element) {
+      throw new OutOfMemoryError("injected page depot offer failure");
+    }
   }
 }

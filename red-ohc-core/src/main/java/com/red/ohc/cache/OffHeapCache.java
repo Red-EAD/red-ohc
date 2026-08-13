@@ -1476,18 +1476,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return memory.allocated();
   }
 
-  long rawNativeAllocations() {
-    return memory.rawAllocationCount();
-  }
-
-  long entryNativeAllocations() {
-    return memory.entryAllocationCount();
-  }
-
-  long nativeHardLimitForTest() {
-    return nativeHardLimit;
-  }
-
   ConcurrentHashMap<Entry, Entry> dataForTest() {
     return data;
   }

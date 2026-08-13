@@ -480,13 +480,6 @@ public final class RetirementQueue {
       return consumer < seal;
     }
 
-    long headEpoch() {
-      if (consumer >= seal) {
-        return 0L;
-      }
-      return NativeMemory.getLongVolatile(address(consumer) + EPOCH);
-    }
-
     void freeAll(RetirementQueue owner) {
       while (consumer < producer.get()) {
         long record = address(consumer);

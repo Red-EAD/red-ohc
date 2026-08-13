@@ -4,11 +4,12 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertSame;
+import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
 
+import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
@@ -131,15 +132,94 @@ public class MaintenancePolicyTest {
   }
 
   @Test
-  public void s3GhostUsesOnlyAJdkLinkedHashMap() throws Exception {
+  public void s3GhostAcceptsZeroAsARealHashKey() {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
+    Entry evicted = new Entry(0L, 1, 0, 0L, 0L);
+    Entry returnee = new Entry(0L, 1, 0, 0L, 0L);
+
+    policy.add(evicted);
+    policy.remove(evicted, true);
+    policy.add(returnee);
+
+    assertEquals(
+        returnee.policyState(),
+        Entry.POLICY_S3_MAIN,
+        "zero is a valid 64-bit ghost hash and must not be treated as a missing value");
+  }
+
+  @Test
+  public void s3GhostRemovesTheOldestEntryWhenWeightedCapacityIsExceeded() {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_280L);
+    Entry oldest = new Entry(0L, 1, 1, 1L, 0L);
+    Entry newest = new Entry(0L, 1, 10, 10L, 0L);
+
+    for (int hash = 1; hash <= 10; hash++) {
+      Entry entry = hash == 1 ? oldest : hash == 10 ? newest : new Entry(0L, 1, hash, hash, 0L);
+      policy.add(entry);
+      policy.remove(entry, true);
+    }
+
+    policy.add(oldest);
+    assertEquals(
+        oldest.policyState(),
+        Entry.POLICY_S3_SMALL,
+        "the oldest ghost must be removed first when ghost weight exceeds its limit");
+
+    policy.add(newest);
+    assertEquals(
+        newest.policyState(),
+        Entry.POLICY_S3_MAIN,
+        "the newest ghost must remain available for Main admission");
+    assertEquals(
+        policy.ghostHeapBytes(),
+        33L * Long.BYTES * 3L,
+        "ghost heap accounting must report primitive backing-array payload, including spare"
+            + " capacity");
+  }
+
+  @Test
+  public void s3GhostUsesAPrimitiveLinkedHashMap() throws Exception {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
     java.lang.reflect.Field ghost = MaintenancePolicy.class.getDeclaredField("ghost");
     ghost.setAccessible(true);
 
+    assertTrue(
+        ghost.get(policy) instanceof Long2LongLinkedOpenHashMap,
+        "S3 ghost state must use the primitive linked map");
+  }
+
+  @Test
+  public void s3DuplicateFingerprintRefreshesRecencyBeforeWeightedTrim() {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 512L);
+    Entry firstA = new Entry(0L, 1, 1, 101L, 0L);
+    Entry secondA = new Entry(0L, 200, 1, 101L, 0L);
+    Entry b = new Entry(0L, 1, 2, 202L, 0L);
+    Entry c = new Entry(0L, 1, 3, 303L, 0L);
+
+    policy.add(firstA);
+    policy.add(secondA);
+    policy.add(b);
+    policy.remove(firstA, true);
+    policy.remove(b, true);
+    policy.remove(secondA, true);
+    policy.add(c);
+    policy.remove(c, true);
+
+    Entry returningB = new Entry(0L, 1, 2, 202L, 0L);
+    policy.add(returningB);
     assertEquals(
-        ghost.get(policy).getClass(),
-        LinkedHashMap.class,
-        "S3 ghost state must not depend on a third-party collection");
+        returningB.policyState(),
+        Entry.POLICY_S3_SMALL,
+        "refreshing a duplicate fingerprint must make the older different fingerprint the first"
+            + " trim victim");
+    policy.remove(returningB, false);
+
+    Entry returningA = new Entry(0L, 1, 1, 101L, 0L);
+    policy.add(returningA);
+    assertEquals(
+        returningA.policyState(),
+        Entry.POLICY_S3_MAIN,
+        "the refreshed duplicate fingerprint must remain available for Main admission");
   }
 
   @Test
