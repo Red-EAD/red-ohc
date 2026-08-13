@@ -22,9 +22,9 @@ public class MaintenanceGenerationTest {
   public void staleRemovalCannotDeleteAValuePublishedAfterTheMaintenanceSnapshot() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long oldValue = memory.allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(oldValue, 1L, 1);
+    ValueBlock.initialize(oldValue, 1L, 1, 0L);
     long newValue = memory.allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(newValue, 2L, 1);
+    ValueBlock.initialize(newValue, 2L, 1, 0L);
     Entry entry = new Entry(0L, 0, 7, oldValue);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
@@ -77,7 +77,7 @@ public class MaintenanceGenerationTest {
   public void evictionSkipsAnEntryWhoseWriterMutexIsHeld() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long value = memory.allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(value, Long.MAX_VALUE, 1);
+    ValueBlock.initialize(value, Long.MAX_VALUE, 1, 0L);
     Entry entry = new Entry(0L, 0, 9, value);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);

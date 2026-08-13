@@ -78,7 +78,7 @@ public final class MaxSizeTest {
       cache.flushAsync().join();
 
       assertEquals(cache.size(), 2L);
-      assertTrue(cache.stats().getLiveWeight() > 0L);
+      assertTrue(cache.stats().liveWeight() > 0L);
     }
   }
 
@@ -117,7 +117,7 @@ public final class MaxSizeTest {
       assertEquals(cache.get("small"), small);
       assertEquals(cache.get("medium"), medium);
       assertEquals(cache.get("large"), large);
-      assertTrue(cache.stats().getLiveWeight() > medium.length());
+      assertTrue(cache.stats().liveWeight() > medium.length());
     }
   }
 
@@ -128,17 +128,17 @@ public final class MaxSizeTest {
       assertTrue(cache.put("expires", "value", 100L));
       assertTrue(cache.put("remove", "another value"));
       cache.flushAsync().join();
-      long liveBeforeRemove = cache.stats().getLiveWeight();
+      long liveBeforeRemove = cache.stats().liveWeight();
 
       assertTrue(cache.remove("remove"));
       cache.flushAsync().join();
       assertEquals(cache.size(), 1L);
-      assertTrue(cache.stats().getLiveWeight() < liveBeforeRemove);
+      assertTrue(cache.stats().liveWeight() < liveBeforeRemove);
 
       ticker.now = 200L;
       cache.flushAsync().join();
       assertEquals(cache.size(), 0L);
-      assertEquals(cache.stats().getLiveWeight(), 0L);
+      assertEquals(cache.stats().liveWeight(), 0L);
     }
   }
 
@@ -155,7 +155,7 @@ public final class MaxSizeTest {
       cache.flushAsync().join();
 
       assertEquals(cache.size(), 0L);
-      assertEquals(cache.stats().getPhysicalExpired(), 1_025L);
+      assertEquals(cache.stats().expirationCount(), 1_025L);
     }
   }
 
@@ -172,11 +172,11 @@ public final class MaxSizeTest {
       ticker.now = 128L;
       worker(cache).requestMaintenance();
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
-      while (cache.stats().getPhysicalExpired() < 1_025L && System.nanoTime() < deadline) {
+      while (cache.stats().expirationCount() < 1_025L && System.nanoTime() < deadline) {
         Thread.yield();
       }
 
-      assertEquals(cache.stats().getPhysicalExpired(), 1_025L);
+      assertEquals(cache.stats().expirationCount(), 1_025L);
       assertEquals(cache.size(), 0L);
     }
   }
@@ -195,7 +195,7 @@ public final class MaxSizeTest {
 
       assertEquals(cache.get("future"), "value");
       assertEquals(cache.size(), 1L);
-      assertEquals(cache.stats().getPhysicalExpired(), 0L);
+      assertEquals(cache.stats().expirationCount(), 0L);
     }
   }
 
@@ -228,13 +228,9 @@ public final class MaxSizeTest {
           "size="
               + cache.size()
               + ", queue="
-              + stats.getMaintenanceQueueDepth()
-              + ", repair="
-              + stats.getRepairQueueDepth()
-              + ", retired="
-              + stats.getRetirementQueueDepth()
+              + stats.maintenanceQueueDepth()
               + ", liveWeight="
-              + stats.getLiveWeight());
+              + stats.liveWeight());
     } finally {
       writers.shutdownNow();
     }

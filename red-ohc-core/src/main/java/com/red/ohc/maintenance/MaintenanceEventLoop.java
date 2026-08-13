@@ -154,13 +154,9 @@ public final class MaintenanceEventLoop
   private volatile long hits;
   private volatile long misses;
   private volatile long physicalExpired;
+  private final AtomicLong entryResidenceCount = new AtomicLong();
+  private final AtomicLong totalEntryResidenceTimeMillis = new AtomicLong();
   private volatile long timeoutLagMillis;
-  private final AtomicLong nonBlockingPutFailures = new AtomicLong();
-  private final AtomicLong nonBlockingReplaceFailures = new AtomicLong();
-  private final AtomicLong nonBlockingRemoveFailures = new AtomicLong();
-  private final AtomicLong writerContentionFailures = new AtomicLong();
-  private final AtomicLong retirementAdmissionFailures = new AtomicLong();
-  private final AtomicLong reliableRemovalAdmissionFailures = new AtomicLong();
   private final AtomicLong nativeAllocationFailures = new AtomicLong();
 
   private final AtomicBoolean unhealthy = new AtomicBoolean();
@@ -490,30 +486,6 @@ public final class MaintenanceEventLoop
     }
   }
 
-  public void recordNonBlockingPutFailure() {
-    nonBlockingPutFailures.incrementAndGet();
-  }
-
-  public void recordNonBlockingReplaceFailure() {
-    nonBlockingReplaceFailures.incrementAndGet();
-  }
-
-  public void recordNonBlockingRemoveFailure() {
-    nonBlockingRemoveFailures.incrementAndGet();
-  }
-
-  public void recordWriterContentionFailure() {
-    writerContentionFailures.incrementAndGet();
-  }
-
-  public void recordRetirementAdmissionFailure() {
-    retirementAdmissionFailures.incrementAndGet();
-  }
-
-  public void recordReliableRemovalAdmissionFailure() {
-    reliableRemovalAdmissionFailures.incrementAndGet();
-  }
-
   public void recordNativeAllocationFailure() {
     nativeAllocationFailures.incrementAndGet();
   }
@@ -630,7 +602,7 @@ public final class MaintenanceEventLoop
   /** Publishes a pre-reserved block to the cache-owned native retirement transport. */
   public void retireValue(
       com.red.ohc.runtime.ThreadContext context, long address, long allocation) {
-    retirements.append(context.retirement(), address, allocation);
+    retirements.appendValue(context.retirement(), address, allocation);
     context.markRetirementPublished();
   }
 
@@ -777,32 +749,16 @@ public final class MaintenanceEventLoop
         hits,
         misses,
         policy.evictions(),
+        policy.evictionWeight(),
         physicalExpired,
         publishedLiveWeight,
         timeoutLagMillis,
         unhealthy.get(),
         queue.size() + repairDebt,
-        retiredEntries(),
-        retiredBytes(),
-        timerBytes(),
         ttlBacklog(),
-        sketchBytes(),
-        ghostHeapBytes(),
-        ledgerBytes(),
-        queueCapacity,
-        retirementQueueDepth(),
-        retirementQueueCapacity(),
-        nonBlockingPutFailures.get(),
-        nonBlockingReplaceFailures.get(),
-        nonBlockingRemoveFailures.get(),
-        writerContentionFailures.get(),
-        retirementAdmissionFailures.get(),
-        reliableRemovalAdmissionFailures.get(),
         nativeAllocationFailures.get(),
-        repairDebt,
-        asyncMutationQueueDepth(),
-        asyncMutationFailedCount(),
-        asyncMutationRejectedCount());
+        entryResidenceCount.get(),
+        totalEntryResidenceTimeMillis.get());
   }
 
   @Override
@@ -1022,7 +978,11 @@ public final class MaintenanceEventLoop
     plan.eviction = (!stopping || plan.flush) && evictionWorkDue(nowNanos);
     plan.async = (plan.requested & WORK_ASYNC) != 0 || !asyncMutations.isEmpty();
     plan.refreshClock =
-        (plan.requested & WORK_CLOCK) != 0 || plan.flush || plan.ttl || (plan.requested & WORK_PRESSURE) != 0;
+        (plan.requested & WORK_CLOCK) != 0
+            || plan.flush
+            || plan.ttl
+            || plan.seal
+            || (plan.requested & WORK_PRESSURE) != 0;
     return plan;
   }
 
@@ -1326,7 +1286,7 @@ public final class MaintenanceEventLoop
       return false;
     }
     Entry entry = removalRecord.entry;
-    retireActorValue(removalRecord.valueAddress, removalRecord.valueAllocation);
+    retireActorValueBlock(removalRecord.valueAddress, removalRecord.valueAllocation);
     retireActorValue(entry.nativeKeyAddress, entry.keyAllocationLength());
     return true;
   }
@@ -1531,7 +1491,7 @@ public final class MaintenanceEventLoop
     if (!retirements.consumeReadyHint()) {
       return 0;
     }
-    int sealed = retirements.seal(limit, epoch);
+    int sealed = retirements.seal(limit, epoch, this::recordValueResidence);
     // The signal is coalesced. If the bounded pass consumed its complete budget, schedule
     // another pass rather than re-scanning every native retirement stripe unconditionally.
     if (sealed == limit) {
@@ -1903,9 +1863,23 @@ public final class MaintenanceEventLoop
 
   private void retireEntryBlocks(Entry entry, long value) {
     long valueAllocation = value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
-    retireActorValue(value, valueAllocation);
+    retireActorValueBlock(value, valueAllocation);
     long keyAllocation = entry.keyAllocationLength();
     retireActorValue(entry.nativeKeyAddress, keyAllocation);
+  }
+
+  /** Records one retired value version using the actor's last published maintenance time. */
+  private void recordValueResidence(long valueAddress) {
+    if (valueAddress == 0L) {
+      return;
+    }
+    long createdAtMillis = ValueBlock.createdAtMillis(valueAddress);
+    long residenceMillis = nowMillis - createdAtMillis;
+    if (residenceMillis < 0L) {
+      residenceMillis = 0L;
+    }
+    entryResidenceCount.incrementAndGet();
+    totalEntryResidenceTimeMillis.addAndGet(residenceMillis);
   }
 
   private void clearRepairWork(Entry entry) {
@@ -2041,6 +2015,10 @@ public final class MaintenanceEventLoop
 
   private void retireActorValue(long address, long allocation) {
     retirements.append(actorRetirement, address, allocation);
+  }
+
+  private void retireActorValueBlock(long address, long allocation) {
+    retirements.appendValue(actorRetirement, address, allocation);
   }
 
   private void signal() {
@@ -2225,93 +2203,45 @@ public final class MaintenanceEventLoop
   public static final class Snapshot {
     public final long hits;
     public final long misses;
-    public final long evicted;
-    public final long physicalExpired;
+    public final long evictionCount;
+    public final long evictionWeight;
+    public final long expirationCount;
     public final long liveWeight;
     public final long timeoutLagMillis;
     public final boolean unhealthy;
     public final long queueDepth;
-    public final long retiredEntries;
-    public final long retiredBytes;
-    public final long timerBytes;
     public final long ttlBacklog;
-    public final long sketchBytes;
-    public final long ghostHeapBytes;
-    public final long ledgerBytes;
-    public final long queueCapacity;
-    public final long retirementQueueDepth;
-    public final long retirementQueueCapacity;
-    public final long nonBlockingPutFailures;
-    public final long nonBlockingReplaceFailures;
-    public final long nonBlockingRemoveFailures;
-    public final long writerContentionFailures;
-    public final long retirementAdmissionFailures;
-    public final long reliableRemovalAdmissionFailures;
-    public final long nativeAllocationFailures;
-    public final long repairQueueDepth;
-    public final long asyncMutationQueueDepth;
-    public final long asyncMutationFailedCount;
-    public final long asyncMutationRejectedCount;
+    public final long nativeAllocationFailureCount;
+    public final long entryResidenceCount;
+    public final long totalEntryResidenceTimeMillis;
 
     Snapshot(
         long hits,
         long misses,
-        long evicted,
-        long physicalExpired,
+        long evictionCount,
+        long evictionWeight,
+        long expirationCount,
         long liveWeight,
         long timeoutLagMillis,
         boolean unhealthy,
         long queueDepth,
-        long retiredEntries,
-        long retiredBytes,
-        long timerBytes,
         long ttlBacklog,
-        long sketchBytes,
-        long ghostHeapBytes,
-        long ledgerBytes,
-        long queueCapacity,
-        long retirementQueueDepth,
-        long retirementQueueCapacity,
-        long nonBlockingPutFailures,
-        long nonBlockingReplaceFailures,
-        long nonBlockingRemoveFailures,
-        long writerContentionFailures,
-        long retirementAdmissionFailures,
-        long reliableRemovalAdmissionFailures,
-        long nativeAllocationFailures,
-        long repairQueueDepth,
-        long asyncMutationQueueDepth,
-        long asyncMutationFailedCount,
-        long asyncMutationRejectedCount) {
+        long nativeAllocationFailureCount,
+        long entryResidenceCount,
+        long totalEntryResidenceTimeMillis) {
       this.hits = hits;
       this.misses = misses;
-      this.evicted = evicted;
-      this.physicalExpired = physicalExpired;
+      this.evictionCount = evictionCount;
+      this.evictionWeight = evictionWeight;
+      this.expirationCount = expirationCount;
       this.liveWeight = liveWeight;
       this.timeoutLagMillis = timeoutLagMillis;
       this.unhealthy = unhealthy;
       this.queueDepth = queueDepth;
-      this.retiredEntries = retiredEntries;
-      this.retiredBytes = retiredBytes;
-      this.timerBytes = timerBytes;
       this.ttlBacklog = ttlBacklog;
-      this.sketchBytes = sketchBytes;
-      this.ghostHeapBytes = ghostHeapBytes;
-      this.ledgerBytes = ledgerBytes;
-      this.queueCapacity = queueCapacity;
-      this.retirementQueueDepth = retirementQueueDepth;
-      this.retirementQueueCapacity = retirementQueueCapacity;
-      this.nonBlockingPutFailures = nonBlockingPutFailures;
-      this.nonBlockingReplaceFailures = nonBlockingReplaceFailures;
-      this.nonBlockingRemoveFailures = nonBlockingRemoveFailures;
-      this.writerContentionFailures = writerContentionFailures;
-      this.retirementAdmissionFailures = retirementAdmissionFailures;
-      this.reliableRemovalAdmissionFailures = reliableRemovalAdmissionFailures;
-      this.nativeAllocationFailures = nativeAllocationFailures;
-      this.repairQueueDepth = repairQueueDepth;
-      this.asyncMutationQueueDepth = asyncMutationQueueDepth;
-      this.asyncMutationFailedCount = asyncMutationFailedCount;
-      this.asyncMutationRejectedCount = asyncMutationRejectedCount;
+      this.nativeAllocationFailureCount = nativeAllocationFailureCount;
+      this.entryResidenceCount = entryResidenceCount;
+      this.totalEntryResidenceTimeMillis = totalEntryResidenceTimeMillis;
     }
   }
 }

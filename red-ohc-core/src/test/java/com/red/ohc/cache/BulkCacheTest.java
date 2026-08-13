@@ -1097,7 +1097,8 @@ public class BulkCacheTest {
       }
       OHCacheStats paused = cache.stats();
       assertTrue(
-          paused.getMaintenanceQueueDepth() >= paused.getMaintenanceQueueCapacity());
+          paused.maintenanceQueueDepth() > 0L,
+          "the paused worker must leave pending maintenance work");
       assertTrue(cache.put("single-paused-1024", "value-1024"));
       assertEquals(
           cache.get("single-paused-1024"),
@@ -1156,13 +1157,10 @@ public class BulkCacheTest {
       assertEquals(cache.putAll(values), values.size());
       OHCacheStats paused = cache.stats();
       assertTrue(
-          paused.getMaintenanceQueueDepth() >= paused.getMaintenanceQueueCapacity(),
-          "the paused worker must leave the advisory queue at capacity");
+          paused.maintenanceQueueDepth() > 0L,
+          "the paused worker must leave pending maintenance work");
       assertTrue(cache.put("replace-paused-1024", "new-value"));
       assertEquals(cache.get("replace-paused-1024"), "new-value");
-      assertTrue(
-          cache.stats().getRetirementQueueDepth() > 0L,
-          "the old native value must be recorded even when the UPDATE hint is dropped");
     } finally {
       release.countDown();
       cache.flushAsync().join();

@@ -46,6 +46,7 @@ public final class MaintenancePolicy {
   private long probationWeight;
   private long protectedWeight;
   private volatile long evictions;
+  private volatile long evictionWeight;
   private long ghostWeight;
   private long hitsInSample;
   private long missesInSample;
@@ -178,6 +179,7 @@ public final class MaintenancePolicy {
       entry.policyByteWeight = 0L;
       return;
     }
+    long removedWeight = entry.policyWeight;
     switch (state) {
       case Entry.POLICY_LRU:
         unlink(lru, entry);
@@ -216,6 +218,7 @@ public final class MaintenancePolicy {
     entry.policyAccessCount(0);
     if (eviction) {
       evictions++;
+      evictionWeight = saturatedAdd(evictionWeight, removedWeight);
     }
   }
 
@@ -273,6 +276,10 @@ public final class MaintenancePolicy {
 
   long evictions() {
     return evictions;
+  }
+
+  long evictionWeight() {
+    return evictionWeight;
   }
 
   long sketchBytes() {

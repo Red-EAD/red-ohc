@@ -744,7 +744,7 @@ public class MaintenanceEventLoopTest {
       assertTrue(budget.tryReserve(weight, 0));
       long keyAddress = arena.allocate(keyAllocation);
       long valueAddress = arena.allocate(valueAllocation);
-      ValueBlock.initialize(valueAddress, 1L, 8);
+      ValueBlock.initialize(valueAddress, 1L, 8, 0L);
       NativeMemory.putByte(ValueBlock.payloadAddress(valueAddress), (byte) 0x11);
       Entry entry =
           new Entry(
@@ -1014,7 +1014,7 @@ public class MaintenanceEventLoopTest {
     long allocation = ValueBlock.allocationLength(1);
     long value = arena.allocate(allocation);
     NativeMemory.putLong(key, 129L);
-    ValueBlock.initialize(value, 0L, 1);
+    ValueBlock.initialize(value, 0L, 1, 0L);
     Entry entry = new Entry(key, 0, 129, value);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
@@ -1098,7 +1098,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     ConcurrentHashMap<Entry, Entry> data = index();
     long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(value, 64L, 1);
+    ValueBlock.initialize(value, 64L, 1, 0L);
     Entry entry = new Entry(0L, 0, 93, 0L, Entry.tagValueAddress(value, true));
     data.put(entry, entry);
     MaintenanceEventLoop loop =
@@ -1684,7 +1684,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
-    ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1);
+    ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1, 0L);
     Entry entry = new Entry(0L, 0, 78, 0L);
     data.put(entry, entry);
     MaintenanceEventLoop loop =
@@ -1729,7 +1729,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
-    ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1);
+    ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1, 0L);
     Entry entry = new Entry(0L, 0, 79, 0L);
     data.put(entry, entry);
     MaintenanceEventLoop loop =
@@ -1806,8 +1806,8 @@ public class MaintenanceEventLoopTest {
     long keyTwo = arena.allocate(keyAllocation);
     long valueOne = arena.allocate(allocation);
     long valueTwo = arena.allocate(allocation);
-    ValueBlock.initialize(valueOne, 0L, 1);
-    ValueBlock.initialize(valueTwo, 0L, 1);
+    ValueBlock.initialize(valueOne, 0L, 1, 0L);
+    ValueBlock.initialize(valueTwo, 0L, 1, 0L);
     NativeMemory.putLong(keyOne, 101L);
     NativeMemory.putLong(keyTwo, 102L);
     Entry one = new Entry(keyOne, 0, 101, valueOne);
@@ -1873,7 +1873,7 @@ public class MaintenanceEventLoopTest {
     long key = arena.allocate(8L);
     long value = arena.allocate(ValueBlock.allocationLength(1));
     NativeMemory.putLong(key, 121L);
-    ValueBlock.initialize(value, 0L, 1);
+    ValueBlock.initialize(value, 0L, 1, 0L);
     Entry entry = new Entry(key, 0, 121, value);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
@@ -1911,8 +1911,8 @@ public class MaintenanceEventLoopTest {
     long valueTwo = arena.allocate(allocation);
     NativeMemory.putLong(keyOne, 131L);
     NativeMemory.putLong(keyTwo, 132L);
-    ValueBlock.initialize(valueOne, 0L, 1);
-    ValueBlock.initialize(valueTwo, 0L, 1);
+    ValueBlock.initialize(valueOne, 0L, 1, 0L);
+    ValueBlock.initialize(valueTwo, 0L, 1, 0L);
     Entry one = new Entry(keyOne, 0, 131, valueOne);
     Entry two = new Entry(keyTwo, 0, 132, valueTwo);
     ConcurrentHashMap<Entry, Entry> data = index();
@@ -2470,7 +2470,7 @@ public class MaintenanceEventLoopTest {
             budget.tryReserve(
                 com.red.ohc.storage.WriterArena.allocationWeight(allocation), 0));
         long address = memory.newWriterArena().allocate(allocation);
-        ValueBlock.initialize(address, 0L, 1);
+        ValueBlock.initialize(address, 0L, 1, 0L);
         retirements.append(reservation, address, allocation);
       }
       loop.afterWrite();
@@ -2484,9 +2484,9 @@ public class MaintenanceEventLoopTest {
           0L,
           "the worker must continue bounded seal/reclaim passes instead of parking with records"
               + " pending: "
-              + loop.snapshot().retiredEntries
+              + loop.retiredEntries()
               + "/"
-              + loop.snapshot().retirementQueueDepth
+              + loop.retirementQueueDepth()
               + ", parked="
               + loop.isParked());
     } finally {
@@ -2515,7 +2515,7 @@ public class MaintenanceEventLoopTest {
           budget.tryReserve(
               com.red.ohc.storage.WriterArena.allocationWeight(allocation), 0));
       long value = memory.newWriterArena().allocate(allocation);
-      ValueBlock.initialize(value, 0L, 1);
+      ValueBlock.initialize(value, 0L, 1, 0L);
       assertTrue(loop.prepareRetirement(context, 1));
       loop.retireValue(context, value, allocation);
       loop.afterWrite(context);
@@ -2545,7 +2545,7 @@ public class MaintenanceEventLoopTest {
       MaintenanceEventLoop loop, NativeMemory.Memory memory, Budget budget, ThreadContext context) {
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
-    ValueBlock.initialize(value, 0L, 1);
+    ValueBlock.initialize(value, 0L, 1, 0L);
     assertTrue(
         budget.tryReserve(
             com.red.ohc.storage.WriterArena.allocationWeight(allocation), 0));

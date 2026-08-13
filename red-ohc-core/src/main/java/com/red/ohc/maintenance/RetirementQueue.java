@@ -19,6 +19,12 @@ public final class RetirementQueue {
   private static final long ADDRESS = 8L;
   private static final long ALLOCATION = 16L;
   private static final long EPOCH = 24L;
+  private static final long VALUE_BLOCK_FLAG = Long.MIN_VALUE;
+
+  @FunctionalInterface
+  interface ValueConsumer {
+    void accept(long address);
+  }
 
   private final NativeMemory.Memory memory;
   private final Stripe[] stripes;
@@ -124,11 +130,23 @@ public final class RetirementQueue {
   }
 
   public void append(Reservation reservation, long address, long allocation) {
+    append(reservation, address, allocation, false);
+  }
+
+  void appendValue(Reservation reservation, long address, long allocation) {
+    append(reservation, address, allocation, true);
+  }
+
+  private void append(
+      Reservation reservation, long address, long allocation, boolean valueBlock) {
     if (!reservation.active()) {
       throw new IllegalStateException("missing retirement reservation");
     }
     Stripe stripe = reservation.stripe;
-    stripe.publish(reservation.nextIndex(), address, allocation);
+    stripe.publish(
+        reservation.nextIndex(),
+        address,
+        valueBlock ? allocation | VALUE_BLOCK_FLAG : allocation);
     // Publish only after the native sequence release. If the actor clears the hint before
     // this store, the store remains visible for its next pass; if it clears afterwards, its
     // scan observes this already-published sequence. Either interleaving preserves progress.
@@ -171,11 +189,15 @@ public final class RetirementQueue {
 
   /** Seals at most {@code limit} producer-published records with the supplied actor epoch. */
   public int seal(int limit, long epoch) {
+    return seal(limit, epoch, null);
+  }
+
+  int seal(int limit, long epoch, ValueConsumer valueConsumer) {
     int sealed = 0;
     int scanned = 0;
     while (sealed < limit && scanned < stripes.length) {
       Stripe stripe = stripes[sealCursor];
-      int stripeSealed = stripe.seal(limit - sealed, epoch, this);
+      int stripeSealed = stripe.seal(limit - sealed, epoch, this, valueConsumer);
       sealed += stripeSealed;
       if (stripe.hasSealedRecords()) {
         activate(stripe);
@@ -428,7 +450,7 @@ public final class RetirementQueue {
       NativeMemory.putLongRelease(record + SEQUENCE, index + 1L);
     }
 
-    int seal(int limit, long epoch, RetirementQueue owner) {
+    int seal(int limit, long epoch, RetirementQueue owner, ValueConsumer valueConsumer) {
       int sealed = 0;
       while (sealed < limit && seal < producer.get()) {
         long record = address(seal);
@@ -436,7 +458,13 @@ public final class RetirementQueue {
           break;
         }
         if (NativeMemory.getLong(record + EPOCH) == 0L) {
-          long allocation = NativeMemory.getLong(record + ALLOCATION);
+          long encodedAllocation = NativeMemory.getLong(record + ALLOCATION);
+          long allocation = encodedAllocation & ~VALUE_BLOCK_FLAG;
+          if (valueConsumer != null
+              && (encodedAllocation & VALUE_BLOCK_FLAG) != 0L
+              && NativeMemory.getLong(record + ADDRESS) != 0L) {
+            valueConsumer.accept(NativeMemory.getLong(record + ADDRESS));
+          }
           NativeMemory.putLongRelease(record + EPOCH, epoch);
           owner.sealed(allocation);
           sealed++;
@@ -462,7 +490,7 @@ public final class RetirementQueue {
           break;
         }
         long entryAddress = NativeMemory.getLong(record + ADDRESS);
-        long allocation = NativeMemory.getLong(record + ALLOCATION);
+        long allocation = NativeMemory.getLong(record + ALLOCATION) & ~VALUE_BLOCK_FLAG;
         owner.reclaimed(entryAddress, allocation);
         NativeMemory.putLongRelease(record + SEQUENCE, consumer + capacity);
         consumer++;
@@ -487,7 +515,7 @@ public final class RetirementQueue {
           break;
         }
         long entryAddress = NativeMemory.getLong(record + ADDRESS);
-        long allocation = NativeMemory.getLong(record + ALLOCATION);
+        long allocation = NativeMemory.getLong(record + ALLOCATION) & ~VALUE_BLOCK_FLAG;
         owner.reclaimed(entryAddress, allocation);
         NativeMemory.putLongRelease(record + SEQUENCE, consumer + capacity);
         consumer++;

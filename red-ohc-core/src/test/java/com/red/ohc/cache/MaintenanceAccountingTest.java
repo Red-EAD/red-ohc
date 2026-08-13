@@ -12,6 +12,7 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
+import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
 
 public class MaintenanceAccountingTest {
@@ -37,7 +38,7 @@ public class MaintenanceAccountingTest {
 
   @Test
   public void physicalExpiryRemovesTheLiveWeight() {
-    MutableTicker ticker = new MutableTicker();
+    MutableTicker ticker = new MutableTicker(0L);
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
@@ -47,9 +48,9 @@ public class MaintenanceAccountingTest {
             .build()) {
       assertTrue(cache.put("key", "value", 64L));
       cache.flushAsync().join();
-      assertTrue(cache.stats().getLiveWeight() > 0L);
+      assertTrue(cache.stats().liveWeight() > 0L);
       assertEquals(
-          cache.stats().getLiveWeight(),
+          cache.stats().liveWeight(),
           256L,
           "live weight must include two 128-byte allocator slots, not only the 32-byte raw blocks");
 
@@ -57,7 +58,7 @@ public class MaintenanceAccountingTest {
       cache.flushAsync().join();
 
       assertEquals(cache.size(), 0L);
-      assertEquals(cache.stats().getLiveWeight(), 0L, "TTL removal must refund live weight");
+      assertEquals(cache.stats().liveWeight(), 0L, "TTL removal must refund live weight");
     }
   }
 
@@ -72,7 +73,7 @@ public class MaintenanceAccountingTest {
 
   @Test(timeOut = 2_000L)
   public void scheduledTtlIsPhysicallyCleanedOnTheMaintenanceCadence() throws Exception {
-    MutableTicker ticker = new MutableTicker();
+    MutableTicker ticker = new MutableTicker(0L);
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
@@ -92,8 +93,73 @@ public class MaintenanceAccountingTest {
     }
   }
 
+  @Test(timeOut = 5_000L)
+  public void residenceTimeCountsEveryValueVersionAtSecondResolutionWithoutFlush()
+      throws InterruptedException {
+    MutableTicker ticker = new MutableTicker(0L);
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .ticker(ticker)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("key", "old"));
+
+      ticker.millis = 7_000L;
+      assertTrue(cache.put("key", "new"));
+
+      ticker.millis = 12_000L;
+      assertTrue(cache.remove("key"));
+
+      OHCacheStats stats = awaitResidenceStats(cache, 2L, 10_000L);
+
+      assertEquals(stats.entryResidenceCount(), 2L);
+      assertTrue(stats.totalEntryResidenceTimeMillis() >= 10_000L);
+      assertTrue(stats.averageEntryResidenceTimeMillis() >= 5_000.0d);
+    }
+  }
+
+  private static OHCacheStats awaitResidenceStats(
+      OHCache<String, String> cache, long expectedCount, long expectedMillis)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + 4_000_000_000L;
+    OHCacheStats stats;
+    do {
+      stats = cache.stats();
+      if (stats.entryResidenceCount() >= expectedCount
+          && stats.totalEntryResidenceTimeMillis() >= expectedMillis) {
+        return stats;
+      }
+      Thread.sleep(10L);
+    } while (System.nanoTime() < deadline);
+    return stats;
+  }
+
+  @Test
+  public void evictionPublishesThePolicyWeight() {
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(256L)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("one", "value-one"));
+      assertTrue(cache.put("two", "value-two"));
+      cache.flushAsync().join();
+
+      OHCacheStats stats = cache.stats();
+      assertTrue(stats.evictionCount() > 0L);
+      assertTrue(stats.evictionWeight() > 0L);
+    }
+  }
+
   private static final class MutableTicker implements Ticker {
     volatile long millis;
+
+    MutableTicker(long millis) {
+      this.millis = millis;
+    }
 
     @Override
     public long nanos() {

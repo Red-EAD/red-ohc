@@ -369,7 +369,7 @@ public final class WeakValuesTest {
       Entry first = cache.dataForTest().values().stream().filter(e -> e.nativeKeyAddress != 0L).findFirst().get();
       assertTrue(cache.put("two", new Pojo("value-two")));
       cache.flushAsync().join();
-      assertTrue(cache.stats().getEvictionCount() > 0L);
+      assertTrue(cache.stats().evictionCount() > 0L);
       assertEquals(first.weakValueSlot(), null);
     }
   }

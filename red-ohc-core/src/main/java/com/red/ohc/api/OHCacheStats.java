@@ -1,232 +1,173 @@
 package com.red.ohc.api;
 
-/** Eventually-consistent cache and maintenance metrics. */
+/** Weakly consistent cache and maintenance metrics. */
 public final class OHCacheStats {
-  private final long readHits;
-  private final long readMisses;
-  private final long maintenanceQueueDepth;
-  private final long maintenanceQueueCapacity;
-  private final boolean maintenanceUnhealthy;
-  private final long physicalExpired;
-  private final long ttlLagMillis;
-  private final long ttlBacklog;
+  private final long hitCount;
+  private final long missCount;
+  private final long loadSuccessCount;
+  private final long loadFailureCount;
+  private final long totalLoadTime;
   private final long evictionCount;
-  private final long retiredEntries;
+  private final long evictionWeight;
+  private final long expirationCount;
+  private final long entryResidenceCount;
+  private final long totalEntryResidenceTimeMillis;
   private final long size;
   private final long liveWeight;
-  private final long residentWeight;
-  private final long retiredWeight;
   private final long nativeAllocatedBytes;
-  private final long timerHeapBytes;
-  private final long sketchHeapBytes;
-  private final long ghostHeapBytes;
-  private final long retirementQueueNativeBytes;
-  private final long retirementQueueDepth;
-  private final long retirementQueueCapacity;
-  private final long nonBlockingPutFailureCount;
-  private final long nonBlockingReplaceFailureCount;
-  private final long nonBlockingRemoveFailureCount;
-  private final long writerContentionFailureCount;
-  private final long retirementAdmissionFailureCount;
-  private final long reliableRemovalAdmissionFailureCount;
+  private final boolean maintenanceUnhealthy;
+  private final long maintenanceQueueDepth;
+  private final long ttlLagMillis;
+  private final long ttlBacklog;
   private final long nativeAllocationFailureCount;
-  private final long repairQueueDepth;
-  private final long asyncMutationQueueDepth;
-  private final long asyncMutationFailedCount;
-  private final long asyncMutationRejectedCount;
 
   public OHCacheStats(
-      long readHits,
-      long readMisses,
-      long maintenanceQueueDepth,
-      long maintenanceQueueCapacity,
-      boolean maintenanceUnhealthy,
-      long physicalExpired,
-      long ttlLagMillis,
-      long ttlBacklog,
+      long hitCount,
+      long missCount,
+      long loadSuccessCount,
+      long loadFailureCount,
+      long totalLoadTime,
       long evictionCount,
-      long retiredEntries,
+      long evictionWeight,
+      long expirationCount,
+      long entryResidenceCount,
+      long totalEntryResidenceTimeMillis,
       long size,
       long liveWeight,
-      long residentWeight,
-      long retiredWeight,
       long nativeAllocatedBytes,
-      long timerHeapBytes,
-      long sketchHeapBytes,
-      long ghostHeapBytes,
-      long retirementQueueNativeBytes,
-      long retirementQueueDepth,
-      long retirementQueueCapacity,
-      long nonBlockingPutFailureCount,
-      long nonBlockingReplaceFailureCount,
-      long nonBlockingRemoveFailureCount,
-      long writerContentionFailureCount,
-      long retirementAdmissionFailureCount,
-      long reliableRemovalAdmissionFailureCount,
-      long nativeAllocationFailureCount,
-      long repairQueueDepth,
-      long asyncMutationQueueDepth,
-      long asyncMutationFailedCount,
-      long asyncMutationRejectedCount) {
-    this.readHits = readHits;
-    this.readMisses = readMisses;
-    this.maintenanceQueueDepth = maintenanceQueueDepth;
-    this.maintenanceQueueCapacity = maintenanceQueueCapacity;
-    this.maintenanceUnhealthy = maintenanceUnhealthy;
-    this.physicalExpired = physicalExpired;
-    this.ttlLagMillis = ttlLagMillis;
-    this.ttlBacklog = ttlBacklog;
+      boolean maintenanceUnhealthy,
+      long maintenanceQueueDepth,
+      long ttlLagMillis,
+      long ttlBacklog,
+      long nativeAllocationFailureCount) {
+    this.hitCount = hitCount;
+    this.missCount = missCount;
+    this.loadSuccessCount = loadSuccessCount;
+    this.loadFailureCount = loadFailureCount;
+    this.totalLoadTime = totalLoadTime;
     this.evictionCount = evictionCount;
-    this.retiredEntries = retiredEntries;
+    this.evictionWeight = evictionWeight;
+    this.expirationCount = expirationCount;
+    this.entryResidenceCount = entryResidenceCount;
+    this.totalEntryResidenceTimeMillis = totalEntryResidenceTimeMillis;
     this.size = size;
     this.liveWeight = liveWeight;
-    this.residentWeight = residentWeight;
-    this.retiredWeight = retiredWeight;
     this.nativeAllocatedBytes = nativeAllocatedBytes;
-    this.timerHeapBytes = timerHeapBytes;
-    this.sketchHeapBytes = sketchHeapBytes;
-    this.ghostHeapBytes = ghostHeapBytes;
-    this.retirementQueueNativeBytes = retirementQueueNativeBytes;
-    this.retirementQueueDepth = retirementQueueDepth;
-    this.retirementQueueCapacity = retirementQueueCapacity;
-    this.nonBlockingPutFailureCount = nonBlockingPutFailureCount;
-    this.nonBlockingReplaceFailureCount = nonBlockingReplaceFailureCount;
-    this.nonBlockingRemoveFailureCount = nonBlockingRemoveFailureCount;
-    this.writerContentionFailureCount = writerContentionFailureCount;
-    this.retirementAdmissionFailureCount = retirementAdmissionFailureCount;
-    this.reliableRemovalAdmissionFailureCount = reliableRemovalAdmissionFailureCount;
+    this.maintenanceUnhealthy = maintenanceUnhealthy;
+    this.maintenanceQueueDepth = maintenanceQueueDepth;
+    this.ttlLagMillis = ttlLagMillis;
+    this.ttlBacklog = ttlBacklog;
     this.nativeAllocationFailureCount = nativeAllocationFailureCount;
-    this.repairQueueDepth = repairQueueDepth;
-    this.asyncMutationQueueDepth = asyncMutationQueueDepth;
-    this.asyncMutationFailedCount = asyncMutationFailedCount;
-    this.asyncMutationRejectedCount = asyncMutationRejectedCount;
   }
 
-  public long getReadHits() {
-    return readHits;
+  public long hitCount() {
+    return hitCount;
   }
 
-  public long getReadMisses() {
-    return readMisses;
+  public long missCount() {
+    return missCount;
   }
 
-  public long getMaintenanceQueueDepth() {
-    return maintenanceQueueDepth;
+  public long requestCount() {
+    return saturatedAdd(hitCount, missCount);
   }
 
-  public long getMaintenanceQueueCapacity() {
-    return maintenanceQueueCapacity;
+  public double hitRate() {
+    long requests = requestCount();
+    return requests == 0L ? 1.0d : (double) hitCount / requests;
   }
 
-  public boolean getMaintenanceUnhealthy() {
-    return maintenanceUnhealthy;
+  public double missRate() {
+    long requests = requestCount();
+    return requests == 0L ? 0.0d : (double) missCount / requests;
   }
 
-  public long getPhysicalExpired() {
-    return physicalExpired;
+  public long loadSuccessCount() {
+    return loadSuccessCount;
   }
 
-  public long getTtlLagMillis() {
-    return ttlLagMillis;
+  public long loadFailureCount() {
+    return loadFailureCount;
   }
 
-  public long getTtlBacklog() {
-    return ttlBacklog;
+  public long loadCount() {
+    return saturatedAdd(loadSuccessCount, loadFailureCount);
   }
 
-  public long getEvictionCount() {
+  public double loadFailureRate() {
+    long loads = loadCount();
+    return loads == 0L ? 0.0d : (double) loadFailureCount / loads;
+  }
+
+  /** Total loader execution time in nanoseconds. */
+  public long totalLoadTime() {
+    return totalLoadTime;
+  }
+
+  public double averageLoadPenalty() {
+    long loads = loadCount();
+    return loads == 0L ? 0.0d : (double) totalLoadTime / loads;
+  }
+
+  public long evictionCount() {
     return evictionCount;
   }
 
-  public long getRetiredEntries() {
-    return retiredEntries;
+  public long evictionWeight() {
+    return evictionWeight;
   }
 
-  public long getSize() {
+  public long expirationCount() {
+    return expirationCount;
+  }
+
+  public long entryResidenceCount() {
+    return entryResidenceCount;
+  }
+
+  public long totalEntryResidenceTimeMillis() {
+    return totalEntryResidenceTimeMillis;
+  }
+
+  public double averageEntryResidenceTimeMillis() {
+    return entryResidenceCount == 0L
+        ? 0.0d
+        : (double) totalEntryResidenceTimeMillis / entryResidenceCount;
+  }
+
+  public long size() {
     return size;
   }
 
-  public long getLiveWeight() {
+  public long liveWeight() {
     return liveWeight;
   }
 
-  public long getResidentWeight() {
-    return residentWeight;
-  }
-
-  public long getRetiredWeight() {
-    return retiredWeight;
-  }
-
-  public long getNativeAllocatedBytes() {
+  public long nativeAllocatedBytes() {
     return nativeAllocatedBytes;
   }
 
-  public long getTimerHeapBytes() {
-    return timerHeapBytes;
+  public boolean maintenanceUnhealthy() {
+    return maintenanceUnhealthy;
   }
 
-  public long getSketchHeapBytes() {
-    return sketchHeapBytes;
+  public long maintenanceQueueDepth() {
+    return maintenanceQueueDepth;
   }
 
-  public long getGhostHeapBytes() {
-    return ghostHeapBytes;
+  public long ttlLagMillis() {
+    return ttlLagMillis;
   }
 
-  public long getRetirementQueueNativeBytes() {
-    return retirementQueueNativeBytes;
+  public long ttlBacklog() {
+    return ttlBacklog;
   }
 
-  public long getRetirementQueueDepth() {
-    return retirementQueueDepth;
-  }
-
-  public long getRetirementQueueCapacity() {
-    return retirementQueueCapacity;
-  }
-
-  public long getNonBlockingPutFailureCount() {
-    return nonBlockingPutFailureCount;
-  }
-
-  public long getNonBlockingReplaceFailureCount() {
-    return nonBlockingReplaceFailureCount;
-  }
-
-  public long getNonBlockingRemoveFailureCount() {
-    return nonBlockingRemoveFailureCount;
-  }
-
-  public long getWriterContentionFailureCount() {
-    return writerContentionFailureCount;
-  }
-
-  public long getRetirementAdmissionFailureCount() {
-    return retirementAdmissionFailureCount;
-  }
-
-  public long getReliableRemovalAdmissionFailureCount() {
-    return reliableRemovalAdmissionFailureCount;
-  }
-
-  public long getNativeAllocationFailureCount() {
+  public long nativeAllocationFailureCount() {
     return nativeAllocationFailureCount;
   }
 
-  public long getRepairQueueDepth() {
-    return repairQueueDepth;
-  }
-
-  public long getAsyncMutationQueueDepth() {
-    return asyncMutationQueueDepth;
-  }
-
-  public long getAsyncMutationFailedCount() {
-    return asyncMutationFailedCount;
-  }
-
-  public long getAsyncMutationRejectedCount() {
-    return asyncMutationRejectedCount;
+  private static long saturatedAdd(long left, long right) {
+    return right > 0L && left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
   }
 }

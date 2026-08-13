@@ -48,9 +48,30 @@ public class OffHeapCacheTest {
       }
       cache.flushAsync().join();
       assertEquals(
-          cache.stats().getReadHits(),
+          cache.stats().hitCount(),
           1_024L,
           "a thread registered by put must still publish later get statistics");
+    }
+  }
+
+  @Test
+  public void statsExposeWeaklyPublishedRequestRates() {
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      assertTrue(cache.put("hit", "value"));
+      assertEquals(cache.get("hit"), "value");
+      assertEquals(cache.get("miss"), null);
+      cache.flushAsync().join();
+
+      assertEquals(cache.stats().hitCount(), 1L);
+      assertEquals(cache.stats().missCount(), 1L);
+      assertEquals(cache.stats().requestCount(), 2L);
+      assertEquals(cache.stats().hitRate(), 0.5d, 0.0d);
+      assertEquals(cache.stats().missRate(), 0.5d, 0.0d);
     }
   }
 

@@ -56,8 +56,8 @@ public class DirectValueEpochTest {
         assertTrue(entered.await(2L, TimeUnit.SECONDS), "direct consumer did not start");
         assertTrue(cache.removeAsync(key).get(2L, TimeUnit.SECONDS));
         assertTrue(
-            waitForRetiredEntry(cache),
-            "QSBR must retain the removed entry during the direct callback");
+            cache.totalAllocatedBytes() > 0L,
+            "native storage must remain allocated during the direct callback");
       } finally {
         release.countDown();
         assertTrue(directRead.get(2L, TimeUnit.SECONDS));
@@ -92,14 +92,4 @@ public class DirectValueEpochTest {
     return false;
   }
 
-  private static boolean waitForRetiredEntry(OHCache<?, ?> cache) {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-    while (System.nanoTime() < deadline) {
-      if (cache.stats().getRetiredEntries() > 0L) {
-        return true;
-      }
-      LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));
-    }
-    return false;
-  }
 }

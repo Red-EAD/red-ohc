@@ -279,7 +279,7 @@ public class MaintenancePolicyTest {
       long keyWeight = WriterArena.allocationWeight(entry.keyAllocationLength());
 
       value = memory.allocate(ValueBlock.allocationLength(32));
-      ValueBlock.initialize(value, 0L, 32);
+      ValueBlock.initialize(value, 0L, 32, 0L);
       entry.valueAddress = value;
       bytePolicy.add(entry);
 

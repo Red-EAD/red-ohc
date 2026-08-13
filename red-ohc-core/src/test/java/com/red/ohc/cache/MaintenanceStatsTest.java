@@ -34,7 +34,7 @@ public final class MaintenanceStatsTest {
       };
 
   @Test
-  public void statsSeparateLiveResidentRetiredAndActorPressureWithoutSentinelValues() {
+  public void statsExposeCapacityAndMaintenanceHealthWithoutSentinelValues() {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
@@ -45,14 +45,11 @@ public final class MaintenanceStatsTest {
       cache.flushAsync().join();
 
       OHCacheStats stats = cache.stats();
-      assertEquals(stats.getSize(), 1L);
-      assertTrue(stats.getLiveWeight() > 0L);
-      assertTrue(stats.getResidentWeight() >= stats.getLiveWeight());
-      assertTrue(stats.getRetiredWeight() >= 0L);
-      assertTrue(stats.getNativeAllocatedBytes() >= stats.getResidentWeight());
-      assertTrue(stats.getTtlBacklog() >= 0L);
-      assertEquals(stats.getMaintenanceQueueDepth(), 0L);
-      assertEquals(stats.getRetirementQueueDepth(), 0L);
+      assertEquals(stats.size(), 1L);
+      assertTrue(stats.liveWeight() > 0L);
+      assertTrue(stats.nativeAllocatedBytes() >= stats.liveWeight());
+      assertTrue(stats.ttlBacklog() >= 0L);
+      assertEquals(stats.maintenanceQueueDepth(), 0L);
     }
   }
 }

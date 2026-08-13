@@ -23,6 +23,7 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
+import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
 
 public class AsyncControlTest {
@@ -229,6 +230,49 @@ public class AsyncControlTest {
     try (OHCache<String, String> cache = newCache(executor)) {
       assertEquals(cache.getOrLoadAsync("load", key -> "value", 0L).join(), "value");
       assertEquals(executions.get(), 1);
+      OHCacheStats stats = cache.stats();
+      assertEquals(stats.loadSuccessCount(), 1L);
+      assertEquals(stats.loadFailureCount(), 0L);
+      assertEquals(stats.loadCount(), 1L);
+      assertTrue(stats.totalLoadTime() >= 0L);
+    }
+  }
+
+  @Test
+  public void loaderInternalLookupsDoNotDuplicateRequestStats() {
+    try (OHCache<String, String> cache = newCache(Runnable::run)) {
+      assertEquals(cache.getOrLoadAsync("stats", key -> "value", 0L).join(), "value");
+      cache.flushAsync().join();
+
+      OHCacheStats stats = cache.stats();
+      assertEquals(stats.hitCount(), 0L);
+      assertEquals(stats.missCount(), 1L);
+      assertEquals(stats.requestCount(), 1L);
+    }
+  }
+
+  @Test
+  public void loaderFailureIsCountedOnlyAtTheActualLoaderBoundary() {
+    try (OHCache<String, String> cache = newCache(Runnable::run)) {
+      try {
+        cache
+            .getOrLoadAsync(
+                "failed",
+                key -> {
+                  throw new IllegalStateException("boom");
+                },
+                0L)
+            .join();
+        throw new AssertionError("loader failure must complete exceptionally");
+      } catch (CompletionException expected) {
+        assertTrue(expected.getCause() instanceof IllegalStateException);
+      }
+
+      OHCacheStats stats = cache.stats();
+      assertEquals(stats.loadSuccessCount(), 0L);
+      assertEquals(stats.loadFailureCount(), 1L);
+      assertEquals(stats.loadCount(), 1L);
+      assertEquals(stats.loadFailureRate(), 1.0d, 0.0d);
     }
   }
 
@@ -320,6 +364,8 @@ public class AsyncControlTest {
       assertEquals(first.get(5, TimeUnit.SECONDS), "loaded");
       assertEquals(second.get(5, TimeUnit.SECONDS), "loaded");
       assertEquals(loads.get(), 1);
+      assertEquals(cache.stats().loadSuccessCount(), 1L);
+      assertEquals(cache.stats().loadCount(), 1L);
     } finally {
       callers.shutdownNow();
       loaderExecutor.shutdownNow();

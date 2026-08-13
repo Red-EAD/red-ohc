@@ -146,7 +146,7 @@ public class WriteAdmissionTest {
                       }));
       assertTrue(entered.await(2L, java.util.concurrent.TimeUnit.SECONDS));
 
-      int attempts = (int) cache.stats().getRetirementQueueCapacity() + 64;
+      int attempts = Math.toIntExact(retirementQueueCapacity(cache)) + 64;
       java.util.concurrent.Future<Integer> writer =
           readers.submit(
               () -> {
@@ -180,6 +180,14 @@ public class WriteAdmissionTest {
     Method count = Budget.class.getDeclaredMethod("stripeCount");
     count.setAccessible(true);
     return (Integer) count.invoke(budget);
+  }
+
+  private static long retirementQueueCapacity(OffHeapCache<?, ?> cache) throws Exception {
+    Field workerField = OffHeapCache.class.getDeclaredField("worker");
+    workerField.setAccessible(true);
+    com.red.ohc.maintenance.MaintenanceEventLoop worker =
+        (com.red.ohc.maintenance.MaintenanceEventLoop) workerField.get(cache);
+    return worker.retirementQueueCapacity();
   }
 
   private static long budgetReserved(OffHeapCache<?, ?> cache) throws Exception {

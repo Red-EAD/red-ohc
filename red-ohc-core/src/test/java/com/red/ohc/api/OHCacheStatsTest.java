@@ -10,78 +10,96 @@ import org.testng.annotations.Test;
 
 public final class OHCacheStatsTest {
   @Test
-  public void gettersExposeAllStatsFields() {
+  public void exposesStandardCacheMetricsAndDerivedRates() {
     OHCacheStats stats =
         new OHCacheStats(
-            1L,
-            2L,
-            3L,
-            4L,
-            true,
-            5L,
-            6L,
-            7L,
-            8L,
-            9L,
             10L,
+            5L,
+            3L,
+            1L,
+            40L,
+            7L,
+            9L,
+            2L,
+            4L,
+            100L,
             11L,
             12L,
             13L,
+            false,
             14L,
             15L,
             16L,
-            17L,
-            18L,
-            19L,
-            20L,
-            21L,
-            22L,
-            23L,
-            24L,
-            25L,
-            26L,
-            27L,
-            28L,
-            29L,
-            30L,
-            31L);
+            17L);
 
-    assertEquals(stats.getReadHits(), 1L);
-    assertEquals(stats.getReadMisses(), 2L);
-    assertEquals(stats.getMaintenanceQueueDepth(), 3L);
-    assertEquals(stats.getMaintenanceQueueCapacity(), 4L);
-    assertTrue(stats.getMaintenanceUnhealthy());
-    assertEquals(stats.getPhysicalExpired(), 5L);
-    assertEquals(stats.getTtlLagMillis(), 6L);
-    assertEquals(stats.getTtlBacklog(), 7L);
-    assertEquals(stats.getEvictionCount(), 8L);
-    assertEquals(stats.getRetiredEntries(), 9L);
-    assertEquals(stats.getSize(), 10L);
-    assertEquals(stats.getLiveWeight(), 11L);
-    assertEquals(stats.getResidentWeight(), 12L);
-    assertEquals(stats.getRetiredWeight(), 13L);
-    assertEquals(stats.getNativeAllocatedBytes(), 14L);
-    assertEquals(stats.getTimerHeapBytes(), 15L);
-    assertEquals(stats.getSketchHeapBytes(), 16L);
-    assertEquals(stats.getGhostHeapBytes(), 17L);
-    assertEquals(stats.getRetirementQueueNativeBytes(), 18L);
-    assertEquals(stats.getRetirementQueueDepth(), 19L);
-    assertEquals(stats.getRetirementQueueCapacity(), 20L);
-    assertEquals(stats.getNonBlockingPutFailureCount(), 21L);
-    assertEquals(stats.getNonBlockingReplaceFailureCount(), 22L);
-    assertEquals(stats.getNonBlockingRemoveFailureCount(), 23L);
-    assertEquals(stats.getWriterContentionFailureCount(), 24L);
-    assertEquals(stats.getRetirementAdmissionFailureCount(), 25L);
-    assertEquals(stats.getReliableRemovalAdmissionFailureCount(), 26L);
-    assertEquals(stats.getNativeAllocationFailureCount(), 27L);
-    assertEquals(stats.getRepairQueueDepth(), 28L);
-    assertEquals(stats.getAsyncMutationQueueDepth(), 29L);
-    assertEquals(stats.getAsyncMutationFailedCount(), 30L);
-    assertEquals(stats.getAsyncMutationRejectedCount(), 31L);
+    assertEquals(stats.hitCount(), 10L);
+    assertEquals(stats.missCount(), 5L);
+    assertEquals(stats.requestCount(), 15L);
+    assertEquals(stats.hitRate(), 10.0 / 15.0, 0.000001);
+    assertEquals(stats.missRate(), 5.0 / 15.0, 0.000001);
+    assertEquals(stats.loadSuccessCount(), 3L);
+    assertEquals(stats.loadFailureCount(), 1L);
+    assertEquals(stats.loadCount(), 4L);
+    assertEquals(stats.loadFailureRate(), 0.25, 0.000001);
+    assertEquals(stats.totalLoadTime(), 40L);
+    assertEquals(stats.averageLoadPenalty(), 10.0, 0.000001);
+    assertEquals(stats.evictionCount(), 7L);
+    assertEquals(stats.evictionWeight(), 9L);
+    assertEquals(stats.expirationCount(), 2L);
+    assertEquals(stats.entryResidenceCount(), 4L);
+    assertEquals(stats.totalEntryResidenceTimeMillis(), 100L);
+    assertEquals(stats.averageEntryResidenceTimeMillis(), 25.0, 0.000001);
+    assertEquals(stats.size(), 11L);
+    assertEquals(stats.liveWeight(), 12L);
+    assertEquals(stats.nativeAllocatedBytes(), 13L);
+    assertTrue(!stats.maintenanceUnhealthy());
+    assertEquals(stats.maintenanceQueueDepth(), 14L);
+    assertEquals(stats.ttlLagMillis(), 15L);
+    assertEquals(stats.ttlBacklog(), 16L);
+    assertEquals(stats.nativeAllocationFailureCount(), 17L);
+  }
+
+  @Test
+  public void derivedRatesUseEmptyDefaults() {
+    OHCacheStats stats = new OHCacheStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, false, 0L, 0L, 0L, 0L);
+
+    assertEquals(stats.requestCount(), 0L);
+    assertEquals(stats.hitRate(), 1.0, 0.0);
+    assertEquals(stats.missRate(), 0.0, 0.0);
+    assertEquals(stats.loadCount(), 0L);
+    assertEquals(stats.loadFailureRate(), 0.0, 0.0);
+    assertEquals(stats.averageLoadPenalty(), 0.0, 0.0);
+    assertEquals(stats.averageEntryResidenceTimeMillis(), 0.0, 0.0);
   }
 
   @Test
   public void statsFieldsArePrivate() {
+    String[] expectedFields = {
+      "hitCount",
+      "missCount",
+      "loadSuccessCount",
+      "loadFailureCount",
+      "totalLoadTime",
+      "evictionCount",
+      "evictionWeight",
+      "expirationCount",
+      "entryResidenceCount",
+      "totalEntryResidenceTimeMillis",
+      "size",
+      "liveWeight",
+      "nativeAllocatedBytes",
+      "maintenanceUnhealthy",
+      "maintenanceQueueDepth",
+      "ttlLagMillis",
+      "ttlBacklog",
+      "nativeAllocationFailureCount"
+    };
+    assertEquals(OHCacheStats.class.getDeclaredFields().length, expectedFields.length);
+    for (String expectedField : expectedFields) {
+      assertTrue(
+          Modifier.isPrivate(getField(expectedField).getModifiers()),
+          "stats field must be private: " + expectedField);
+    }
     for (Field field : OHCacheStats.class.getDeclaredFields()) {
       if (!Modifier.isStatic(field.getModifiers())) {
         assertTrue(
@@ -91,4 +109,11 @@ public final class OHCacheStatsTest {
     }
   }
 
+  private static Field getField(String name) {
+    try {
+      return OHCacheStats.class.getDeclaredField(name);
+    } catch (NoSuchFieldException missing) {
+      throw new AssertionError("missing stats field: " + name, missing);
+    }
+  }
 }
