@@ -12,6 +12,11 @@
     <description>Off-heap concurrent hash map with async architecture - Red OHC</description>
     <dependencies>
         <dependency>
+            <groupId>com.dynatrace.hash4j</groupId>
+            <artifactId>hash4j</artifactId>
+            <version>0.25.0</version>
+        </dependency>
+        <dependency>
             <groupId>org.jctools</groupId>
             <artifactId>jctools-core</artifactId>
         </dependency>

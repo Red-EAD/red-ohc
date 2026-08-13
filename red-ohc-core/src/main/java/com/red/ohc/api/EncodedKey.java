@@ -5,7 +5,7 @@ import java.util.Objects;
 
 import com.red.ohc.codec.Hashing;
 
-/** Immutable, pre-serialized key with one xxHash64 result and its folded CHM hash cached. */
+/** Immutable, pre-serialized key with one FarmHashUo result and its folded CHM hash cached. */
 public final class EncodedKey {
   private final byte[] bytes;
   final int hash;
@@ -23,7 +23,7 @@ public final class EncodedKey {
       throw new IllegalArgumentException("invalid encoded key length");
     }
     byte[] copy = Arrays.copyOf(bytes, length);
-    return new EncodedKey(copy, Hashing.xxHash64(copy, 0, copy.length));
+    return new EncodedKey(copy, Hashing.farmHashUo(copy, 0, copy.length));
   }
 
   public static EncodedKey copyOf(byte[] bytes) {

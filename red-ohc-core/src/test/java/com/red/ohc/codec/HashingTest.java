@@ -18,17 +18,17 @@ import com.red.ohc.storage.NativeMemory;
 
 public final class HashingTest {
   @Test
-  public void lookupAndPreencodedKeyKeepTheSameFoldedXxHash64() {
+  public void lookupAndPreencodedKeyKeepTheSameFoldedFarmHashUo() {
     byte[] bytes = "hello".getBytes(StandardCharsets.US_ASCII);
     LookupKey lookup = new LookupKey();
 
     lookup.set(bytes, bytes.length);
 
-    assertEquals(lookup.hash(), (int) 0xae58efdEL);
-    assertEquals(lookup.hash64(), 0x26c7827d889f6da3L);
+    assertEquals(lookup.hash(), (int) 0x85b3e941L);
+    assertEquals(lookup.hash64(), 0xb48be5a931380ce8L);
 
     // Re-reading the cached value must not execute the hash again.
-    assertEquals(lookup.hash(), (int) 0xae58efdEL);
+    assertEquals(lookup.hash(), (int) 0x85b3e941L);
 
     EncodedKey encoded = EncodedKey.copyOf(bytes);
     assertEquals(encoded.hash(), lookup.hash());
@@ -70,7 +70,9 @@ public final class HashingTest {
 
     assertEquals(length, bytes.length);
     assertEquals(context.lookupKey.length(), bytes.length);
-    assertEquals(context.lookupKey.hash(), Hashing.xxHash64Folded(bytes, 0, bytes.length));
+    long expectedHash64 = 0x2c9eed22957a7483L;
+    assertEquals(context.lookupKey.hash64(), expectedHash64);
+    assertEquals(context.lookupKey.hash(), (int) (expectedHash64 ^ (expectedHash64 >>> 32)));
   }
 
   @Test

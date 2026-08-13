@@ -13,7 +13,8 @@ public final class LookupKey {
   public void set(byte[] bytes, int length) {
     this.bytes = bytes;
     this.length = length;
-    this.hash64 = Hashing.xxHash64(bytes, 0, length);
+    long hash64 = Hashing.farmHashUo(bytes, 0, length);
+    this.hash64 = hash64;
     this.hash = (int) (hash64 ^ (hash64 >>> 32));
   }
 
