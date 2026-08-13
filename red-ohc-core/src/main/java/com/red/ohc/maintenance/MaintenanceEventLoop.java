@@ -2086,7 +2086,7 @@ public final class MaintenanceEventLoop
         nextPassNanos = Long.MIN_VALUE;
         return;
       }
-      long next = passEndNanos;
+      long next = saturatingAdd(passEndNanos, WINDOW_NANOS);
       if (retryDeadlineNanos != Long.MIN_VALUE && retryDeadlineNanos > next) {
         next = retryDeadlineNanos;
       }

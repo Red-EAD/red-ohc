@@ -52,7 +52,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void windowSchedulerKeepsInitialCoalescingButRunsBacklogImmediately() {
+  public void windowSchedulerNeverRunsAFirstOrFollowupPassBeforeOneMillisecond() {
     MaintenanceEventLoop.WindowScheduler scheduler = new MaintenanceEventLoop.WindowScheduler();
 
     scheduler.request(100L);
@@ -61,8 +61,62 @@ public class MaintenanceEventLoopTest {
     assertTrue(scheduler.isDue(1_000_100L));
 
     scheduler.complete(1_000_100L, true, Long.MIN_VALUE);
-    assertEquals(scheduler.nextPassNanos(), 1_000_100L);
-    assertTrue(scheduler.isDue(1_000_100L));
+    assertEquals(scheduler.nextPassNanos(), 2_000_100L);
+    assertFalse(scheduler.isDue(2_000_099L));
+    assertTrue(scheduler.isDue(2_000_100L));
+  }
+
+  @Test
+  public void windowSchedulerDoesNotLetSignalsBypassAnActiveCooldown() {
+    MaintenanceEventLoop.WindowScheduler scheduler = new MaintenanceEventLoop.WindowScheduler();
+
+    scheduler.request(0L);
+    scheduler.complete(1_000_000L, true, Long.MIN_VALUE);
+    assertEquals(scheduler.nextPassNanos(), 2_000_000L);
+
+    scheduler.request(1_500_000L);
+    assertEquals(scheduler.nextPassNanos(), 2_000_000L);
+    assertFalse(scheduler.isDue(1_999_999L));
+    assertTrue(scheduler.isDue(2_000_000L));
+  }
+
+  @Test
+  public void windowSchedulerUsesTheLaterOfCooldownAndRetryDeadline() {
+    MaintenanceEventLoop.WindowScheduler cooldownWins =
+        new MaintenanceEventLoop.WindowScheduler();
+    cooldownWins.request(0L);
+    cooldownWins.complete(1_000_000L, true, 1_500_000L);
+    assertEquals(cooldownWins.nextPassNanos(), 2_000_000L);
+
+    MaintenanceEventLoop.WindowScheduler retryWins = new MaintenanceEventLoop.WindowScheduler();
+    retryWins.request(0L);
+    retryWins.complete(1_000_000L, true, 3_000_000L);
+    assertEquals(retryWins.nextPassNanos(), 3_000_000L);
+  }
+
+  @Test
+  public void windowSchedulerReturnsToIdleWithoutContinuation() {
+    MaintenanceEventLoop.WindowScheduler scheduler = new MaintenanceEventLoop.WindowScheduler();
+
+    scheduler.request(0L);
+    scheduler.complete(1_000_000L, false, Long.MIN_VALUE);
+    assertEquals(scheduler.nextPassNanos(), Long.MIN_VALUE);
+    assertFalse(scheduler.isDue(Long.MAX_VALUE));
+
+    scheduler.request(5_000_000L);
+    assertEquals(scheduler.nextPassNanos(), 6_000_000L);
+  }
+
+  @Test
+  public void windowSchedulerSaturatesCooldownDeadlineAtLongMaxValue() {
+    MaintenanceEventLoop.WindowScheduler scheduler = new MaintenanceEventLoop.WindowScheduler();
+
+    scheduler.request(0L);
+    scheduler.complete(Long.MAX_VALUE - 500_000L, true, Long.MIN_VALUE);
+
+    assertEquals(scheduler.nextPassNanos(), Long.MAX_VALUE);
+    assertFalse(scheduler.isDue(Long.MAX_VALUE - 1L));
+    assertTrue(scheduler.isDue(Long.MAX_VALUE));
   }
 
   @Test(timeOut = 5_000L)
@@ -96,6 +150,175 @@ public class MaintenanceEventLoopTest {
       assertEquals(asyncExecuted.getCount(), 0L);
       assertEquals(removals.size(), (long) removalCount - general);
     } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void flushCompletesAfterEveryCoveredAsyncBatchRunsInOrder() throws Exception {
+    CountingTicker ticker = new CountingTicker();
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            ticker,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    int asyncBatch = (Integer) getField(getField(loop, "batchLimits"), "async");
+    int taskCount = asyncBatch * 2 + 1;
+    List<Integer> executed = new ArrayList<>(taskCount);
+    try {
+      for (int index = 0; index < taskCount; index++) {
+        int taskIndex = index;
+        assertTrue(
+            loop.submitAsyncMutation(
+                () -> executed.add(taskIndex), Throwable::printStackTrace));
+      }
+      CompletableFuture<Void> flush = loop.flush();
+
+      loop.start();
+      flush.get(3L, TimeUnit.SECONDS);
+
+      assertEquals(executed.size(), taskCount);
+      for (int index = 0; index < taskCount; index++) {
+        assertEquals(executed.get(index).intValue(), index);
+      }
+      assertEquals(ticker.monotonicCalls.get(), 3);
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      loop.beginClosing();
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void closingAStartedWorkerRejectsRemainingAsyncBatchesAndClearsDepth()
+      throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    int asyncBatch = (Integer) getField(getField(loop, "batchLimits"), "async");
+    int pendingCount = asyncBatch * 2 + 1;
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch releaseFirst = new CountDownLatch(1);
+    AtomicInteger executed = new AtomicInteger();
+    AtomicInteger rejected = new AtomicInteger();
+    try {
+      assertTrue(
+          loop.submitAsyncMutation(
+              () -> {
+                firstStarted.countDown();
+                await(releaseFirst);
+                executed.incrementAndGet();
+              },
+              failure -> rejected.incrementAndGet()));
+      for (int index = 0; index < pendingCount; index++) {
+        assertTrue(
+            loop.submitAsyncMutation(
+                executed::incrementAndGet, failure -> rejected.incrementAndGet()));
+      }
+      loop.start();
+      assertTrue(firstStarted.await(1L, TimeUnit.SECONDS));
+
+      loop.beginClosing();
+      loop.stop();
+      releaseFirst.countDown();
+      loop.join(3_000L);
+
+      assertFalse(loop.isAlive());
+      assertEquals(executed.get(), 1);
+      assertEquals(rejected.get(), pendingCount);
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      releaseFirst.countDown();
+      if (loop.isAlive()) {
+        loop.stop();
+        loop.join(1_000L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void shutdownRejectsEveryQueuedAsyncBatchAndClearsDepth() throws Exception {
+    CountingTicker ticker = new CountingTicker();
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            ticker,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    int asyncBatch = (Integer) getField(getField(loop, "batchLimits"), "async");
+    int taskCount = asyncBatch * 2 + 1;
+    AtomicInteger executed = new AtomicInteger();
+    AtomicInteger rejected = new AtomicInteger();
+    try {
+      for (int index = 0; index < taskCount; index++) {
+        assertTrue(
+            loop.submitAsyncMutation(
+                executed::incrementAndGet, failure -> rejected.incrementAndGet()));
+      }
+
+      loop.beginClosing();
+      loop.stop();
+      loop.start();
+      loop.join(3_000L);
+
+      assertFalse(loop.isAlive());
+      assertEquals(executed.get(), 0);
+      assertEquals(rejected.get(), taskCount);
+      assertEquals(ticker.monotonicCalls.get(), 3);
+      assertEquals(loop.asyncMutationQueueDepth(), 0L);
+    } finally {
+      if (loop.isAlive()) {
+        loop.stop();
+        loop.join(1_000L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void idleWorkerStopsWithoutWaitingForAWorkWindow() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    try {
+      loop.start();
+      waitUntilParked(loop);
+
+      loop.stop();
+      loop.join(1_000L);
+
+      assertFalse(loop.isAlive());
+    } finally {
+      if (loop.isAlive()) {
+        loop.stop();
+        loop.join(1_000L);
+      }
       memory.closeArenas();
     }
   }
@@ -1180,14 +1403,15 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void flushWaitsForUncommittedReliableRemovalWithoutSpinning() throws Exception {
+  public void flushRemainsPendingUntilAnUncommittedReliableRemovalIsResolved() throws Exception {
+    CountingTicker ticker = new CountingTicker();
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
             memory,
             new Budget(1 << 20),
-            Ticker.DEFAULT,
+            ticker,
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
@@ -1201,7 +1425,8 @@ public class MaintenanceEventLoopTest {
       CompletableFuture<Void> flush = loop.flush();
       assertFalse(flush.isDone(), "flush must not complete before the reservation is resolved");
 
-      Thread.sleep(20L);
+      waitForMonotonicCalls(ticker, 2);
+      assertFalse(flush.isDone(), "flush must remain pending while the reservation is unresolved");
 
       loop.cancelReliableRemoval(context, entry);
       flush.get(1L, TimeUnit.SECONDS);
@@ -2364,6 +2589,16 @@ public class MaintenanceEventLoopTest {
       Thread.sleep(1L);
     }
     assertTrue(loop.isParked(), "maintenance actor did not park");
+  }
+
+  private static void waitForMonotonicCalls(CountingTicker ticker, int expected) {
+    long deadline = System.nanoTime() + 1_000_000_000L;
+    while (ticker.monotonicCalls.get() < expected && System.nanoTime() < deadline) {
+      Thread.yield();
+    }
+    assertTrue(
+        ticker.monotonicCalls.get() >= expected,
+        "maintenance actor did not enter the expected number of passes");
   }
 
   private static void await(CountDownLatch latch) {
