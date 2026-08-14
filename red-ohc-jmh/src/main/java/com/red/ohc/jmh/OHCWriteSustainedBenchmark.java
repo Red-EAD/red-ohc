@@ -110,7 +110,7 @@ public class OHCWriteSustainedBenchmark {
 
   private void assertHealthyAndDrained() {
     OHCacheStats stats = cache.stats();
-    if (stats.getMaintenanceUnhealthy() || stats.getMaintenanceQueueDepth() != 0L) {
+    if (stats.maintenanceUnhealthy() || stats.maintenanceQueueDepth() != 0L) {
       throw new IllegalStateException("invalid OHC sustained write measurement");
     }
   }

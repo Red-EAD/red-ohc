@@ -72,16 +72,16 @@ public class OHCMaxSizeChurnBenchmark {
     cache.flushAsync().join();
     try {
       OHCacheStats stats = cache.stats();
-      if (stats.getMaintenanceUnhealthy()
-          || stats.getMaintenanceQueueDepth() != 0L
+      if (stats.maintenanceUnhealthy()
+          || stats.maintenanceQueueDepth() != 0L
           || cache.size() > MAX_SIZE) {
         throw new IllegalStateException(
             "invalid maxSize churn: size="
                 + cache.size()
                 + ", queue="
-                + stats.getMaintenanceQueueDepth()
+                + stats.maintenanceQueueDepth()
                 + ", unhealthy="
-                + stats.getMaintenanceUnhealthy());
+                + stats.maintenanceUnhealthy());
       }
     } finally {
       cache.close();

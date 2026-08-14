@@ -17,7 +17,7 @@
         <jctools.version>4.0.5</jctools.version>
         <fastutil.version>8.2.1</fastutil.version>
         <jol.version>0.17</jol.version>
-        <caffeine.version>3.2.0</caffeine.version>
+        <caffeine.version>3.2.4</caffeine.version>
         <ehcache.version>3.10.8</ehcache.version>
         <mapdb.version>3.1.0</mapdb.version>
         <chronicle.map.version>3.27ea1</chronicle.map.version>

@@ -12,6 +12,7 @@
     <description>JMH micro benchmarks for Red OHC</description>
     <properties>
         <uberjar.name>benchmarks</uberjar.name>
+        <jedis.version>5.0.2</jedis.version>
     </properties>
     <dependencies>
         <dependency>
@@ -53,6 +54,11 @@
             <groupId>net.openhft</groupId>
             <artifactId>chronicle-map</artifactId>
             <version>${chronicle.map.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>${jedis.version}</version>
         </dependency>
         <dependency>
             <groupId>org.testng</groupId>
@@ -108,4 +114,6 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        </profiles>
 </project>
