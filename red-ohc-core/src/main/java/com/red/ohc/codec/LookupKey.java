@@ -1,5 +1,6 @@
 package com.red.ohc.codec;
 
+import com.red.ohc.api.EncodedKey;
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.NativeMemory;
 
@@ -16,6 +17,15 @@ public final class LookupKey {
     long hash64 = Hashing.farmHashUo(bytes, 0, length);
     this.hash64 = hash64;
     this.hash = (int) (hash64 ^ (hash64 >>> 32));
+  }
+
+  /** Binds an immutable encoded key without hashing its bytes a second time. */
+  public void set(byte[] target, EncodedKey key) {
+    key.copyTo(target, 0);
+    this.bytes = target;
+    this.length = key.length();
+    this.hash64 = key.hash64();
+    this.hash = key.hash();
   }
 
   public byte[] bytes() {

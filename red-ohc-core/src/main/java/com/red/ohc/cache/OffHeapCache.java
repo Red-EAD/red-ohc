@@ -736,8 +736,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private void bindEncodedKey(ThreadContext context, EncodedKey key) {
     context.ensureKey(key.length());
-    key.copyTo(context.keyBytes, 0);
-    context.lookupKey.set(context.keyBytes, key.length());
+    context.lookupKey.set(context.keyBytes, key);
   }
 
   private V getEncoded(EncodedKey key) {

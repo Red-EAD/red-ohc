@@ -36,6 +36,21 @@ public final class HashingTest {
   }
 
   @Test
+  public void encodedKeyBindingUsesItsCachedHash() {
+    byte[] bytes = "encoded-key".getBytes(StandardCharsets.US_ASCII);
+    EncodedKey encoded = EncodedKey.copyOf(bytes);
+    LookupKey lookup = new LookupKey();
+    byte[] target = new byte[bytes.length];
+
+    lookup.set(target, encoded);
+
+    assertEquals(lookup.length(), bytes.length);
+    assertEquals(lookup.hash(), encoded.hash());
+    assertEquals(lookup.hash64(), encoded.hash64());
+    assertEquals(target, bytes);
+  }
+
+  @Test
   public void lookupDoesNotCarryLazyHashState() {
     for (Field field : LookupKey.class.getDeclaredFields()) {
       if (field.getName().equals("hashed") || field.getName().equals("hashComputations")) {
