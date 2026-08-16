@@ -15,6 +15,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -638,6 +639,78 @@ public class AsyncControlTest {
     assertEquals(cache.totalAllocatedBytes(), 0L);
   }
 
+  @Test
+  public void directPutReplacementSerializationFailureDoesNotLeakNativeBlock() {
+    byte[] key = bytes(24, 19);
+    byte[] oldValue = bytes(128, 20);
+    byte[] replacement = bytes(40 * 1024, 21);
+    ThrowingReplacementSerializer values = new ThrowingReplacementSerializer(replacement);
+    OffHeapCache<byte[], byte[]> cache =
+        (OffHeapCache<byte[], byte[]>)
+            OHCacheBuilder.<byte[], byte[]>newBuilder()
+                .capacity(16L << 20)
+                .keySerializer(new CountingSerializer())
+                .valueSerializer(values)
+                .build();
+    try {
+      assertTrue(cache.put(key, oldValue));
+      long allocatedBeforeFailure = cache.totalAllocatedBytes();
+
+      try {
+        cache.put(key, replacement);
+        throw new AssertionError("replacement serializer failure must be propagated");
+      } catch (IllegalStateException expected) {
+        assertTrue(expected.getMessage().contains("replacement serialization failed"));
+      }
+
+      assertEquals(
+          cache.totalAllocatedBytes(),
+          allocatedBeforeFailure,
+          "failed direct replacement must release its native block");
+      assertTrue(Arrays.equals(oldValue, cache.get(key)));
+    } finally {
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void replacementClaimFailureReleasesPreallocatedDirectBlock() throws Exception {
+    byte[] key = bytes(24, 22);
+    byte[] oldValue = bytes(40 * 1024, 23);
+    byte[] replacement = bytes(40 * 1024, 24);
+    BlockingReplacementSerializer values = new BlockingReplacementSerializer(replacement);
+    OffHeapCache<byte[], byte[]> cache =
+        (OffHeapCache<byte[], byte[]>)
+            OHCacheBuilder.<byte[], byte[]>newBuilder()
+                .capacity(16L << 20)
+                .keySerializer(new CountingSerializer())
+                .valueSerializer(values)
+                .build();
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      assertTrue(cache.put(key, oldValue));
+      cache.flushAsync().join();
+      long allocatedBeforeReplacement = cache.totalAllocatedBytes();
+
+      Future<Boolean> replacementResult = executor.submit(() -> cache.put(key, replacement));
+      assertTrue(values.serializeStarted.await(2L, TimeUnit.SECONDS));
+      assertTrue(cache.remove(key));
+      values.releaseSerialize.countDown();
+
+      assertFalse(replacementResult.get(2L, TimeUnit.SECONDS));
+      cache.flushAsync().join();
+      assertEquals(cache.get(key), null);
+      assertTrue(
+          cache.totalAllocatedBytes()
+              <= allocatedBeforeReplacement - com.red.ohc.storage.WriterArena.directAllocationBytes(oldValue.length),
+          "failed claim must release the replacement and retired old direct block");
+    } finally {
+      values.releaseSerialize.countDown();
+      executor.shutdownNow();
+      cache.close();
+    }
+  }
+
   private static String repeat(char value, int length) {
     char[] chars = new char[length];
     java.util.Arrays.fill(chars, value);
@@ -737,6 +810,25 @@ public class AsyncControlTest {
     public void serialize(byte[] value, ByteBuffer buffer) {
       if (value == replacement) {
         throw new IllegalStateException("replacement serialization failed");
+      }
+      super.serialize(value, buffer);
+    }
+  }
+
+  private static final class BlockingReplacementSerializer extends CountingSerializer {
+    private final byte[] replacement;
+    private final CountDownLatch serializeStarted = new CountDownLatch(1);
+    private final CountDownLatch releaseSerialize = new CountDownLatch(1);
+
+    BlockingReplacementSerializer(byte[] replacement) {
+      this.replacement = replacement;
+    }
+
+    @Override
+    public void serialize(byte[] value, ByteBuffer buffer) {
+      if (value == replacement) {
+        serializeStarted.countDown();
+        await(releaseSerialize);
       }
       super.serialize(value, buffer);
     }

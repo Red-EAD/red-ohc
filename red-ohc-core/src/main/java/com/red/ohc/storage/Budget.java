@@ -11,6 +11,10 @@ public final class Budget {
   private static final long MAX_REFILL_BYTES = 64L << 10;
   private static final int MAX_RESERVE_RETRIES = NativeMemory.LOGICAL_CPU_COUNT;
   private static final int CACHE_LINE_LONGS = 8;
+  private static final int RESERVE_SUCCESS = 1;
+  private static final int RESERVE_RETRY = 0;
+  private static final int RESERVE_RETRY_WITH_SPIN = -1;
+  private static final int RESERVE_FAILURE = -2;
 
   private final long capacity;
   private final AtomicLong available;
@@ -55,53 +59,72 @@ public final class Budget {
     }
     int offset = stripeOffset(stripe);
     for (int attempt = 0; attempt < MAX_RESERVE_RETRIES; attempt++) {
-      long credit = stripeCredits.get(offset);
-      if (credit >= bytes) {
-        if (stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
-          return true;
-        }
+      int consumed = tryConsumeStripeCredit(offset, bytes);
+      if (consumed == RESERVE_SUCCESS) {
+        return true;
+      }
+      if (consumed == RESERVE_RETRY_WITH_SPIN) {
         Thread.onSpinWait();
         continue;
       }
-
-      if (!stripeRefills.compareAndSet(stripe, 0, 1)) {
-        Thread.onSpinWait();
-        continue;
+      int refill = tryRefillStripe(stripe, offset, bytes);
+      if (refill == RESERVE_SUCCESS) {
+        return true;
       }
-      try {
-        credit = stripeCredits.get(offset);
-        if (credit >= bytes) {
-          if (stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
-            return true;
-          }
-          Thread.onSpinWait();
-          continue;
-        }
-        long needed = bytes - credit;
-        long free = available.get();
-        if (free < needed) {
-          return false;
-        }
-        long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
-        long grant = Math.min(free, request);
-        if (available.compareAndSet(free, free - grant)) {
-          if (tryAddStripeCredit(offset, grant)) {
-            credit = stripeCredits.get(offset);
-            if (credit >= bytes
-                && stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
-              return true;
-            }
-            continue;
-          }
-          available.getAndAdd(grant);
-          return false;
-        }
+      if (refill == RESERVE_FAILURE) {
+        return false;
+      }
+      if (refill == RESERVE_RETRY_WITH_SPIN) {
         Thread.onSpinWait();
-      } finally {
-        stripeRefills.set(stripe, 0);
       }
     }
     return false;
+  }
+
+  private int tryConsumeStripeCredit(int offset, long bytes) {
+    long credit = stripeCredits.get(offset);
+    if (credit < bytes) {
+      return RESERVE_RETRY;
+    }
+    return stripeCredits.compareAndSet(offset, credit, credit - bytes)
+        ? RESERVE_SUCCESS
+        : RESERVE_RETRY_WITH_SPIN;
+  }
+
+  private int tryRefillStripe(int stripe, int offset, long bytes) {
+    if (!stripeRefills.compareAndSet(stripe, 0, 1)) {
+      return RESERVE_RETRY_WITH_SPIN;
+    }
+    try {
+      long credit = stripeCredits.get(offset);
+      if (credit >= bytes) {
+        return stripeCredits.compareAndSet(offset, credit, credit - bytes)
+            ? RESERVE_SUCCESS
+            : RESERVE_RETRY_WITH_SPIN;
+      }
+
+      long needed = bytes - credit;
+      long free = available.get();
+      if (free < needed) {
+        return RESERVE_FAILURE;
+      }
+      long request = Math.max(needed, Math.min(MAX_REFILL_BYTES, capacity));
+      long grant = Math.min(free, request);
+      if (!available.compareAndSet(free, free - grant)) {
+        return RESERVE_RETRY_WITH_SPIN;
+      }
+      if (tryAddStripeCredit(offset, grant)) {
+        credit = stripeCredits.get(offset);
+        if (credit >= bytes && stripeCredits.compareAndSet(offset, credit, credit - bytes)) {
+          return RESERVE_SUCCESS;
+        }
+        return RESERVE_RETRY;
+      }
+      available.getAndAdd(grant);
+      return RESERVE_FAILURE;
+    } finally {
+      stripeRefills.set(stripe, 0);
+    }
   }
 
   /** Returns a reservation to an already-cached fixed stripe. */

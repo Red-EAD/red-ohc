@@ -120,7 +120,14 @@ public final class RetirementQueue {
         reservation.preferredStripe >= 0
             ? reservation.preferredStripe
             : nextPreferredStripe.getAndIncrement() & (stripes.length - 1);
-    for (int offset = 0; offset < stripes.length; offset++) {
+    if (stripes[start].tryReserve(reservation, records)) {
+      return true;
+    }
+    return tryReserveFallback(reservation, records, start);
+  }
+
+  private boolean tryReserveFallback(Reservation reservation, int records, int start) {
+    for (int offset = 1; offset < stripes.length; offset++) {
       Stripe stripe = stripes[(start + offset) & (stripes.length - 1)];
       if (stripe.tryReserve(reservation, records)) {
         return true;

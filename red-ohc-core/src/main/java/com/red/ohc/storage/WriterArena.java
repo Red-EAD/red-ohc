@@ -37,6 +37,10 @@ public final class WriterArena {
     if (sizeClass < 0) {
       return allocateDirect(entryBytes);
     }
+    return allocateSmall(entryBytes, sizeClass);
+  }
+
+  private long allocateSmall(long entryBytes, int sizeClass) {
     int pagePublishAttempts = 0;
     while (true) {
       Page page = currentPages.get(sizeClass);

@@ -2,6 +2,7 @@ package com.red.ohc.codec;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -107,6 +108,89 @@ public final class HashingTest {
       assertFalse(lookup.equals(entry));
     } finally {
       memory.free(address, Long.BYTES + storedBytes.length);
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void lookupKeyMatchesExactNativeBytesAcrossComparisonBoundaries() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    LookupKey lookup = new LookupKey();
+    try {
+      for (int length : new int[] {0, 7, 8, 63, 64, 127, 128, 129, 257}) {
+        byte[] bytes = new byte[length];
+        for (int index = 0; index < length; index++) {
+          bytes[index] = (byte) (index * 31 + length);
+        }
+        long allocation = Math.max(8L, Long.BYTES + length);
+        long address = memory.allocate(allocation);
+        try {
+          long hash64 = Hashing.farmHashUo(bytes, 0, length);
+          NativeMemory.putLong(address, hash64);
+          NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
+          lookup.set(bytes, length);
+          Entry entry = new Entry(address, length, lookup.hash(), hash64, 0L);
+
+          assertTrue(lookup.equals(entry), "length=" + length);
+          if (length != 0) {
+            NativeMemory.putByte(
+                address + Long.BYTES + length - 1,
+                (byte) (NativeMemory.getByte(address + Long.BYTES + length - 1) ^ 1));
+            assertFalse(lookup.equals(entry), "mismatch length=" + length);
+          }
+        } finally {
+          memory.free(address, allocation);
+        }
+      }
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void lookupKeyRejectsFirstWordAndComparisonBoundaryMismatches() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    LookupKey lookup = new LookupKey();
+    try {
+      for (int length : new int[] {1, 7, 8, 63, 64, 127, 128, 129, 257}) {
+        byte[] bytes = new byte[length];
+        for (int index = 0; index < length; index++) {
+          bytes[index] = (byte) (index * 17 + length);
+        }
+        long allocation = Math.max(8L, Long.BYTES + length);
+        long address = memory.allocate(allocation);
+        try {
+          long hash64 = Hashing.farmHashUo(bytes, 0, length);
+          NativeMemory.putLong(address, hash64);
+          NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
+          lookup.set(bytes, length);
+          Entry entry = new Entry(address, length, lookup.hash(), hash64, 0L);
+
+          for (int mismatch :
+              new int[] {
+                0,
+                Math.min(7, length - 1),
+                Math.min(63, length - 1),
+                Math.min(64, length - 1),
+                Math.min(127, length - 1),
+                length - 1
+              }) {
+            long mismatchAddress = address + Long.BYTES + mismatch;
+            byte original = NativeMemory.getByte(mismatchAddress);
+            try {
+              NativeMemory.putByte(mismatchAddress, (byte) (original ^ 1));
+              assertFalse(
+                  lookup.equals(entry),
+                  "mismatch=" + mismatch + ", length=" + length);
+            } finally {
+              NativeMemory.putByte(mismatchAddress, original);
+            }
+          }
+        } finally {
+          memory.free(address, allocation);
+        }
+      }
+    } finally {
       memory.closeArenas();
     }
   }

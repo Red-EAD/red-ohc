@@ -364,6 +364,10 @@ public final class ThreadContext {
     if ((++accessSequence & 15L) != 0L) {
       return;
     }
+    publishSampledAccess(entry);
+  }
+
+  private void publishSampledAccess(Entry entry) {
     if (!accessRing().offer(entry, entry.generation())) {
       return;
     }
@@ -374,15 +378,20 @@ public final class ThreadContext {
   }
 
   public void finishRead(long sequence) {
-    if ((sequence & 1023L) == 0L) {
-      publish();
-      // Global counters are deliberately decoupled from the policy stream. This bounded
-      // stats publication may wake the actor even when an earlier access burst was already
-      // drained; hit delivery itself still signals only on an empty-to-nonempty ring edge.
-      MaintenanceEventLoop loop = maintenance;
-      if (loop != null) {
-        loop.signalAccess(slot);
-      }
+    if ((sequence & 1023L) != 0L) {
+      return;
+    }
+    publishReadCounters();
+  }
+
+  private void publishReadCounters() {
+    publish();
+    // Global counters are deliberately decoupled from the policy stream. This bounded
+    // stats publication may wake the actor even when an earlier access burst was already
+    // drained; hit delivery itself still signals only on an empty-to-nonempty ring edge.
+    MaintenanceEventLoop loop = maintenance;
+    if (loop != null) {
+      loop.signalAccess(slot);
     }
   }
 

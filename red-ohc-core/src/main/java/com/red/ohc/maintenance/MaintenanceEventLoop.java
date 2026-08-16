@@ -551,15 +551,23 @@ public final class MaintenanceEventLoop
     if (!entry.publishMutation(flags)) {
       return;
     }
+    boolean offered;
     try {
-      if (!queue.offer(entry)) {
-        markMutationForRepair(entry, wake);
+      offered = queue.offer(entry);
+      if (!offered) {
+        handleMutationTransportFailure(entry, wake, null);
       }
     } catch (OutOfMemoryError error) {
-      // The mapping/value pointer is already visible. A maintenance transport failure is
-      // advisory for this operation: keep the put result synchronous and fail closed for
-      // subsequent writes while close() frees the authoritative CHM/native state.
-      markMutationForRepair(entry, wake);
+      handleMutationTransportFailure(entry, wake, error);
+    }
+  }
+
+  private void handleMutationTransportFailure(Entry entry, boolean wake, OutOfMemoryError error) {
+    // The mapping/value pointer is already visible. A maintenance transport failure is
+    // advisory for this operation: keep the put result synchronous and fail closed for
+    // subsequent writes while close() frees the authoritative CHM/native state.
+    markMutationForRepair(entry, wake);
+    if (error != null) {
       recordTerminalFailure(error);
     }
   }

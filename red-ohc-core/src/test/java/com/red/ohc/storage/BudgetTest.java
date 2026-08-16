@@ -49,6 +49,21 @@ public class BudgetTest {
     assertEquals(budget.reserved(), 0L);
   }
 
+  @Test
+  public void globalBalanceShortfallPreservesReservationAndCanBeRefunded() {
+    Budget budget = new Budget(128L, 1);
+
+    assertTrue(budget.tryReserve(128L, 0));
+    assertFalse(budget.tryReserve(64L, 0));
+    assertEquals(budget.reserved(), 128L);
+    assertEquals(budget.availableBalance(), 0L);
+
+    budget.refund(128L, 0);
+    assertEquals(budget.reserved(), 0L);
+    assertEquals(budget.reclaimIdleCredits(), 128L);
+    assertEquals(budget.availableBalance(), 128L);
+  }
+
   @Test(timeOut = 2_000L)
   public void reserveReturnsFalseWhenRefillStripeRemainsContended() throws Exception {
     Budget budget = new Budget(1_024L, 1);
