@@ -17,6 +17,7 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
+import org.openjdk.jmh.infra.ThreadParams;
 
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
@@ -37,13 +38,13 @@ public class OHCSerializedBenchmark {
   @Param({"JNA"})
   public AllocatorType allocator;
 
-  @Param({"16", "64"})
+  @Param({"32"})
   public int keyBytes;
 
-  @Param({"256", "1024"})
+  @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_100", "READ_95_WRITE_5"})
+  @Param({"READ_90_WRITE_10", "READ_100"})
   public String workload;
 
   @Param({"UNIFORM", "ZIPF_099"})
@@ -55,7 +56,7 @@ public class OHCSerializedBenchmark {
   @Setup(Level.Trial)
   public void setup() {
     dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
-    long capacity = (long) SerializedBenchmarkSupport.WORKING_SET * (keyBytes + valueBytes) * 2L;
+    long capacity = SerializedBenchmarkSupport.ohcCapacityBytes(keyBytes, valueBytes);
     cache =
         (OffHeapCache<byte[], byte[]>)
             OHCacheBuilder.<byte[], byte[]>newBuilder()
@@ -63,9 +64,10 @@ public class OHCSerializedBenchmark {
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
+                .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
                 .allocator(allocator)
                 .build();
-    for (int i = 0; i < SerializedBenchmarkSupport.WORKING_SET; i++) {
+    for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
       if (!cache.put(dataset.keys[i], dataset.values[i])) {
         throw new IllegalStateException("OHC preload rejected");
       }
@@ -89,22 +91,24 @@ public class OHCSerializedBenchmark {
 
   @Benchmark
   @Threads(1)
-  public void oneThread(ThreadState state, Blackhole blackhole, WriteResults results) {
-    access(state, blackhole, results);
+  public void oneThread(ThreadState state, Blackhole blackhole) {
+    access(state, blackhole);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
-  public void cpuThreads(ThreadState state, Blackhole blackhole, WriteResults results) {
-    access(state, blackhole, results);
+  public void cpuThreads(ThreadState state, Blackhole blackhole) {
+    access(state, blackhole);
   }
 
-  private void access(ThreadState state, Blackhole blackhole, WriteResults results) {
-    int index = dataset.accessSequence[state.cursor++ & (dataset.accessSequence.length - 1)];
+  private void access(ThreadState state, Blackhole blackhole) {
+    int index =
+        dataset.accessSequence[Math.floorMod(state.cursor++, dataset.accessSequence.length)];
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
-      results.record(cache.put(dataset.keys[index], dataset.values[index]));
+      cache.put(dataset.keys[index], dataset.values[index]);
     } else {
-      blackhole.consume(SerializedBenchmarkSupport.firstLong(cache.get(dataset.keys[index])));
+      blackhole.consume(
+          SerializedBenchmarkSupport.fullValueChecksum(cache.get(dataset.keys[index])));
     }
   }
 
@@ -117,7 +121,16 @@ public class OHCSerializedBenchmark {
 
   @State(Scope.Thread)
   public static class ThreadState {
-    private int cursor;
-    private int operations;
+    private long cursor;
+    private long operations;
+
+    @Setup(Level.Trial)
+    public void setup(ThreadParams params) {
+      cursor =
+          SerializedBenchmarkSupport.threadStartOffset(
+              params.getThreadIndex(),
+              params.getThreadCount(),
+              SerializedBenchmarkSupport.ACCESS_SEQUENCE_LENGTH);
+    }
   }
 }

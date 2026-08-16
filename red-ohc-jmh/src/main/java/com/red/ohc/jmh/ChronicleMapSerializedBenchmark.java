@@ -18,8 +18,14 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
+import org.openjdk.jmh.infra.ThreadParams;
 
-/** Chronicle Map in-memory off-heap benchmark using its byte[] serializers. */
+/**
+ * Chronicle Map baseline using its byte[] serializers.
+ *
+ * <p>Chronicle Map 3.27ea1 exposes a fixed entry bound but no native TTL or eviction policy, so it
+ * is intentionally excluded from the native-policy comparison cohort.
+ */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Warmup(iterations = 5, time = 3)
@@ -29,13 +35,13 @@ import org.openjdk.jmh.infra.Blackhole;
     jvmArgsAppend = {"-Xms1g", "-Xmx1g"})
 @State(Scope.Benchmark)
 public class ChronicleMapSerializedBenchmark {
-  @Param({"16", "64"})
+  @Param({"32"})
   public int keyBytes;
 
-  @Param({"256", "1024"})
+  @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_100", "READ_95_WRITE_5"})
+  @Param({"READ_100"})
   public String workload;
 
   @Param({"UNIFORM", "ZIPF_099"})
@@ -50,9 +56,9 @@ public class ChronicleMapSerializedBenchmark {
     dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
     store =
         SerializedBenchmarkSupport.newChronicleMap(
-            keyBytes, valueBytes, SerializedBenchmarkSupport.WORKING_SET * 2L);
+            keyBytes, valueBytes, SerializedBenchmarkSupport.CAPACITY_ENTRIES);
     map = store.map();
-    for (int i = 0; i < SerializedBenchmarkSupport.WORKING_SET; i++) {
+    for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
       map.put(dataset.keys[i], dataset.values[i]);
     }
   }
@@ -75,17 +81,28 @@ public class ChronicleMapSerializedBenchmark {
   }
 
   private void access(ThreadState state, Blackhole blackhole) {
-    int index = dataset.accessSequence[state.cursor++ & (dataset.accessSequence.length - 1)];
+    int index =
+        dataset.accessSequence[Math.floorMod(state.cursor++, dataset.accessSequence.length)];
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
       map.put(dataset.keys[index], dataset.values[index]);
     } else {
-      blackhole.consume(SerializedBenchmarkSupport.firstLong(map.get(dataset.keys[index])));
+      blackhole.consume(
+          SerializedBenchmarkSupport.fullValueChecksum(map.get(dataset.keys[index])));
     }
   }
 
   @State(Scope.Thread)
   public static class ThreadState {
-    private int cursor;
-    private int operations;
+    private long cursor;
+    private long operations;
+
+    @Setup(Level.Trial)
+    public void setup(ThreadParams params) {
+      cursor =
+          SerializedBenchmarkSupport.threadStartOffset(
+              params.getThreadIndex(),
+              params.getThreadCount(),
+              SerializedBenchmarkSupport.ACCESS_SEQUENCE_LENGTH);
+    }
   }
 }

@@ -1,6 +1,11 @@
 package com.red.ohc.jmh;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import net.openhft.chronicle.map.ChronicleMap;
 import net.openhft.chronicle.map.ChronicleMapBuilder;
@@ -8,6 +13,7 @@ import org.ehcache.Cache;
 import org.ehcache.CacheManager;
 import org.ehcache.config.builders.CacheConfigurationBuilder;
 import org.ehcache.config.builders.CacheManagerBuilder;
+import org.ehcache.config.builders.ExpiryPolicyBuilder;
 import org.ehcache.config.builders.ResourcePoolsBuilder;
 import org.ehcache.config.units.MemoryUnit;
 import org.ehcache.spi.serialization.Serializer;
@@ -15,13 +21,22 @@ import org.mapdb.DB;
 import org.mapdb.DBMaker;
 import org.mapdb.HTreeMap;
 
+import com.red.ohc.storage.CacheMath;
+import com.red.ohc.storage.ValueBlock;
+import com.red.ohc.storage.WriterArena;
+
 /** Shared raw-byte serialization helpers for the OHC and Ehcache JMH states. */
 public final class SerializedBenchmarkSupport {
   public static final int WORKING_SET = 24_576;
+  public static final int DEFAULT_KEY_BYTES = 32;
+  public static final int DEFAULT_VALUE_BYTES = 5 * 1024;
+  public static final int CAPACITY_ENTRIES = WORKING_SET * 4 / 5;
+  public static final long TTL_MILLIS = TimeUnit.MINUTES.toMillis(10);
+  public static final int ACCESS_SEQUENCE_LENGTH = 1 << 16;
 
   private SerializedBenchmarkSupport() {}
 
-  public static EhcacheStore newEhcache(long offHeapBytes) {
+  public static EhcacheStore newEhcache(long offHeapBytes, long ttlMillis) {
     CacheManager manager =
         CacheManagerBuilder.newCacheManagerBuilder()
             .withCache(
@@ -32,17 +47,32 @@ public final class SerializedBenchmarkSupport {
                         ResourcePoolsBuilder.newResourcePoolsBuilder()
                             .offheap(offHeapBytes, MemoryUnit.B))
                     .withKeySerializer(new RawByteArraySerializer())
-                    .withValueSerializer(new RawByteArraySerializer()))
+                    .withValueSerializer(new RawByteArraySerializer())
+                    .withExpiry(
+                        ExpiryPolicyBuilder.timeToLiveExpiration(
+                            Duration.ofMillis(ttlMillis))))
             .build(true);
     return new EhcacheStore(manager, manager.getCache("serialized", byte[].class, byte[].class));
   }
 
-  public static MapDbStore newMapDb() {
+  public static MapDbStore newMapDb(long capacityEntries, long ttlMillis) {
     DB db = DBMaker.memoryDirectDB().make();
+    ScheduledExecutorService expiryExecutor =
+        Executors.newSingleThreadScheduledExecutor(
+            runnable -> {
+              Thread thread = new Thread(runnable, "mapdb-expiry");
+              thread.setDaemon(true);
+              return thread;
+            });
     HTreeMap<byte[], byte[]> map =
         db.hashMap("serialized", org.mapdb.Serializer.BYTE_ARRAY, org.mapdb.Serializer.BYTE_ARRAY)
+            .expireAfterCreate(ttlMillis, TimeUnit.MILLISECONDS)
+            .expireAfterUpdate(ttlMillis, TimeUnit.MILLISECONDS)
+            .expireMaxSize(capacityEntries)
+            .expireExecutor(expiryExecutor)
+            .expireExecutorPeriod(TimeUnit.SECONDS.toMillis(1L))
             .createOrOpen();
-    return new MapDbStore(db, map);
+    return new MapDbStore(db, map, expiryExecutor);
   }
 
   public static ChronicleMapStore newChronicleMap(int keyBytes, int valueBytes, long entries) {
@@ -68,22 +98,46 @@ public final class SerializedBenchmarkSupport {
         "ZIPF_099".equals(distribution) ? zipfSequence(WORKING_SET) : uniformSequence(WORKING_SET));
   }
 
-  public static boolean isWrite(String workload, int operation) {
-    return "READ_95_WRITE_5".equals(workload) && operation % 20 == 0;
+  public static boolean isWrite(String workload, long operation) {
+    if ("READ_90_WRITE_10".equals(workload)) {
+      return operation % 10L == 0L;
+    }
+    return "READ_95_WRITE_5".equals(workload) && operation % 20L == 0L;
   }
 
-  public static long firstLong(byte[] value) {
+  public static int threadStartOffset(int threadIndex, int threadCount, int sequenceLength) {
+    if (threadIndex < 0 || threadCount <= 0 || sequenceLength <= 0) {
+      throw new IllegalArgumentException("invalid thread sequence parameters");
+    }
+    return (int) ((long) sequenceLength * threadIndex / threadCount);
+  }
+
+  public static long logicalCapacityBytes(int keyBytes, int valueBytes) {
+    return (long) CAPACITY_ENTRIES * (keyBytes + valueBytes);
+  }
+
+  public static long ohcCapacityBytes(int keyBytes, int valueBytes) {
+    long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyBytes + Long.BYTES));
+    long valueAllocation = ValueBlock.allocationLength(valueBytes);
+    long entryWeight =
+        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
+    return entryWeight * CAPACITY_ENTRIES;
+  }
+
+  public static byte[] ownedCopy(byte[] value) {
+    return value == null ? null : Arrays.copyOf(value, value.length);
+  }
+
+  public static long fullValueChecksum(byte[] value) {
     if (value == null) {
       return 0L;
     }
-    return ((long) value[0] & 0xffL)
-        | (((long) value[1] & 0xffL) << 8)
-        | (((long) value[2] & 0xffL) << 16)
-        | (((long) value[3] & 0xffL) << 24)
-        | (((long) value[4] & 0xffL) << 32)
-        | (((long) value[5] & 0xffL) << 40)
-        | (((long) value[6] & 0xffL) << 48)
-        | (((long) value[7] & 0xffL) << 56);
+    long checksum = 0xcbf29ce484222325L;
+    for (byte element : value) {
+      checksum ^= element & 0xffL;
+      checksum *= 0x100000001b3L;
+    }
+    return checksum;
   }
 
   private static byte[] bytes(int length, int seed) {
@@ -177,10 +231,13 @@ public final class SerializedBenchmarkSupport {
   public static final class MapDbStore implements AutoCloseable {
     private final DB db;
     private final HTreeMap<byte[], byte[]> map;
+    private final ScheduledExecutorService expiryExecutor;
 
-    private MapDbStore(DB db, HTreeMap<byte[], byte[]> map) {
+    private MapDbStore(
+        DB db, HTreeMap<byte[], byte[]> map, ScheduledExecutorService expiryExecutor) {
       this.db = db;
       this.map = map;
+      this.expiryExecutor = expiryExecutor;
     }
 
     public HTreeMap<byte[], byte[]> map() {
@@ -189,7 +246,11 @@ public final class SerializedBenchmarkSupport {
 
     @Override
     public void close() {
-      db.close();
+      try {
+        db.close();
+      } finally {
+        expiryExecutor.shutdownNow();
+      }
     }
   }
 

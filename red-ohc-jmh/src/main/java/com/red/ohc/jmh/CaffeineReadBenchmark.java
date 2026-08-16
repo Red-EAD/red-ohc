@@ -1,5 +1,6 @@
 package com.red.ohc.jmh;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
@@ -19,10 +20,11 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
+import org.openjdk.jmh.infra.ThreadParams;
 
 import com.red.ohc.api.EncodedKey;
 
-/** Caffeine-only counterpart to {@link OHCBenchmark}; no OHC worker is created here. */
+/** Caffeine ordinary owned-byte[] counterpart to {@link OHCSerializedBenchmark}. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Warmup(iterations = 10, time = 10)
@@ -34,17 +36,14 @@ import com.red.ohc.api.EncodedKey;
 public class CaffeineReadBenchmark {
   private static final int WORKING_SET = 24_576;
 
-  @Param({"16", "64"})
+  @Param({"32"})
   public int keyBytes;
 
-  @Param({"256", "1024"})
+  @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_100", "READ_99_WRITE_1", "READ_95_WRITE_5"})
+  @Param({"READ_90_WRITE_10", "READ_100"})
   public String workload;
-
-  @Param({"HIT_ONLY", "EVICTION_120"})
-  public String residency;
 
   @Param({"UNIFORM", "ZIPF_099"})
   public String distribution;
@@ -56,9 +55,6 @@ public class CaffeineReadBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    long payloadCapacity =
-        (long) ("HIT_ONLY".equals(residency) ? WORKING_SET : WORKING_SET * 5 / 6)
-            * (keyBytes + valueBytes);
     keys = new EncodedKey[WORKING_SET];
     values = new byte[WORKING_SET][];
     for (int i = 0; i < WORKING_SET; i++) {
@@ -69,14 +65,14 @@ public class CaffeineReadBenchmark {
         "ZIPF_099".equals(distribution) ? zipfSequence(WORKING_SET) : uniformSequence(WORKING_SET);
     cache =
         Caffeine.<EncodedKey, byte[]>newBuilder()
-            .maximumWeight(payloadCapacity)
-            .weigher((EncodedKey key, byte[] value) -> key.length() + value.length)
+            .maximumSize(SerializedBenchmarkSupport.CAPACITY_ENTRIES)
+            .expireAfterWrite(Duration.ofMillis(SerializedBenchmarkSupport.TTL_MILLIS))
             .build();
-    for (int i = 0; i < WORKING_SET; i++) {
-      cache.put(keys[i], values[i]);
+    for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
+      putOwned(cache, keys[i], values[i]);
     }
     cache.cleanUp();
-    if ("HIT_ONLY".equals(residency) && cache.estimatedSize() != WORKING_SET) {
+    if (cache.estimatedSize() != SerializedBenchmarkSupport.CAPACITY_ENTRIES) {
       throw new IllegalStateException(
           "HIT_ONLY preload was evicted: size=" + cache.estimatedSize());
     }
@@ -97,28 +93,41 @@ public class CaffeineReadBenchmark {
   private void access(ThreadState state, Blackhole blackhole) {
     int index = state.next(accessSequence);
     if (state.write(workload)) {
-      cache.put(keys[index], values[index]);
+      putOwned(cache, keys[index], values[index]);
       return;
     }
-    byte[] value = cache.getIfPresent(keys[index]);
-    blackhole.consume(value == null ? 0L : firstLong(value));
+    blackhole.consume(
+        SerializedBenchmarkSupport.fullValueChecksum(getOwned(cache, keys[index])));
+  }
+
+  static void putOwned(Cache<EncodedKey, byte[]> cache, EncodedKey key, byte[] value) {
+    cache.put(key, SerializedBenchmarkSupport.ownedCopy(value));
+  }
+
+  static byte[] getOwned(Cache<EncodedKey, byte[]> cache, EncodedKey key) {
+    return SerializedBenchmarkSupport.ownedCopy(cache.getIfPresent(key));
   }
 
   @State(Scope.Thread)
   public static class ThreadState {
-    private int cursor;
-    private int writes;
+    private long cursor;
+    private long operations;
+
+    @Setup(Level.Trial)
+    public void setup(ThreadParams params) {
+      cursor =
+          SerializedBenchmarkSupport.threadStartOffset(
+              params.getThreadIndex(),
+              params.getThreadCount(),
+              SerializedBenchmarkSupport.ACCESS_SEQUENCE_LENGTH);
+    }
 
     int next(int[] sequence) {
-      return sequence[cursor++ & (sequence.length - 1)];
+      return sequence[Math.floorMod(cursor++, sequence.length)];
     }
 
     boolean write(String mix) {
-      if ("READ_100".equals(mix)) {
-        return false;
-      }
-      int every = "READ_99_WRITE_1".equals(mix) ? 100 : 20;
-      return ++writes % every == 0;
+      return SerializedBenchmarkSupport.isWrite(mix, ++operations);
     }
   }
 
@@ -170,14 +179,4 @@ public class CaffeineReadBenchmark {
     return sequence;
   }
 
-  private static long firstLong(byte[] value) {
-    return ((long) value[0] & 0xffL)
-        | (((long) value[1] & 0xffL) << 8)
-        | (((long) value[2] & 0xffL) << 16)
-        | (((long) value[3] & 0xffL) << 24)
-        | (((long) value[4] & 0xffL) << 32)
-        | (((long) value[5] & 0xffL) << 40)
-        | (((long) value[6] & 0xffL) << 48)
-        | (((long) value[7] & 0xffL) << 56);
-  }
 }
