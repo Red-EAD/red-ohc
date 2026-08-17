@@ -18,6 +18,7 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
@@ -46,7 +47,7 @@ public class MaintenancePolicyTest {
   @Test
   public void tinyLfuMovesAWindowOverflowIntoProbationBeforeCapacityEviction() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 128L);
-    Entry entry = new Entry(0L, 1, 1, 0L);
+    Entry entry = EntryTestSupport.entry(1, 1, 0L);
 
     policy.add(entry);
 
@@ -59,9 +60,9 @@ public class MaintenancePolicyTest {
   @Test
   public void tinyLfuDrainsMultipleWindowCandidatesInPromotionOrder() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 256L);
-    Entry oldest = new Entry(0L, 1, 1, 1L, 0L);
-    Entry middle = new Entry(0L, 1, 2, 2L, 0L);
-    Entry newest = new Entry(0L, 1, 3, 3L, 0L);
+    Entry oldest = EntryTestSupport.entry(1, 1, 1L, 0L);
+    Entry middle = EntryTestSupport.entry(1, 2, 2L, 0L);
+    Entry newest = EntryTestSupport.entry(1, 3, 3L, 0L);
 
     policy.add(oldest);
     policy.add(middle);
@@ -102,8 +103,8 @@ public class MaintenancePolicyTest {
   public void s3GhostUsesTheFullXxHashInsteadOfTheFoldedChmHash() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
     int foldedHash = 0x13579bdf;
-    Entry evicted = new Entry(0L, 1, foldedHash, 0x00000001_13579bdeL, 0L);
-    Entry collision = new Entry(0L, 1, foldedHash, 0x00000002_13579bddL, 0L);
+    Entry evicted = EntryTestSupport.entry(1, foldedHash, 0x00000001_13579bdeL, 0L);
+    Entry collision = EntryTestSupport.entry(1, foldedHash, 0x00000002_13579bddL, 0L);
 
     policy.add(evicted);
     policy.remove(evicted, true);
@@ -118,8 +119,8 @@ public class MaintenancePolicyTest {
   @Test
   public void s3FifoGhostsColdSmallEvictionsAndReinsertsThemIntoMain() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
-    Entry cold = new Entry(0L, 1, 31, 0x1234_5678_9abc_def0L, 0L);
-    Entry returnee = new Entry(0L, 1, 31, 0x1234_5678_9abc_def0L, 0L);
+    Entry cold = EntryTestSupport.entry(1, 31, 0x1234_5678_9abc_def0L, 0L);
+    Entry returnee = EntryTestSupport.entry(1, 31, 0x1234_5678_9abc_def0L, 0L);
 
     policy.add(cold);
     policy.remove(cold, true);
@@ -134,8 +135,8 @@ public class MaintenancePolicyTest {
   @Test
   public void s3GhostAcceptsZeroAsARealHashKey() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_024L);
-    Entry evicted = new Entry(0L, 1, 0, 0L, 0L);
-    Entry returnee = new Entry(0L, 1, 0, 0L, 0L);
+    Entry evicted = EntryTestSupport.entry(1, 0, 0L, 0L);
+    Entry returnee = EntryTestSupport.entry(1, 0, 0L, 0L);
 
     policy.add(evicted);
     policy.remove(evicted, true);
@@ -150,11 +151,12 @@ public class MaintenancePolicyTest {
   @Test
   public void s3GhostRemovesTheOldestEntryWhenWeightedCapacityIsExceeded() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_280L);
-    Entry oldest = new Entry(0L, 1, 1, 1L, 0L);
-    Entry newest = new Entry(0L, 1, 10, 10L, 0L);
+    Entry oldest = EntryTestSupport.entry(1, 1, 1L, 0L);
+    Entry newest = EntryTestSupport.entry(1, 10, 10L, 0L);
 
     for (int hash = 1; hash <= 10; hash++) {
-      Entry entry = hash == 1 ? oldest : hash == 10 ? newest : new Entry(0L, 1, hash, hash, 0L);
+      Entry entry =
+          hash == 1 ? oldest : hash == 10 ? newest : EntryTestSupport.entry(1, hash, hash, 0L);
       policy.add(entry);
       policy.remove(entry, true);
     }
@@ -191,10 +193,10 @@ public class MaintenancePolicyTest {
   @Test
   public void s3DuplicateFingerprintRefreshesRecencyBeforeWeightedTrim() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 512L);
-    Entry firstA = new Entry(0L, 1, 1, 101L, 0L);
-    Entry secondA = new Entry(0L, 200, 1, 101L, 0L);
-    Entry b = new Entry(0L, 1, 2, 202L, 0L);
-    Entry c = new Entry(0L, 1, 3, 303L, 0L);
+    Entry firstA = EntryTestSupport.entry(1, 1, 101L, 0L);
+    Entry secondA = EntryTestSupport.entry(200, 1, 101L, 0L);
+    Entry b = EntryTestSupport.entry(1, 2, 202L, 0L);
+    Entry c = EntryTestSupport.entry(1, 3, 303L, 0L);
 
     policy.add(firstA);
     policy.add(secondA);
@@ -205,7 +207,7 @@ public class MaintenancePolicyTest {
     policy.add(c);
     policy.remove(c, true);
 
-    Entry returningB = new Entry(0L, 1, 2, 202L, 0L);
+    Entry returningB = EntryTestSupport.entry(1, 2, 202L, 0L);
     policy.add(returningB);
     assertEquals(
         returningB.policyState(),
@@ -214,7 +216,7 @@ public class MaintenancePolicyTest {
             + " trim victim");
     policy.remove(returningB, false);
 
-    Entry returningA = new Entry(0L, 1, 1, 101L, 0L);
+    Entry returningA = EntryTestSupport.entry(1, 1, 101L, 0L);
     policy.add(returningA);
     assertEquals(
         returningA.policyState(),
@@ -227,9 +229,9 @@ public class MaintenancePolicyTest {
     // A zero-address test Entry still has one 128B rounded key allocation. With a 1280B
     // cache, one Small Entry exactly fills its 10% Small quota.
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 1_280L);
-    Entry cold = new Entry(0L, 1, 41, 0x101L, 0L);
-    Entry main = new Entry(0L, 1, 41, 0x101L, 0L);
-    Entry small = new Entry(0L, 1, 42, 0x202L, 0L);
+    Entry cold = EntryTestSupport.entry(1, 41, 0x101L, 0L);
+    Entry main = EntryTestSupport.entry(1, 41, 0x101L, 0L);
+    Entry small = EntryTestSupport.entry(1, 42, 0x202L, 0L);
 
     policy.add(cold);
     policy.remove(cold, true);
@@ -245,19 +247,18 @@ public class MaintenancePolicyTest {
   @Test
   public void storesPrimitiveByteWeightAndRemovesItWithTheEntry() throws Exception {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.LRU, 1_024L);
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
     long expected = WriterArena.allocationWeight(entry.keyAllocationLength());
 
     policy.add(entry);
 
-    assertEquals(entry.policyByteWeight, expected);
+    assertEquals(entry.policyByteWeight(), expected);
     assertEquals(policy.usedBytes(), expected);
     assertEquals(policy.usedWeight(), expected);
 
     policy.remove(entry, false);
 
-    assertEquals(entry.policyByteWeight, 0L);
-    assertEquals(entry.policyWeight, 0L);
+    assertEquals(entry.policyByteWeight(), 0L);
     assertEquals(policy.usedBytes(), 0L);
     assertEquals(policy.usedWeight(), 0L);
 
@@ -273,7 +274,7 @@ public class MaintenancePolicyTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long value = 0L;
     try {
-      Entry entry = new Entry(0L, 1, 8, 0L);
+      Entry entry = EntryTestSupport.entry(1, 8, 0L);
       MaintenancePolicy bytePolicy = new MaintenancePolicy(Eviction.W_TINY_LFU, 1_024L);
       bytePolicy.add(entry);
       long keyWeight = WriterArena.allocationWeight(entry.keyAllocationLength());
@@ -286,14 +287,14 @@ public class MaintenancePolicyTest {
       long expected =
           keyWeight
               + WriterArena.allocationWeight(ValueBlock.allocationLength(32));
-      assertEquals(entry.policyByteWeight, expected);
+      assertEquals(entry.policyByteWeight(), expected);
       assertEquals(bytePolicy.usedBytes(), expected);
       assertEquals(bytePolicy.usedWeight(), expected);
 
       MaintenancePolicy countPolicy = new MaintenancePolicy(Eviction.S3_FIFO, 16L, true);
-      Entry countEntry = new Entry(0L, 1, 9, 0L);
+      Entry countEntry = EntryTestSupport.entry(1, 9, 0L);
       countPolicy.add(countEntry);
-      assertEquals(countEntry.policyWeight, 1L);
+      assertEquals(countPolicy.usedWeight(), 1L);
       assertEquals(countPolicy.usedWeight(), 1L);
       assertEquals(countPolicy.usedBytes(), keyWeight);
       countPolicy.remove(countEntry, false);
@@ -310,14 +311,12 @@ public class MaintenancePolicyTest {
   @Test
   public void removeClearsPolicyMetadataFromAnAlreadyUnlinkedEntry() {
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.LRU, 1_024L);
-    Entry entry = new Entry(0L, 1, 10, 0L);
-    entry.policyWeight = 7L;
-    entry.policyByteWeight = 256L;
+    Entry entry = EntryTestSupport.entry(1, 10, 0L);
+    entry.policyByteWeight(256L);
 
     policy.remove(entry, false);
 
-    assertEquals(entry.policyWeight, 0L);
-    assertEquals(entry.policyByteWeight, 0L);
+    assertEquals(entry.policyByteWeight(), 0L);
     assertEquals(policy.usedWeight(), 0L);
     assertEquals(policy.usedBytes(), 0L);
   }

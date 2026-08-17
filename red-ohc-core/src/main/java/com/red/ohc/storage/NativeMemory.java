@@ -440,6 +440,10 @@ public final class NativeMemory {
     return U.getLongVolatile(null, address);
   }
 
+  public static boolean compareAndSwapLong(long address, long expected, long update) {
+    return U.compareAndSwapLong(null, address, expected, update);
+  }
+
   public static void putLong(long address, long value) {
     U.putLong(address, value);
   }

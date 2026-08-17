@@ -4,7 +4,6 @@ import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.NativeMemory;
@@ -36,12 +35,20 @@ public final class Entry {
   private static final int PENDING_CLAIM_MASK = PENDING_MASK << PENDING_CLAIM_SHIFT;
   private static final int PENDING_ROLLOVER = 1 << 9;
   private static final int PENDING_ROLLOVER_CLAIMED = 1 << 10;
+  /** Heap-resident, volatile hint used by the business writer to avoid reading policy metadata. */
+  private static final int POLICY_PRESENT = 1 << 11;
   private static final int TIMER_UNSCHEDULED = -1;
   private static final int TIMER_HEAP_BASE = -2;
   private static final int TIMER_SLOT_BITS = 10;
   private static final int TIMER_SLOT_MASK = (1 << TIMER_SLOT_BITS) - 1;
   private static final int POLICY_STATE_SHIFT = 0;
   private static final int POLICY_ACCESS_SHIFT = 3;
+  private static final long POLICY_META_OFFSET = 0L;
+  private static final long TIMER_LOCATION_OFFSET = 4L;
+  private static final long TIMER_DEADLINE_OFFSET = 8L;
+  private static final long MAINTENANCE_META_OFFSET = 16L;
+  private static final long POLICY_BYTE_WEIGHT_OFFSET = 24L;
+  public static final long NATIVE_METADATA_BYTES = 32L;
   private static final long MUTATION_VERSION_SHIFT = 32L;
   private static final long VERSION_MASK = 0xffffffffL;
   public static final long WRITER_LOCK = 1L << 63;
@@ -56,13 +63,6 @@ public final class Entry {
       AtomicLongFieldUpdater.newUpdater(Entry.class, "lifecycle");
   private static final AtomicIntegerFieldUpdater<Entry> PENDING =
       AtomicIntegerFieldUpdater.newUpdater(Entry.class, "pendingFlags");
-  private static final AtomicIntegerFieldUpdater<Entry> POLICY =
-      AtomicIntegerFieldUpdater.newUpdater(Entry.class, "policyMeta");
-  private static final AtomicLongFieldUpdater<Entry> MAINTENANCE =
-      AtomicLongFieldUpdater.newUpdater(Entry.class, "maintenanceMeta");
-  private static final AtomicReferenceFieldUpdater<Entry, ValueState> VALUE_STATE =
-      AtomicReferenceFieldUpdater.newUpdater(Entry.class, ValueState.class, "valueState");
-  private static final ValueState EMPTY_VALUE_STATE = new ValueState(0L, null);
 
   public final long nativeKeyAddress;
 
@@ -72,29 +72,12 @@ public final class Entry {
   /** Eight-byte aligned native value address; bit 0 marks a TTL-bearing value. */
   public volatile long valueAddress;
 
-  /** Optional weak Java value bound to one immutable publication of the native value. */
-  private volatile ValueState valueState;
-
   public volatile long lifecycle;
   public Entry policyPrev;
   public Entry policyNext;
   public Entry timerPrev;
   public Entry timerNext;
 
-  /** Packed timer location: wheel level/slot, or a negative overflow-heap index. */
-  public int timerLocation = TIMER_UNSCHEDULED;
-
-  public long timerDeadlineTick;
-
-  /** Actor-owned fields: readers and writers never mutate policy/timer links or counters. */
-  /** Actor-owned intrusive policy metadata. */
-  private volatile int policyMeta;
-
-  /** High 32 bits are the latest published mutation; low 32 bits are the applied version. */
-  public volatile long maintenanceMeta;
-
-  public long policyWeight;
-  public long policyByteWeight;
   public volatile int pendingFlags;
 
   public Entry(long nativeKeyAddress, int keyLength, int chmHash, long valueAddress) {
@@ -105,11 +88,6 @@ public final class Entry {
       long nativeKeyAddress, int keyLength, int chmHash, long keyHash64, long valueAddress) {
     this.nativeKeyAddress = nativeKeyAddress;
     this.keyMeta = packKeyMeta(chmHash, keyLength);
-    // Zero-address Entries exist only in policy/timer unit tests. Production Entries retain
-    // the complete hash in their native key-block prefix without growing this hot object.
-    if (nativeKeyAddress == 0L) {
-      this.timerDeadlineTick = keyHash64;
-    }
     this.valueAddress = valueAddress;
     this.pendingFlags = 0;
   }
@@ -135,7 +113,7 @@ public final class Entry {
   }
 
   public long keyHash64() {
-    return nativeKeyAddress == 0L ? timerDeadlineTick : NativeMemory.getLong(nativeKeyAddress);
+    return nativeKeyAddress == 0L ? 0L : NativeMemory.getLong(nativeKeyAddress);
   }
 
   public int keyLength() {
@@ -150,174 +128,39 @@ public final class Entry {
     return nativeKeyAddress + Long.BYTES;
   }
 
+  public static long keyDataAllocationLength(int keyLength) {
+    if (keyLength < 0) {
+      throw new IllegalArgumentException("keyLength must be non-negative");
+    }
+    return Math.max(8L, CacheMath.roundUpTo8((long) keyLength + Long.BYTES));
+  }
+
+  public static long keyAllocationLengthForKeyLength(int keyLength) {
+    return keyDataAllocationLength(keyLength) + NATIVE_METADATA_BYTES;
+  }
+
   public long keyAllocationLength() {
-    return Math.max(8L, CacheMath.roundUpTo8((long) keyLength() + Long.BYTES));
+    return keyAllocationLengthForKeyLength(keyLength());
   }
 
   public long rawValueAddress() {
     return rawValueAddress(valueAddress);
   }
 
-  public WeakValueSlot weakValueSlot() {
-    ValueState state = valueState;
-    return state == null ? null : state.weakValue;
+  private long nativeMetadataAddress() {
+    if (nativeKeyAddress == 0L) {
+      throw new IllegalStateException("Entry has no native key block");
+    }
+    return nativeKeyAddress + keyDataAllocationLength(keyLength());
   }
 
-  public boolean compareAndSetWeakValueSlot(WeakValueSlot expected, WeakValueSlot update) {
-    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
-      ValueState current = valueState;
-      WeakValueSlot currentValue = current == null ? null : current.weakValue;
-      if (currentValue != expected) {
-        return false;
-      }
-      ValueState next =
-          current == null
-              ? new ValueState(valueAddress, update)
-              : current.withWeakValue(update);
-      if (VALUE_STATE.compareAndSet(this, current, next)) {
-        return true;
-      }
-      Thread.onSpinWait();
-    }
-    return false;
-  }
-
-  public void clearWeakValueSlot() {
-    ValueState current = valueState;
-    while (current != null) {
-      ValueState next = current.withWeakValue(null);
-      if (valueAddress != current.taggedValueAddress) {
-        return;
-      }
-      if (VALUE_STATE.compareAndSet(this, current, next)) {
-        return;
-      }
-      current = valueState;
-    }
-  }
-
-  /** Clears one queued weak slot only if it is still the current publication. */
-  public boolean clearWeakValueIfCurrent(WeakValueSlot expected) {
-    if (expected == null || expected.owner() != this) {
-      return false;
-    }
-    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
-      ValueState current = valueState;
-      if (current == null
-          || current.weakValue != expected
-          || current.taggedValueAddress != expected.taggedValueAddress()
-          || valueAddress != current.taggedValueAddress) {
-        return false;
-      }
-      ValueState next = current.withWeakValue(null);
-      if (VALUE_STATE.compareAndSet(this, current, next)) {
-        expected.clear();
-        return true;
-      }
-      Thread.onSpinWait();
-    }
-    return false;
-  }
-
-  public void setWeakValueSlot(WeakValueSlot slot) {
-    if (slot == null && valueState == null) {
-      return;
-    }
-    long taggedValueAddress = valueAddress;
-    if (taggedValueAddress == 0L && slot != null) {
-      throw new IllegalArgumentException("weak value requires a native value address");
-    }
-    ValueState current = valueState;
-    valueState =
-        current == null || current.taggedValueAddress != taggedValueAddress
-            ? new ValueState(taggedValueAddress, slot)
-            : current.withWeakValue(slot);
-  }
-
-  /** Initializes weak-value publication metadata without allocating it for disabled caches. */
-  public void initializeValueState(long taggedValueAddress, WeakValueSlot slot) {
-    valueState = new ValueState(taggedValueAddress, slot);
-  }
-
-  /** Publishes a new native value and its weak-value binding as one immutable logical state. */
-  public void publishValueState(long taggedValueAddress, WeakValueSlot slot) {
-    ValueState next = new ValueState(taggedValueAddress, slot);
-    valueAddress = taggedValueAddress;
-    valueState = next;
-  }
-
-  /** Publishes a native value while preserving the no-metadata fast path for strong caches. */
-  public void publishValue(long taggedValueAddress, WeakValueSlot slot) {
-    if (valueState == null && slot == null) {
-      valueAddress = taggedValueAddress;
-      return;
-    }
-    publishValueState(taggedValueAddress, slot);
-  }
-
-  /** Clears the published value before native retirement, if weak-value state is enabled. */
-  public void clearValueState() {
-    if (valueState != null) {
-      valueAddress = 0L;
-      valueState = EMPTY_VALUE_STATE;
-      return;
-    }
-    valueAddress = 0L;
-  }
-
-  /** Clears the native value and weak binding, preserving the strong-cache no-metadata path. */
-  public void clearValue() {
-    if (valueState != null) {
-      clearValueState();
-    } else {
-      valueAddress = 0L;
-    }
-  }
-
-  public ValueState valueState() {
-    return valueState;
-  }
-
-  public boolean compareAndSetValueState(ValueState expected, ValueState update) {
-    if (expected == null || update == null) {
-      return false;
-    }
-    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
-      if (valueState != expected || valueAddress != expected.taggedValueAddress) {
-        return false;
-      }
-      if (VALUE_STATE.compareAndSet(this, expected, update)) {
-        return true;
-      }
-      Thread.onSpinWait();
-    }
-    return false;
-  }
-
-  /** Disables weak reuse for the still-current native publication and drops its weak referent. */
-  public boolean disableWeakValue(ValueState expected) {
-    if (expected == null) {
-      return false;
-    }
-    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
-      ValueState current = valueState;
-      if (current == null
-          || current.publication != expected.publication
-          || current.taggedValueAddress != expected.taggedValueAddress
-          || valueAddress != current.taggedValueAddress) {
-        return false;
-      }
-      current.disableFingerprint();
-      ValueState disabled = current.withWeakValue(null);
-      if (VALUE_STATE.compareAndSet(this, current, disabled)) {
-        if (current.weakValue != null) {
-          current.weakValue.clear();
-        }
-        return true;
-      }
-      Thread.onSpinWait();
-    }
-    return false;
+  public void initializeNativeMetadata() {
+    long metadata = nativeMetadataAddress();
+    NativeMemory.putInt(metadata + POLICY_META_OFFSET, POLICY_NONE);
+    NativeMemory.putInt(metadata + TIMER_LOCATION_OFFSET, TIMER_UNSCHEDULED);
+    NativeMemory.putLong(metadata + TIMER_DEADLINE_OFFSET, 0L);
+    NativeMemory.putLong(metadata + MAINTENANCE_META_OFFSET, 0L);
+    NativeMemory.putLong(metadata + POLICY_BYTE_WEIGHT_OFFSET, 0L);
   }
 
   /** Immutable token joining a native value address and its optional weak Java object. */
@@ -361,6 +204,10 @@ public final class Entry {
       return weakValue;
     }
 
+    public ValueState publication() {
+      return publication;
+    }
+
     public ValueState withWeakValue(WeakValueSlot replacement) {
       return new ValueState(taggedValueAddress, replacement, publication);
     }
@@ -390,7 +237,7 @@ public final class Entry {
           publication, FINGERPRINT_UNINITIALIZED, packed);
     }
 
-    private void disableFingerprint() {
+    void disableFingerprint() {
       for (; ; ) {
         long current = publication.fingerprintState;
         if (current == FINGERPRINT_DISABLED
@@ -535,46 +382,66 @@ public final class Entry {
   }
 
   public boolean timerScheduled() {
-    return timerLocation != TIMER_UNSCHEDULED;
+    return timerLocation() != TIMER_UNSCHEDULED;
   }
 
   public void timerScheduled(boolean scheduled) {
     if (!scheduled) {
-      timerLocation = TIMER_UNSCHEDULED;
+      timerLocation(TIMER_UNSCHEDULED);
     }
   }
 
   /** A negative timer level encodes the worker-owned overflow heap index. */
   public boolean timerInOverflowHeap() {
-    return timerLocation <= TIMER_HEAP_BASE;
+    return timerLocation() <= TIMER_HEAP_BASE;
   }
 
   public int timerHeapIndex() {
-    return timerInOverflowHeap() ? -timerLocation - 2 : -1;
+    int location = timerLocation();
+    return location <= TIMER_HEAP_BASE ? -location - 2 : -1;
   }
 
   public void timerHeapIndex(int index) {
     if (index < 0) {
-      timerLocation = TIMER_HEAP_BASE;
+      timerLocation(TIMER_HEAP_BASE);
     } else {
-      timerLocation = -index - 2;
+      timerLocation(-index - 2);
     }
   }
 
   public int timerLevel() {
-    return timerLocation >= 0 ? timerLocation >>> TIMER_SLOT_BITS : -1;
+    int location = timerLocation();
+    return location >= 0 ? location >>> TIMER_SLOT_BITS : -1;
   }
 
   public void timerLevel(int level) {
-    timerLocation = (level << TIMER_SLOT_BITS) | (timerLocation & TIMER_SLOT_MASK);
+    int location = timerLocation();
+    timerLocation((level << TIMER_SLOT_BITS) | (location & TIMER_SLOT_MASK));
   }
 
   public int timerSlot() {
-    return timerLocation & TIMER_SLOT_MASK;
+    return timerLocation() & TIMER_SLOT_MASK;
   }
 
   public void timerSlot(int slot) {
-    timerLocation = (timerLocation & ~TIMER_SLOT_MASK) | (slot & TIMER_SLOT_MASK);
+    int location = timerLocation();
+    timerLocation((location & ~TIMER_SLOT_MASK) | (slot & TIMER_SLOT_MASK));
+  }
+
+  public long timerDeadlineTick() {
+    return NativeMemory.getLong(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET);
+  }
+
+  public void timerDeadlineTick(long tick) {
+    NativeMemory.putLong(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET, tick);
+  }
+
+  private int timerLocation() {
+    return NativeMemory.getInt(nativeMetadataAddress() + TIMER_LOCATION_OFFSET);
+  }
+
+  private void timerLocation(int location) {
+    NativeMemory.putInt(nativeMetadataAddress() + TIMER_LOCATION_OFFSET, location);
   }
 
   /** Attempts a reliable-removal claim once; callers must not wait for another producer. */
@@ -609,12 +476,12 @@ public final class Entry {
 
   /** Published after a writer has made its CHM/value mutation visible. */
   public long mutationVersion() {
-    return (maintenanceMeta >>> MUTATION_VERSION_SHIFT) & VERSION_MASK;
+    return (maintenanceMeta() >>> MUTATION_VERSION_SHIFT) & VERSION_MASK;
   }
 
   /** Published by the maintenance worker after applying the corresponding mutation. */
   public long appliedVersion() {
-    return maintenanceMeta & VERSION_MASK;
+    return maintenanceMeta() & VERSION_MASK;
   }
 
   /** Best-effort version publication for producer paths; it never waits for the actor. */
@@ -623,7 +490,7 @@ public final class Entry {
     if ((flags & (PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) != 0) {
       return false;
     }
-    long current = maintenanceMeta;
+    long current = maintenanceMeta();
     long currentVersion = current >>> MUTATION_VERSION_SHIFT;
     if (currentVersion == VERSION_MASK) {
       int nextFlags = flags | PENDING_ROLLOVER;
@@ -634,7 +501,8 @@ public final class Entry {
       return false;
     }
     long next = (current & VERSION_MASK) | ((currentVersion + 1L) << MUTATION_VERSION_SHIFT);
-    return MAINTENANCE.compareAndSet(this, current, next);
+    return NativeMemory.compareAndSwapLong(
+        nativeMetadataAddress() + MAINTENANCE_META_OFFSET, current, next);
   }
 
   /** Clears a fully applied final version. Called by the single maintenance owner. */
@@ -643,28 +511,27 @@ public final class Entry {
       return false;
     }
     int currentFlags = pendingFlags;
-    if ((currentFlags
-                & (PENDING_ROLLOVER
-                    | PENDING_MASK
-                    | PENDING_CLAIMED
-                    | PENDING_QUEUED
-                    | PENDING_REPAIR))
-            != PENDING_ROLLOVER
-        || !PENDING.compareAndSet(
-            this, PENDING_ROLLOVER, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) {
+    int rolloverFlags =
+        PENDING_ROLLOVER | PENDING_MASK | PENDING_CLAIMED | PENDING_QUEUED | PENDING_REPAIR;
+    if ((currentFlags & rolloverFlags) != PENDING_ROLLOVER) {
       return false;
     }
-    long current = maintenanceMeta;
+    int claimedFlags = currentFlags | PENDING_ROLLOVER_CLAIMED;
+    if (!PENDING.compareAndSet(this, currentFlags, claimedFlags)) {
+      return false;
+    }
+    long current = maintenanceMeta();
     if ((current >>> MUTATION_VERSION_SHIFT) != VERSION_MASK
         || (current & VERSION_MASK) != VERSION_MASK) {
-      PENDING.compareAndSet(this, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED, PENDING_ROLLOVER);
+      PENDING.compareAndSet(this, claimedFlags, currentFlags);
       return false;
     }
-    if (!MAINTENANCE.compareAndSet(this, current, 0L)) {
-      PENDING.compareAndSet(this, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED, PENDING_ROLLOVER);
+    if (!NativeMemory.compareAndSwapLong(
+        nativeMetadataAddress() + MAINTENANCE_META_OFFSET, current, 0L)) {
+      PENDING.compareAndSet(this, claimedFlags, currentFlags);
       return false;
     }
-    if (!PENDING.compareAndSet(this, PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED, 0)) {
+    if (!PENDING.compareAndSet(this, claimedFlags, currentFlags & ~PENDING_ROLLOVER)) {
       throw new IllegalStateException("maintenance rollover fence was modified");
     }
     return true;
@@ -674,12 +541,13 @@ public final class Entry {
   public boolean markAppliedVersion(long version) {
     long expected = version & VERSION_MASK;
     for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
-      long current = maintenanceMeta;
+      long current = maintenanceMeta();
       if ((current >>> MUTATION_VERSION_SHIFT) != expected) {
         return false;
       }
       long next = (current & ~VERSION_MASK) | expected;
-      if (MAINTENANCE.compareAndSet(this, current, next)) {
+      if (NativeMemory.compareAndSwapLong(
+          nativeMetadataAddress() + MAINTENANCE_META_OFFSET, current, next)) {
         return true;
       }
       Thread.onSpinWait();
@@ -811,31 +679,56 @@ public final class Entry {
   }
 
   public int policyState() {
-    return (policyMeta >>> POLICY_STATE_SHIFT) & 7;
+    return (policyMeta() >>> POLICY_STATE_SHIFT) & 7;
   }
 
   public void policyState(int state) {
-    while (true) {
-      int current = policyMeta;
-      int next = (current & ~7) | (state & 7);
-      if (POLICY.compareAndSet(this, current, next)) {
-        return;
-      }
-    }
+    int normalizedState = state & 7;
+    int current = policyMeta();
+    NativeMemory.putInt(
+        nativeMetadataAddress() + POLICY_META_OFFSET, (current & ~7) | normalizedState);
+    setPolicyPresent(normalizedState != POLICY_NONE);
+  }
+
+  /** True when the maintenance actor has this entry linked into an eviction policy. */
+  public boolean policyPresent() {
+    return (pendingFlags & POLICY_PRESENT) != 0;
   }
 
   public int policyAccessCount() {
-    return (policyMeta >>> POLICY_ACCESS_SHIFT) & 3;
+    return (policyMeta() >>> POLICY_ACCESS_SHIFT) & 3;
   }
 
   public void policyAccessCount(int count) {
     int value = Math.max(0, Math.min(3, count));
+    int current = policyMeta();
+    NativeMemory.putInt(
+        nativeMetadataAddress() + POLICY_META_OFFSET, (current & ~0x18) | (value << POLICY_ACCESS_SHIFT));
+  }
+
+  public long policyByteWeight() {
+    return NativeMemory.getLong(nativeMetadataAddress() + POLICY_BYTE_WEIGHT_OFFSET);
+  }
+
+  public void policyByteWeight(long bytes) {
+    NativeMemory.putLong(nativeMetadataAddress() + POLICY_BYTE_WEIGHT_OFFSET, bytes);
+  }
+
+  private int policyMeta() {
+    return NativeMemory.getInt(nativeMetadataAddress() + POLICY_META_OFFSET);
+  }
+
+  private void setPolicyPresent(boolean present) {
     while (true) {
-      int current = policyMeta;
-      int next = (current & ~0x18) | (value << POLICY_ACCESS_SHIFT);
-      if (POLICY.compareAndSet(this, current, next)) {
+      int current = pendingFlags;
+      int next = present ? current | POLICY_PRESENT : current & ~POLICY_PRESENT;
+      if (current == next || PENDING.compareAndSet(this, current, next)) {
         return;
       }
     }
+  }
+
+  private long maintenanceMeta() {
+    return NativeMemory.getLongVolatile(nativeMetadataAddress() + MAINTENANCE_META_OFFSET);
   }
 }

@@ -7,6 +7,7 @@ import static org.testng.Assert.assertTrue;
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 
 public final class ThreadContextReadCounterTest {
   @Test
@@ -27,7 +28,7 @@ public final class ThreadContextReadCounterTest {
   @Test
   public void accessRingRetainsEachOfIts256DeliveredHitsBeforeDropping() {
     AccessRing ring = new AccessRing();
-    Entry entry = new Entry(0L, 0, 1, 0L);
+    Entry entry = EntryTestSupport.entry(0, 1, 0L);
 
     for (int index = 0; index < 256; index++) {
       assertTrue(ring.offer(entry, index + 1L));
@@ -45,7 +46,7 @@ public final class ThreadContextReadCounterTest {
   @Test
   public void businessAccessSamplingPublishesOneEventPerSixteenHits() {
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 2, 0L);
+    Entry entry = EntryTestSupport.entry(0, 2, 0L);
 
     for (int index = 0; index < 32; index++) {
       context.access(entry);
@@ -61,7 +62,7 @@ public final class ThreadContextReadCounterTest {
   @Test
   public void bulkAccessSamplingPublishesOneEventPerSixteenHits() {
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 3, 0L);
+    Entry entry = EntryTestSupport.entry(0, 3, 0L);
 
     context.beginBulkRead();
     for (int index = 0; index < 32; index++) {

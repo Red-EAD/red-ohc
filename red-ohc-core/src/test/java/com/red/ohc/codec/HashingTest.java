@@ -96,7 +96,8 @@ public final class HashingTest {
     byte[] lookupBytes = "hello".getBytes(StandardCharsets.US_ASCII);
     byte[] storedBytes = "world".getBytes(StandardCharsets.US_ASCII);
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    long address = memory.allocate(Long.BYTES + storedBytes.length);
+    long allocation = Entry.keyAllocationLengthForKeyLength(storedBytes.length);
+    long address = memory.allocate(allocation);
     try {
       NativeMemory.putLong(address, 0x12345678L);
       NativeMemory.copy(storedBytes, 0, address + Long.BYTES, storedBytes.length);
@@ -104,10 +105,11 @@ public final class HashingTest {
       lookup.set(lookupBytes, lookupBytes.length);
       NativeMemory.putLong(address, lookup.hash64());
       Entry entry = new Entry(address, storedBytes.length, lookup.hash(), 0L);
+      entry.initializeNativeMetadata();
 
       assertFalse(lookup.equals(entry));
     } finally {
-      memory.free(address, Long.BYTES + storedBytes.length);
+      memory.free(address, allocation);
       memory.closeArenas();
     }
   }
@@ -122,7 +124,7 @@ public final class HashingTest {
         for (int index = 0; index < length; index++) {
           bytes[index] = (byte) (index * 31 + length);
         }
-        long allocation = Math.max(8L, Long.BYTES + length);
+        long allocation = Entry.keyAllocationLengthForKeyLength(length);
         long address = memory.allocate(allocation);
         try {
           long hash64 = Hashing.farmHashUo(bytes, 0, length);
@@ -130,6 +132,7 @@ public final class HashingTest {
           NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
           lookup.set(bytes, length);
           Entry entry = new Entry(address, length, lookup.hash(), hash64, 0L);
+          entry.initializeNativeMetadata();
 
           assertTrue(lookup.equals(entry), "length=" + length);
           if (length != 0) {
@@ -157,7 +160,7 @@ public final class HashingTest {
         for (int index = 0; index < length; index++) {
           bytes[index] = (byte) (index * 17 + length);
         }
-        long allocation = Math.max(8L, Long.BYTES + length);
+        long allocation = Entry.keyAllocationLengthForKeyLength(length);
         long address = memory.allocate(allocation);
         try {
           long hash64 = Hashing.farmHashUo(bytes, 0, length);
@@ -165,6 +168,7 @@ public final class HashingTest {
           NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
           lookup.set(bytes, length);
           Entry entry = new Entry(address, length, lookup.hash(), hash64, 0L);
+          entry.initializeNativeMetadata();
 
           for (int mismatch :
               new int[] {

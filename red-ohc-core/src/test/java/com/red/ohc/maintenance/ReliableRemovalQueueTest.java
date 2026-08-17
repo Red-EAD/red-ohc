@@ -8,6 +8,7 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.RemovalCause;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 
 public final class ReliableRemovalQueueTest {
   @Test
@@ -16,7 +17,7 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Reservation first = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
-    Entry entry = new Entry(0L, 0, 1, 0L);
+    Entry entry = EntryTestSupport.entry(0, 1, 0L);
 
     assertTrue(queue.tryReserve(first));
     assertFalse(queue.pollNext(record), "an uncommitted ticket must block consumption");
@@ -43,7 +44,7 @@ public final class ReliableRemovalQueueTest {
     assertEquals(queue.size(), 1L);
     assertFalse(queue.hasCommittedHint());
 
-    queue.commit(reservation, new Entry(0L, 0, 5, 0L));
+    queue.commit(reservation, EntryTestSupport.entry(0, 5, 0L));
     assertTrue(queue.hasCommittedHint());
   }
 
@@ -56,7 +57,7 @@ public final class ReliableRemovalQueueTest {
 
     assertTrue(queue.tryReserve(first));
     assertTrue(queue.tryReserve(second));
-    queue.commit(second, new Entry(0L, 0, 2, 0L));
+    queue.commit(second, EntryTestSupport.entry(0, 2, 0L));
     assertFalse(queue.pollNext(record));
     queue.cancel(first);
     assertTrue(queue.pollNext(record));
@@ -74,7 +75,7 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
 
     assertTrue(queue.tryReserve(committed));
-    queue.commit(committed, new Entry(0L, 0, 6, 0L));
+    queue.commit(committed, EntryTestSupport.entry(0, 6, 0L));
     assertTrue(queue.tryReserve(pending));
 
     assertTrue(queue.pollNext(record));
@@ -83,7 +84,7 @@ public final class ReliableRemovalQueueTest {
         queue.hasCommittedHint(),
         "an uncommitted head must not keep the actor in an immediate-work loop");
 
-    queue.commit(pending, new Entry(0L, 0, 7, 0L));
+    queue.commit(pending, EntryTestSupport.entry(0, 7, 0L));
     assertTrue(queue.hasCommittedHint(), "a later commit must re-arm the actor hint");
     assertTrue(queue.pollNext(record));
     assertEquals(record.entry.keyHash(), 7);
@@ -94,7 +95,7 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue queue = new ReliableRemovalQueue(2);
     ReliableRemovalQueue.Reservation reservation = new ReliableRemovalQueue.Reservation();
     ReliableRemovalQueue.Record record = new ReliableRemovalQueue.Record();
-    Entry entry = new Entry(0L, 0, 3, 0L);
+    Entry entry = EntryTestSupport.entry(0, 3, 0L);
 
     assertTrue(queue.tryReserve(reservation));
     queue.commit(reservation, entry, 0L, 0L, null);
@@ -113,7 +114,7 @@ public final class ReliableRemovalQueueTest {
     ReliableRemovalQueue.Reservation second = new ReliableRemovalQueue.Reservation();
 
     assertTrue(queue.tryReserve(first));
-    queue.commit(first, new Entry(0L, 0, 4, 0L));
+    queue.commit(first, EntryTestSupport.entry(0, 4, 0L));
     assertTrue(queue.tryReserve(second));
     queue.cancel(second);
 

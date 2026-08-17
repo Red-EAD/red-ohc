@@ -22,6 +22,7 @@ import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.WeakValueStateStore;
 import com.red.ohc.runtime.AccessConsumer;
 import com.red.ohc.runtime.AccessRing;
 import com.red.ohc.runtime.ReaderRegistry;
@@ -132,6 +133,7 @@ public final class MaintenanceEventLoop
   private volatile boolean stopping;
   private volatile boolean parked;
   private volatile ReferenceQueue<Object> weakValueQueue;
+  private volatile WeakValueStateStore weakValueStateStore;
   private boolean weakValueCleanupContinuation;
 
   /** Incremented before the actor's final empty-source check for an idle park. */
@@ -332,6 +334,14 @@ public final class MaintenanceEventLoop
       throw new IllegalStateException("weak-value queue must be bound before maintenance starts");
     }
     weakValueQueue = queue;
+  }
+
+  /** Binds cache-local weak-value state before the actor thread starts. */
+  public void bindWeakValueStateStore(WeakValueStateStore store) {
+    if (thread.getState() != Thread.State.NEW) {
+      throw new IllegalStateException("weak-value state store must be bound before maintenance starts");
+    }
+    weakValueStateStore = store;
   }
 
   public void stop() {
@@ -1297,7 +1307,7 @@ public final class MaintenanceEventLoop
         }
       }
       try {
-        processEntry(entry);
+        processEntry(entry, true);
       } catch (Throwable processingFailure) {
         if (failure != null) {
           processingFailure.addSuppressed(failure);
@@ -1326,6 +1336,9 @@ public final class MaintenanceEventLoop
       return false;
     }
     Entry entry = removalRecord.entry;
+    if (weakValueStateStore != null) {
+      weakValueStateStore.remove(entry);
+    }
     retireActorValueBlock(removalRecord.valueAddress, removalRecord.valueAllocation);
     retireActorValue(entry.nativeKeyAddress, entry.keyAllocationLength());
     return true;
@@ -1366,6 +1379,10 @@ public final class MaintenanceEventLoop
   }
 
   private void processEntry(Entry entry) {
+    processEntry(entry, false);
+  }
+
+  private void processEntry(Entry entry, boolean allowRetired) {
     int flags = entry.takePending();
     // tryBeginPending() holds this claim from reservation through pointer publication. It is
     // stronger than observing the writer mutex: a racing actor can never clear the merged
@@ -1376,6 +1393,11 @@ public final class MaintenanceEventLoop
     }
     if (entry.clearRepairMarker()) {
       decrementRepairDebt(entry);
+    }
+    if (!allowRetired && !entry.isAlive()) {
+      // Advisory queues can retain an Entry after reliable removal has retired its native block.
+      // Drop the heap marker without touching native metadata that may already be reused.
+      return;
     }
     if (flags == 0) {
       entry.tryRolloverMaintenanceVersion();
@@ -1408,6 +1430,13 @@ public final class MaintenanceEventLoop
       }
       if (entry.clearRepairMarker()) {
         decrementRepairDebt(entry);
+      }
+      if (flags != 0 && !entry.isAlive()) {
+        // The reliable removal path has already retired this Entry's native block. The deferred
+        // transport item is stale and must not read or mutate the recycled metadata tail.
+        progressed = true;
+        work++;
+        continue;
       }
       if (flags != 0 && entry.isWriterLocked()) {
         if (entry.requeueMutation(flags)) {
@@ -1460,8 +1489,8 @@ public final class MaintenanceEventLoop
       processed++;
       if (reference instanceof Entry.WeakValueSlot) {
         Entry.WeakValueSlot slot = (Entry.WeakValueSlot) reference;
-        Entry owner = slot.owner();
-        if (owner != null && owner.clearWeakValueIfCurrent(slot)) {
+        WeakValueStateStore store = weakValueStateStore;
+        if (store != null && store.clearWeakValueIfCurrent(slot)) {
           cleared++;
         }
       }
@@ -1897,7 +1926,7 @@ public final class MaintenanceEventLoop
       removed = removeCurrent(entry);
       if (removed) {
         value = Entry.rawValueAddress(entry.valueAddress);
-        entry.clearValue();
+        clearValue(entry);
         clearRepairWork(entry);
       }
     } finally {
@@ -1934,6 +1963,9 @@ public final class MaintenanceEventLoop
     retireActorValueBlock(value, valueAllocation);
     long keyAllocation = entry.keyAllocationLength();
     retireActorValue(entry.nativeKeyAddress, keyAllocation);
+    if (weakValueStateStore != null) {
+      weakValueStateStore.remove(entry);
+    }
   }
 
   /** Records one retired value version using the actor's last published maintenance time. */
@@ -2002,13 +2034,16 @@ public final class MaintenanceEventLoop
     accessHint.set(false);
     for (Entry entry : data.values()) {
       long value = Entry.rawValueAddress(entry.valueAddress);
-      entry.clearValue();
+      clearValue(entry);
       if (value != 0L) {
         memory.releaseEntry(value, ValueBlock.allocationLength(ValueBlock.length(value)));
       }
       memory.releaseEntry(entry.nativeKeyAddress, entry.keyAllocationLength());
     }
     data.clear();
+    if (weakValueStateStore != null) {
+      weakValueStateStore.clear();
+    }
     retirements.freeAll();
     retirements.close();
     memory.closeArenas();
@@ -2025,10 +2060,21 @@ public final class MaintenanceEventLoop
     if (entry == null) {
       return;
     }
+    if (weakValueStateStore != null) {
+      weakValueStateStore.remove(entry);
+    }
     if (removalRecord.valueAddress != 0L) {
       memory.releaseEntry(removalRecord.valueAddress, removalRecord.valueAllocation);
     }
     memory.releaseEntry(entry.nativeKeyAddress, entry.keyAllocationLength());
+  }
+
+  private void clearValue(Entry entry) {
+    if (weakValueStateStore == null) {
+      entry.valueAddress = 0L;
+    } else {
+      weakValueStateStore.clearValue(entry);
+    }
   }
 
   private static void throwUnchecked(Throwable failure) {

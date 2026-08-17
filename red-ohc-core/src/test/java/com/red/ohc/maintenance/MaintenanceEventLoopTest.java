@@ -29,6 +29,7 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.runtime.AccessConsumer;
 import com.red.ohc.runtime.AccessRing;
 import com.red.ohc.runtime.ReaderRegistry;
@@ -735,7 +736,7 @@ public class MaintenanceEventLoopTest {
                     NativeMemory.getByte(ValueBlock.payloadAddress(address)) & 0xff),
             new ReaderRegistry(),
             1_024);
-    long keyAllocation = 16L;
+    long keyAllocation = Entry.keyAllocationLengthForKeyLength(8);
     long valueAllocation = ValueBlock.allocationLength(8);
     long weight =
         WriterArena.allocationWeight(keyAllocation)
@@ -753,13 +754,14 @@ public class MaintenanceEventLoopTest {
               7,
               0x1234L,
               Entry.tagValueAddress(valueAddress, true));
+      entry.initializeNativeMetadata();
       data.put(entry, entry);
 
       assertTrue(entry.claimWriter());
       assertTrue(loop.prepareReliableRemoval(context, entry));
       entry.markRetired();
       assertTrue(data.remove(entry, entry));
-      entry.clearValue();
+      entry.valueAddress = 0L;
       entry.finishWriter();
 
       loop.publishRemovalAndRetire(
@@ -812,7 +814,7 @@ public class MaintenanceEventLoopTest {
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
             new ReaderRegistry(), 4_096);
-    Entry entry = new Entry(0L, 0, 31, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 31, 0L);
     try {
       Field queueField = MaintenanceEventLoop.class.getDeclaredField("dirtyRepairShardQueue");
       queueField.setAccessible(true);
@@ -863,8 +865,8 @@ public class MaintenanceEventLoopTest {
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
     ReaderSlot slot = new ReaderSlot();
     slot.access = new AccessRing();
-    slot.access.offer(new Entry(0L, 0, 1, 0L), 1L);
-    slot.access.offer(new Entry(0L, 0, 2, 0L), 1L);
+    slot.access.offer(EntryTestSupport.entry(memory, 0, 1, 0L), 1L);
+    slot.access.offer(EntryTestSupport.entry(memory, 0, 2, 0L), 1L);
     try {
       loop.signalAccess(slot);
       loop.signalAccess(slot);
@@ -895,7 +897,7 @@ public class MaintenanceEventLoopTest {
       for (int i = 0; i < 1_025; i++) {
         ReaderSlot slot = new ReaderSlot();
         slot.access = new AccessRing();
-        slot.access.offer(new Entry(0L, 0, i + 1, 0L), 1L);
+        slot.access.offer(EntryTestSupport.entry(memory, 0, i + 1, 0L), 1L);
         slots.add(slot);
         loop.signalAccess(slot);
       }
@@ -1010,12 +1012,13 @@ public class MaintenanceEventLoopTest {
     CountingTicker ticker = new CountingTicker();
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     WriterArena arena = memory.newWriterArena();
-    long key = arena.allocate(8L);
+    long key = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
     long allocation = ValueBlock.allocationLength(1);
     long value = arena.allocate(allocation);
     NativeMemory.putLong(key, 129L);
     ValueBlock.initialize(value, 0L, 1, 0L);
     Entry entry = new Entry(key, 0, 129, value);
+    entry.initializeNativeMetadata();
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
     MaintenanceEventLoop loop =
@@ -1099,7 +1102,8 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, 64L, 1, 0L);
-    Entry entry = new Entry(0L, 0, 93, 0L, Entry.tagValueAddress(value, true));
+    Entry entry =
+        EntryTestSupport.entry(memory, 0, 93, 0L, Entry.tagValueAddress(value, true));
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1165,7 +1169,7 @@ public class MaintenanceEventLoopTest {
     Entry[] entries = new Entry[4];
     try {
       for (int i = 0; i < entries.length; i++) {
-        entries[i] = new Entry(0L, 0, i + 1, 0L);
+        entries[i] = EntryTestSupport.entry(memory, 0, i + 1, 0L);
         loop.publishMutation(entries[i], Entry.PENDING_ADD);
         loop.afterWrite();
       }
@@ -1199,7 +1203,7 @@ public class MaintenanceEventLoopTest {
     context.bindMaintenance(loop);
     loop.start();
     try {
-      Entry entry = new Entry(0L, 0, 91, 0L);
+      Entry entry = EntryTestSupport.entry(memory, 0, 91, 0L);
       for (int i = 0; i < 1_024; i++) {
         long sequence = context.hit();
         context.access(entry);
@@ -1230,12 +1234,12 @@ public class MaintenanceEventLoopTest {
     try {
       int limit = (int) loop.queueCapacity();
       for (int i = 0; i < limit; i++) {
-        Entry entry = new Entry(0L, 0, i + 1, 0L);
+        Entry entry = EntryTestSupport.entry(memory, 0, i + 1, 0L);
         data.put(entry, entry);
         loop.publishMutation(entry, Entry.PENDING_ADD);
         loop.afterWrite();
       }
-      Entry rejected = new Entry(0L, 0, limit + 1, 0L);
+      Entry rejected = EntryTestSupport.entry(memory, 0, limit + 1, 0L);
       data.put(rejected, rejected);
       loop.publishMutation(rejected, Entry.PENDING_ADD);
       assertTrue(
@@ -1255,11 +1259,12 @@ public class MaintenanceEventLoopTest {
   public void repairDebtConvergesWhenReliableRemovalConsumesTheDroppedHint() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     ConcurrentHashMap<Entry, Entry> data = index();
+    Budget budget = new Budget(1 << 20);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             data,
             memory,
-            new Budget(1 << 20),
+            budget,
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
@@ -1268,14 +1273,17 @@ public class MaintenanceEventLoopTest {
     try {
       int limit = (int) loop.queueCapacity();
       for (int i = 0; i < limit; i++) {
-        Entry entry = new Entry(0L, 0, i + 1, 0L);
+        Entry entry = EntryTestSupport.entry(memory, 0, i + 1, 0L);
         data.put(entry, entry);
         loop.publishMutation(entry, Entry.PENDING_ADD);
       }
-      Entry removed = new Entry(0L, 0, limit + 1, 0L);
+      Entry removed = EntryTestSupport.entry(memory, 0, limit + 1, 0L);
       data.put(removed, removed);
       loop.publishMutation(removed, Entry.PENDING_ADD);
       assertTrue(removed.isRepairMarked());
+      assertTrue(
+          budget.tryReserve(WriterArena.allocationWeight(removed.keyAllocationLength()), 0),
+          "the direct event-loop fixture must reserve the retired key weight");
 
       assertTrue(removed.claimWriter());
       loop.prepareReliableRemoval(context, removed);
@@ -1314,11 +1322,11 @@ public class MaintenanceEventLoopTest {
     try {
       int limit = (int) loop.queueCapacity();
       for (int i = 0; i < limit; i++) {
-        Entry entry = new Entry(0L, 0, i + 1, 0L);
+        Entry entry = EntryTestSupport.entry(memory, 0, i + 1, 0L);
         data.put(entry, entry);
         loop.publishMutation(entry, Entry.PENDING_ADD);
       }
-      Entry raced = new Entry(0L, 0, limit + 1, 0L);
+      Entry raced = EntryTestSupport.entry(memory, 0, limit + 1, 0L);
       data.put(raced, raced);
       loop.publishMutation(raced, Entry.PENDING_ADD);
       assertTrue(raced.isRepairMarked());
@@ -1364,7 +1372,7 @@ public class MaintenanceEventLoopTest {
         // The failed attempt must not strand the admission lock or its native reservation.
       }
 
-      Entry entry = new Entry(0L, 0, 123, 0L);
+      Entry entry = EntryTestSupport.entry(memory, 0, 123, 0L);
       loop.prepareReliableRemoval(context, entry);
       loop.cancelReliableRemoval(context, entry);
       assertEquals(
@@ -1389,7 +1397,7 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             new ReaderRegistry());
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 124, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 124, 0L);
     try {
       loop.prepareReliableRemoval(context, entry);
       loop.start();
@@ -1416,7 +1424,7 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             new ReaderRegistry());
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 127, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 127, 0L);
     try {
       assertTrue(loop.prepareReliableRemoval(context, entry));
       loop.start();
@@ -1453,7 +1461,7 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             new ReaderRegistry());
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 126, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 126, 0L);
     try {
       assertTrue(loop.prepareReliableRemoval(context, entry));
       loop.start();
@@ -1485,7 +1493,7 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             new ReaderRegistry());
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 125, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 125, 0L);
     try {
       loop.start();
       waitUntilParked(loop);
@@ -1533,7 +1541,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void actorDefersQueuedMutationUntilTheEntryWriterPublishes() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    Entry entry = new Entry(0L, 0, 77, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 77, 0L);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1581,7 +1589,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), ticker, 1 << 20, Eviction.LRU, new ReaderRegistry());
-    Entry entry = new Entry(0L, 0, 79, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 79, 0L);
     try {
       assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
       @SuppressWarnings("unchecked")
@@ -1618,9 +1626,9 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry());
-    Entry first = new Entry(0L, 0, 171, 0L);
-    Entry second = new Entry(0L, 0, 172, 0L);
-    Entry third = new Entry(0L, 0, 173, 0L);
+    Entry first = EntryTestSupport.entry(memory, 0, 171, 0L);
+    Entry second = EntryTestSupport.entry(memory, 0, 172, 0L);
+    Entry third = EntryTestSupport.entry(memory, 0, 173, 0L);
     try {
       assertTrue(first.tryBeginPending(Entry.PENDING_REMOVE));
       assertTrue(second.tryBeginPending(Entry.PENDING_REMOVE));
@@ -1654,7 +1662,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry());
-    Entry entry = new Entry(0L, 0, 174, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 174, 0L);
     try {
       assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
       assertTrue(entry.claimWriter());
@@ -1678,6 +1686,97 @@ public class MaintenanceEventLoopTest {
     }
   }
 
+  @Test
+  public void staleDeferredMutationCannotTouchAReusedNativeKeyBlock() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    Entry stale = EntryTestSupport.entry(memory, 0, 175, 0L);
+    long allocation = stale.keyAllocationLength();
+    try {
+      assertTrue(stale.publishMutation(Entry.PENDING_UPDATE));
+      assertTrue(stale.claimWriter());
+      invokeProcessEntry(loop, stale);
+      assertTrue(stale.isWriterLocked());
+
+      stale.markRetired();
+      stale.finishWriter();
+      long retiredAddress = stale.nativeKeyAddress;
+      memory.releaseEntry(retiredAddress, allocation);
+
+      long reusedAddress = memory.newWriterArena().allocate(allocation);
+      try {
+        assertEquals(reusedAddress, retiredAddress, "the test must exercise native slot reuse");
+        Entry reused = new Entry(reusedAddress, 0, 176, 176L, 0L);
+        reused.initializeNativeMetadata();
+        long sentinel = (7L << 32) | 123L;
+        EntryTestSupport.maintenanceMeta(reused, sentinel);
+
+        assertEquals(invokeDrainDeferredMutations(loop, 1), 1);
+        assertEquals(
+            NativeMemory.getLong(
+                reused.nativeKeyAddress + Entry.keyDataAllocationLength(reused.keyLength()) + 16L),
+            sentinel,
+            "a retired queue item must not access a reused native metadata block");
+      } finally {
+        memory.releaseEntry(reusedAddress, allocation);
+      }
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void staleQueuedMutationCannotTouchAReusedNativeKeyBlock() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new Budget(1 << 20),
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry());
+    Entry stale = EntryTestSupport.entry(memory, 0, 177, 0L);
+    long allocation = stale.keyAllocationLength();
+    try {
+      loop.publishMutation(stale, Entry.PENDING_UPDATE);
+      assertTrue(stale.claimWriter());
+      stale.markRetired();
+      stale.finishWriter();
+      long retiredAddress = stale.nativeKeyAddress;
+      memory.releaseEntry(retiredAddress, allocation);
+
+      long reusedAddress = memory.newWriterArena().allocate(allocation);
+      try {
+        assertEquals(reusedAddress, retiredAddress, "the test must exercise native slot reuse");
+        Entry reused = new Entry(reusedAddress, 0, 178, 178L, 0L);
+        reused.initializeNativeMetadata();
+        long sentinel = (9L << 32) | 321L;
+        EntryTestSupport.maintenanceMeta(reused, sentinel);
+
+        assertEquals(invokeDrainMutations(loop, 1), 1);
+        assertEquals(
+            NativeMemory.getLong(
+                reused.nativeKeyAddress + Entry.keyDataAllocationLength(reused.keyLength()) + 16L),
+            sentinel,
+            "a retired queue item must not access a reused native metadata block");
+      } finally {
+        memory.releaseEntry(reusedAddress, allocation);
+      }
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
   @Test(timeOut = 2_000L)
   public void deferredMutationAppliesThePointerPublishedByTheLaterWriter() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -1685,7 +1784,7 @@ public class MaintenanceEventLoopTest {
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
     ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1, 0L);
-    Entry entry = new Entry(0L, 0, 78, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 78, 0L);
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1730,7 +1829,7 @@ public class MaintenanceEventLoopTest {
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
     ValueBlock.initialize(value, System.currentTimeMillis() + 60_000L, 1, 0L);
-    Entry entry = new Entry(0L, 0, 79, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 79, 0L);
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1800,7 +1899,7 @@ public class MaintenanceEventLoopTest {
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long allocation = ValueBlock.allocationLength(1);
-    long keyAllocation = 8L;
+    long keyAllocation = Entry.keyAllocationLengthForKeyLength(0);
     com.red.ohc.storage.WriterArena arena = memory.newWriterArena();
     long keyOne = arena.allocate(keyAllocation);
     long keyTwo = arena.allocate(keyAllocation);
@@ -1812,6 +1911,8 @@ public class MaintenanceEventLoopTest {
     NativeMemory.putLong(keyTwo, 102L);
     Entry one = new Entry(keyOne, 0, 101, valueOne);
     Entry two = new Entry(keyTwo, 0, 102, valueTwo);
+    one.initializeNativeMetadata();
+    two.initializeNativeMetadata();
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(one, one);
     data.put(two, two);
@@ -1870,11 +1971,12 @@ public class MaintenanceEventLoopTest {
     FrozenTicker ticker = new FrozenTicker();
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     com.red.ohc.storage.WriterArena arena = memory.newWriterArena();
-    long key = arena.allocate(8L);
+    long key = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
     long value = arena.allocate(ValueBlock.allocationLength(1));
     NativeMemory.putLong(key, 121L);
     ValueBlock.initialize(value, 0L, 1, 0L);
     Entry entry = new Entry(key, 0, 121, value);
+    entry.initializeNativeMetadata();
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
     MaintenanceEventLoop loop =
@@ -1905,8 +2007,8 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     WriterArena arena = memory.newWriterArena();
     long allocation = ValueBlock.allocationLength(1);
-    long keyOne = arena.allocate(8L);
-    long keyTwo = arena.allocate(8L);
+    long keyOne = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
+    long keyTwo = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
     long valueOne = arena.allocate(allocation);
     long valueTwo = arena.allocate(allocation);
     NativeMemory.putLong(keyOne, 131L);
@@ -1915,6 +2017,8 @@ public class MaintenanceEventLoopTest {
     ValueBlock.initialize(valueTwo, 0L, 1, 0L);
     Entry one = new Entry(keyOne, 0, 131, valueOne);
     Entry two = new Entry(keyTwo, 0, 132, valueTwo);
+    one.initializeNativeMetadata();
+    two.initializeNativeMetadata();
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(one, one);
     data.put(two, two);
@@ -2041,7 +2145,7 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             new ReaderRegistry());
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 126, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 126, 0L);
     try {
       loop.prepareReliableRemoval(context, entry);
       loop.start();
@@ -2078,8 +2182,8 @@ public class MaintenanceEventLoopTest {
             Eviction.LRU,
             readers);
     try {
-      Entry entry = new Entry(0L, 0, 127, 8L);
-      data.put(entry, new Entry(0L, 0, 128, 0L));
+      Entry entry = EntryTestSupport.entry(memory, 0, 127, 8L);
+      data.put(entry, EntryTestSupport.entry(memory, 0, 128, 0L));
 
       assertFalse(loop.removeFromMap(entry, false, entry.generation(), 8L));
       assertTrue(data.containsKey(entry), "a failed actor removal must preserve the mapping");
@@ -2314,7 +2418,7 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             new ReaderRegistry());
-    Entry entry = new Entry(0L, 0, 128, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 128, 0L);
     try {
       loop.publishMutation(entry, Entry.PENDING_ADD);
       @SuppressWarnings("unchecked")
@@ -2656,6 +2760,20 @@ public class MaintenanceEventLoopTest {
       throws Exception {
     Method method =
         MaintenanceEventLoop.class.getDeclaredMethod("drainAsyncMutations", int.class);
+    method.setAccessible(true);
+    return (Integer) method.invoke(loop, limit);
+  }
+
+  private static int invokeDrainMutations(MaintenanceEventLoop loop, int limit) throws Exception {
+    Method method = MaintenanceEventLoop.class.getDeclaredMethod("drainMutations", int.class);
+    method.setAccessible(true);
+    return (Integer) method.invoke(loop, limit);
+  }
+
+  private static int invokeDrainDeferredMutations(MaintenanceEventLoop loop, int limit)
+      throws Exception {
+    Method method =
+        MaintenanceEventLoop.class.getDeclaredMethod("drainDeferredMutations", int.class);
     method.setAccessible(true);
     return (Integer) method.invoke(loop, limit);
   }

@@ -21,7 +21,7 @@ import org.mapdb.DB;
 import org.mapdb.DBMaker;
 import org.mapdb.HTreeMap;
 
-import com.red.ohc.storage.CacheMath;
+import com.red.ohc.index.Entry;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
@@ -117,7 +117,7 @@ public final class SerializedBenchmarkSupport {
   }
 
   public static long ohcCapacityBytes(int keyBytes, int valueBytes) {
-    long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyBytes + Long.BYTES));
+    long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
     long entryWeight =
         WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);

@@ -27,7 +27,7 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.ValueView;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
-import com.red.ohc.storage.CacheMath;
+import com.red.ohc.index.Entry;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
@@ -193,7 +193,7 @@ public class OHCBenchmark {
   }
 
   static long capacityFor(String residency, int keyBytes, int valueBytes) {
-    long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyBytes + Long.BYTES));
+    long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
     long allocationWeightPerEntry =
         WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);

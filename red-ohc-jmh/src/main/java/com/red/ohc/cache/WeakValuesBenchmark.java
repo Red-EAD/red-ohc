@@ -23,6 +23,7 @@ import org.openjdk.jmh.infra.Blackhole;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.WeakValueStateStore;
 
 /** Compares the generic get path with and without native-deserialization reuse. */
 @BenchmarkMode(Mode.Throughput)
@@ -103,24 +104,29 @@ public class WeakValuesBenchmark {
     strongCache.put(2, secondValue, expiry);
     weakCache.flushAsync().join();
     strongCache.flushAsync().join();
+    WeakValueStateStore stateStore = weakCache.weakValueStateStoreForTest();
     weakEntry =
         weakCache.dataForTest().values().stream()
             .filter(entry -> entry.nativeKeyAddress != 0L)
-            .filter(entry -> entry.weakValueSlot() != null)
-            .filter(entry -> entry.weakValueSlot().get() == value)
+            .filter(entry -> stateStore.get(entry) != null)
+            .filter(entry -> stateStore.get(entry).weakValue() != null)
+            .filter(entry -> stateStore.get(entry).weakValue().get() == value)
             .findFirst()
             .orElseThrow(() -> new IllegalStateException("weak benchmark entry missing"));
     mixedNativeEntry =
         weakCache.dataForTest().values().stream()
             .filter(entry -> entry.nativeKeyAddress != 0L)
             .filter(entry -> entry != weakEntry)
-            .filter(entry -> entry.weakValueSlot() != null)
-            .filter(entry -> entry.weakValueSlot().get() == secondValue)
+            .filter(entry -> stateStore.get(entry) != null)
+            .filter(entry -> stateStore.get(entry).weakValue() != null)
+            .filter(entry -> stateStore.get(entry).weakValue().get() == secondValue)
             .findFirst()
             .orElseThrow(() -> new IllegalStateException("mixed benchmark entry missing"));
     weakValue = weakCache.get(1);
     WeakMissState.entryForBenchmark = weakEntry;
+    WeakMissState.stateStoreForBenchmark = stateStore;
     MixedGetAllState.entryForBenchmark = mixedNativeEntry;
+    MixedGetAllState.stateStoreForBenchmark = stateStore;
   }
 
   @TearDown(Level.Trial)
@@ -209,12 +215,14 @@ public class WeakValuesBenchmark {
   @State(Scope.Thread)
   public static class WeakMissState {
     private static volatile Entry entryForBenchmark;
+    private static volatile WeakValueStateStore stateStoreForBenchmark;
 
     @Setup(Level.Invocation)
     public void clearWeakSlot() {
       Entry entry = entryForBenchmark;
-      if (entry != null) {
-        entry.clearWeakValueSlot();
+      WeakValueStateStore store = stateStoreForBenchmark;
+      if (entry != null && store != null) {
+        store.clearWeakValueSlot(entry);
       }
     }
   }
@@ -222,12 +230,14 @@ public class WeakValuesBenchmark {
   @State(Scope.Thread)
   public static class MixedGetAllState {
     private static volatile Entry entryForBenchmark;
+    private static volatile WeakValueStateStore stateStoreForBenchmark;
 
     @Setup(Level.Invocation)
     public void clearWeakSlot() {
       Entry entry = entryForBenchmark;
-      if (entry != null) {
-        entry.clearWeakValueSlot();
+      WeakValueStateStore store = stateStoreForBenchmark;
+      if (entry != null && store != null) {
+        store.clearWeakValueSlot(entry);
       }
     }
   }

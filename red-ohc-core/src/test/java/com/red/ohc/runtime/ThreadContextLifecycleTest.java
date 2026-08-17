@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 
 public final class ThreadContextLifecycleTest {
   @Test
@@ -49,7 +50,7 @@ public final class ThreadContextLifecycleTest {
   @Test
   public void accessRingIsCreatedOnlyWhenSamplingFirstHits() {
     ThreadContext context = new ThreadContext(null);
-    Entry entry = new Entry(0L, 0, 1, 0L);
+    Entry entry = EntryTestSupport.entry(0, 1, 0L);
 
     assertNull(context.slot.access);
     for (int index = 0; index < 15; index++) {

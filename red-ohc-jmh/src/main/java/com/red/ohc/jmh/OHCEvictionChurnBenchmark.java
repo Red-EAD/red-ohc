@@ -24,7 +24,7 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
-import com.red.ohc.storage.CacheMath;
+import com.red.ohc.index.Entry;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
@@ -138,7 +138,7 @@ public class OHCEvictionChurnBenchmark {
 
   /** The OHC capacity contract is rounded native resident weight, not raw serializer payload. */
   private long nativeCapacityFor(int liveEntries) {
-    long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyBytes + Long.BYTES));
+    long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
     long entryWeight =
         WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);

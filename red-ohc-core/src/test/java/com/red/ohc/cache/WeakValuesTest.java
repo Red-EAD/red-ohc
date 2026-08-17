@@ -33,9 +33,28 @@ import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
+import com.red.ohc.index.WeakValueStateStore;
 
 public final class WeakValuesTest {
   private static final CacheSerializer<String> STRING = new StringSerializer();
+
+  private static Entry.ValueState state(OHCache<?, ?> cache, Entry entry) {
+    WeakValueStateStore store = ((OffHeapCache<?, ?>) cache).weakValueStateStoreForTest();
+    return store == null ? null : store.get(entry);
+  }
+
+  private static Entry.WeakValueSlot slot(OHCache<?, ?> cache, Entry entry) {
+    Entry.ValueState state = state(cache, entry);
+    return state == null ? null : state.weakValue();
+  }
+
+  private static void clearSlot(OHCache<?, ?> cache, Entry entry) {
+    WeakValueStateStore store = ((OffHeapCache<?, ?>) cache).weakValueStateStoreForTest();
+    if (store != null) {
+      store.clearWeakValueSlot(entry);
+    }
+  }
 
   @Test
   public void weakHitReturnsThePutObjectWithoutDeserializing() {
@@ -92,8 +111,8 @@ public final class WeakValuesTest {
               .filter(candidate -> candidate.nativeKeyAddress != 0L)
               .findFirst()
               .get();
-      assertTrue(entry.valueState().fingerprintDisabled());
-      assertEquals(entry.weakValueSlot(), null);
+      assertTrue(state(cache, entry).fingerprintDisabled());
+      assertEquals(slot(cache, entry), null);
       int serializeCallsAfterDirtyRead = serializer.serializeCalls.get();
       int sizeCallsAfterDirtyRead = serializer.serializedSizeCalls.get();
       assertTrue(serializer.serializeCalls.get() > serializeCallsBeforeDirtyRead);
@@ -117,7 +136,7 @@ public final class WeakValuesTest {
       Pojo loaded = cache.get("key");
       assertEquals(loaded.text, "first");
       assertNotSame(loaded, value);
-      assertTrue(liveEntry((OffHeapCache<?, ?>) cache).valueState().fingerprintDisabled());
+      assertTrue(state(cache, liveEntry((OffHeapCache<?, ?>) cache)).fingerprintDisabled());
     }
   }
 
@@ -125,6 +144,7 @@ public final class WeakValuesTest {
   public void lengthMismatchDoesNotComputeNativeFingerprintBeforeSerialization() {
     NativeFingerprintOrderSerializer serializer = new NativeFingerprintOrderSerializer();
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      serializer.stateStore.set(cache.weakValueStateStoreForTest());
       Pojo value = new Pojo("first");
       assertTrue(cache.put("key", value));
 
@@ -136,7 +156,7 @@ public final class WeakValuesTest {
       Pojo loaded = cache.get("key");
       assertNotSame(loaded, value);
       assertEquals(serializer.fingerprintReadyAtSerialize.get(), Boolean.FALSE);
-      assertTrue(entry.valueState().fingerprintDisabled());
+      assertTrue(state(cache, entry).fingerprintDisabled());
     }
   }
 
@@ -144,6 +164,7 @@ public final class WeakValuesTest {
   public void serializationOverflowDoesNotComputeNativeFingerprintBeforeSerialization() {
     NativeFingerprintOrderSerializer serializer = new NativeFingerprintOrderSerializer();
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      serializer.stateStore.set(cache.weakValueStateStoreForTest());
       Pojo value = new Pojo("first");
       assertTrue(cache.put("key", value));
 
@@ -155,7 +176,7 @@ public final class WeakValuesTest {
       Pojo loaded = cache.get("key");
       assertNotSame(loaded, value);
       assertEquals(serializer.fingerprintReadyAtSerialize.get(), Boolean.FALSE);
-      assertTrue(entry.valueState().fingerprintDisabled());
+      assertTrue(state(cache, entry).fingerprintDisabled());
     }
   }
 
@@ -169,7 +190,7 @@ public final class WeakValuesTest {
 
       byte[] loaded = cache.get("key");
       assertNotSame(loaded, value);
-      assertTrue(liveEntry(cache).valueState().fingerprintDisabled());
+      assertTrue(state(cache, liveEntry(cache)).fingerprintDisabled());
       int serializationsAfterFailure = serializer.serializeCalls.get();
 
       cache.get("key");
@@ -187,11 +208,11 @@ public final class WeakValuesTest {
       assertNotSame(cache.get("key"), original);
 
       Entry entry = liveEntry(cache);
-      assertTrue(entry.valueState().fingerprintDisabled());
+      assertTrue(state(cache, entry).fingerprintDisabled());
 
       Pojo replacement = new Pojo("replacement");
       assertTrue(cache.put("key", replacement));
-      assertFalse(entry.valueState().fingerprintDisabled());
+      assertFalse(state(cache, entry).fingerprintDisabled());
       int deserializationsAfterReplacement = serializer.deserializeCalls.get();
 
       assertSame(cache.get("key"), replacement);
@@ -209,7 +230,7 @@ public final class WeakValuesTest {
 
       assertSame(cache.get("key"), value);
       Entry entry = liveEntry(cache);
-      assertFalse(entry.valueState().fingerprintDisabled());
+      assertFalse(state(cache, entry).fingerprintDisabled());
       assertEquals(serializer.deserializeCalls.get(), 0);
       assertEquals(serializer.serializedSizeCalls.get(), 1);
     }
@@ -226,7 +247,7 @@ public final class WeakValuesTest {
       Pojo firstFallback = cache.get("key");
       assertNotSame(firstFallback, value);
       Entry entry = liveEntry(cache);
-      assertTrue(entry.valueState().fingerprintDisabled());
+      assertTrue(state(cache, entry).fingerprintDisabled());
       int serializeCallsAfterFailure = serializer.serializeCalls.get();
       int sizeCallsAfterFailure = serializer.serializedSizeCalls.get();
 
@@ -256,7 +277,7 @@ public final class WeakValuesTest {
 
       assertEquals(inFlight.get(5, TimeUnit.SECONDS).text, "first");
       Entry entry = liveEntry(cache);
-      assertFalse(entry.valueState().fingerprintDisabled());
+      assertFalse(state(cache, entry).fingerprintDisabled());
       assertSame(cache.get("key"), replacement);
     } finally {
       serializer.allowValidation.countDown();
@@ -284,7 +305,7 @@ public final class WeakValuesTest {
       byte[] loaded = cache.get("key");
       assertSame(loaded, value);
       Entry entry = liveEntry(cache);
-      assertTrue(entry.valueState().fingerprintReady());
+      assertTrue(state(cache, entry).fingerprintReady());
       assertEquals(serializer.deserializeCalls.get(), 0);
     }
   }
@@ -303,7 +324,7 @@ public final class WeakValuesTest {
       byte[] loaded = cache.get("key");
       assertNotSame(loaded, value);
       Entry entry = liveEntry(cache);
-      assertTrue(entry.valueState().fingerprintDisabled());
+      assertTrue(state(cache, entry).fingerprintDisabled());
       assertEquals(serializer.serializeCalls.get(), serializeCallsAfterPut);
       assertTrue(serializer.deserializeCalls.get() > 0);
     }
@@ -315,19 +336,19 @@ public final class WeakValuesTest {
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
       WeakReference<Pojo> referent = putAndValidateThenDrop(cache);
       Entry entry = liveEntry(cache);
-      assertTrue(entry.valueState().fingerprintReady());
+      assertTrue(state(cache, entry).fingerprintReady());
 
       awaitCleared(referent);
       cache.flushAsync().join();
 
-      assertNull(entry.weakValueSlot());
+      assertNull(slot(cache, entry));
       assertTrue(entry.valueAddress != 0L);
-      assertTrue(entry.valueState().fingerprintReady());
+      assertTrue(state(cache, entry).fingerprintReady());
 
       Pojo loaded = cache.get("key");
       assertEquals(loaded.text, "value");
-      assertTrue(entry.weakValueSlot() != null);
-      assertTrue(entry.valueState().fingerprintReady());
+      assertTrue(slot(cache, entry) != null);
+      assertTrue(state(cache, entry).fingerprintReady());
     }
   }
 
@@ -338,12 +359,12 @@ public final class WeakValuesTest {
       Pojo value = new Pojo("value");
       assertTrue(cache.put("key", value));
       Entry entry = liveEntry(cache);
-      Entry.WeakValueSlot slot = entry.weakValueSlot();
-      slot.clear();
-      assertTrue(slot.enqueue());
+      Entry.WeakValueSlot weakSlot = slot(cache, entry);
+      weakSlot.clear();
+      assertTrue(weakSlot.enqueue());
 
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-      while (entry.weakValueSlot() != null && System.nanoTime() < deadline) {
+      while (slot(cache, entry) != null && System.nanoTime() < deadline) {
         try {
           Thread.sleep(10L);
         } catch (InterruptedException interrupted) {
@@ -351,7 +372,7 @@ public final class WeakValuesTest {
           throw new AssertionError(interrupted);
         }
       }
-      assertNull(entry.weakValueSlot());
+      assertNull(slot(cache, entry));
       assertTrue(entry.valueAddress != 0L);
     }
   }
@@ -363,16 +384,16 @@ public final class WeakValuesTest {
       Pojo first = new Pojo("first");
       assertTrue(cache.put("key", first));
       Entry entry = liveEntry(cache);
-      Entry.WeakValueSlot oldSlot = entry.weakValueSlot();
+      Entry.WeakValueSlot oldSlot = slot(cache, entry);
       oldSlot.clear();
       assertTrue(oldSlot.enqueue());
 
       Pojo replacement = new Pojo("replacement");
       assertTrue(cache.put("key", replacement));
-      Entry.WeakValueSlot replacementSlot = entry.weakValueSlot();
+      Entry.WeakValueSlot replacementSlot = slot(cache, entry);
       cache.flushAsync().join();
 
-      assertSame(entry.weakValueSlot(), replacementSlot);
+      assertSame(slot(cache, entry), replacementSlot);
       assertSame(cache.get("key"), replacement);
     }
   }
@@ -384,15 +405,30 @@ public final class WeakValuesTest {
       Pojo value = new Pojo("value");
       assertTrue(cache.put("key", value));
       Entry entry = liveEntry(cache);
-      Entry.WeakValueSlot slot = entry.weakValueSlot();
-      slot.clear();
-      assertTrue(slot.enqueue());
+      Entry.WeakValueSlot weakSlot = slot(cache, entry);
+      weakSlot.clear();
+      assertTrue(weakSlot.enqueue());
 
       assertTrue(cache.remove("key"));
       cache.flushAsync().join();
 
       assertFalse(cache.containsKey("key"));
-      assertNull(entry.weakValueSlot());
+      assertNull(slot(cache, entry));
+    }
+  }
+
+  @Test
+  public void explicitRemovalDropsTheWeakValueStateStoreEntry() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      assertTrue(cache.put("key", new Pojo("value")));
+      Entry entry = liveEntry(cache);
+      assertTrue(state(cache, entry) != null);
+
+      assertTrue(cache.remove("key"));
+      cache.flushAsync().join();
+
+      assertNull(state(cache, entry));
     }
   }
 
@@ -406,9 +442,9 @@ public final class WeakValuesTest {
       assertTrue(cache.put("native", nativeValue));
       cache.dataForTest().values().stream()
           .filter(entry -> entry.nativeKeyAddress != 0L)
-          .filter(entry -> entry.weakValueSlot() != null)
-          .filter(entry -> entry.weakValueSlot().get() == nativeValue)
-          .forEach(Entry::clearWeakValueSlot);
+          .filter(entry -> slot(cache, entry) != null)
+          .filter(entry -> slot(cache, entry).get() == nativeValue)
+          .forEach(entry -> clearSlot(cache, entry));
       int serializeCallsAfterPut = serializer.serializeCalls.get();
       int deserializeCallsAfterPut = serializer.deserializeCalls.get();
 
@@ -426,7 +462,7 @@ public final class WeakValuesTest {
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
       assertTrue(cache.put("weak", new Pojo("weak-hit")));
       assertTrue(cache.put("native", new Pojo("native-fallback")));
-      cache.dataForTest().values().forEach(Entry::clearWeakValueSlot);
+      cache.dataForTest().values().forEach(entry -> clearSlot(cache, entry));
       Pojo weakHit = cache.get("weak");
 
       Map<String, Pojo> result = cache.getAll(java.util.Arrays.asList("weak", "native"));
@@ -470,7 +506,7 @@ public final class WeakValuesTest {
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
       Pojo value = new Pojo("first");
       assertTrue(cache.put("key", value));
-      cache.dataForTest().values().forEach(entry -> entry.clearWeakValueSlot());
+      cache.dataForTest().values().forEach(entry -> clearSlot(cache, entry));
 
       Pojo loaded = cache.get("key");
       assertEquals(loaded.text, "first");
@@ -510,38 +546,40 @@ public final class WeakValuesTest {
       assertTrue(
           cache.dataForTest().values().stream()
               .filter(entry -> entry.nativeKeyAddress != 0L)
-              .allMatch(entry -> entry.weakValueSlot() == null));
+              .allMatch(entry -> slot(cache, entry) == null));
     }
   }
 
   @Test
   public void weakValueBackfillRejectsAStaleStateEvenWhenTheAddressIsReused() {
     long address = 8L;
-    Entry entry = new Entry(0L, 0, 0, address);
-    entry.initializeValueState(address, null);
-    Entry.ValueState observed = entry.valueState();
+    Entry entry = EntryTestSupport.entry(0, 0, address);
+    WeakValueStateStore store = new WeakValueStateStore();
+    store.initialize(entry, address, null);
+    Entry.ValueState observed = store.get(entry);
 
-    entry.publishValueState(address, null);
+    store.publish(entry, address, null);
 
     Entry.WeakValueSlot staleSlot = new Entry.WeakValueSlot("old", address);
     Entry.ValueState staleUpdate = new Entry.ValueState(address, staleSlot);
-    assertFalse(entry.compareAndSetValueState(observed, staleUpdate));
-    assertEquals(entry.valueState().weakValue(), null);
+    assertFalse(store.compareAndSet(entry, observed, staleUpdate));
+    assertEquals(store.get(entry).weakValue(), null);
   }
 
   @Test
   public void failedValueStatePublicationLeavesThePreviousStateIntact() {
     long previousAddress = 8L;
-    Entry entry = new Entry(0L, 0, 0, previousAddress);
-    entry.initializeValueState(previousAddress, null);
-    Entry.ValueState previousState = entry.valueState();
+    Entry entry = EntryTestSupport.entry(0, 0, previousAddress);
+    WeakValueStateStore store = new WeakValueStateStore();
+    store.initialize(entry, previousAddress, null);
+    Entry.ValueState previousState = store.get(entry);
 
     Entry.WeakValueSlot invalidSlot = new Entry.WeakValueSlot("value", previousAddress);
     expectThrows(
-        IllegalArgumentException.class, () -> entry.publishValueState(0L, invalidSlot));
+        IllegalArgumentException.class, () -> store.publish(entry, 0L, invalidSlot));
 
     assertEquals(entry.valueAddress, previousAddress);
-    assertSame(entry.valueState(), previousState);
+    assertSame(store.get(entry), previousState);
   }
 
   @Test(timeOut = 10_000)
@@ -552,7 +590,7 @@ public final class WeakValuesTest {
       Pojo first = new Pojo("first");
       Pojo second = new Pojo("second");
       assertTrue(cache.put("key", first));
-      cache.dataForTest().values().forEach(entry -> entry.clearWeakValueSlot());
+      cache.dataForTest().values().forEach(entry -> clearSlot(cache, entry));
 
       Future<Pojo> inFlight = executor.submit(() -> cache.get("key"));
       assertTrue(serializer.deserializeEntered.await(5, TimeUnit.SECONDS));
@@ -672,7 +710,7 @@ public final class WeakValuesTest {
             .weakValues(true)
             .buildTyped()) {
       assertTrue(cache.put("key", "value"));
-      cache.dataForTest().values().forEach(entry -> entry.clearWeakValueSlot());
+      cache.dataForTest().values().forEach(entry -> clearSlot(cache, entry));
       expectThrows(IllegalArgumentException.class, () -> cache.get("key"));
       ByteBuffer returned = serializer.lastDeserialized.get();
       assertTrue(returned != null);
@@ -704,6 +742,30 @@ public final class WeakValuesTest {
   }
 
   @Test
+  public void ttlRemovalDropsTheWeakValueStateStoreEntry() {
+    AtomicLong now = new AtomicLong(1_000L);
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache =
+        OHCacheBuilder.<String, Pojo>newBuilder()
+            .capacity(1 << 20)
+            .ticker(ticker(now))
+            .keySerializer(STRING)
+            .valueSerializer(serializer)
+            .weakValues(true)
+            .buildTyped()) {
+      assertTrue(cache.put("key", new Pojo("expires"), 2_000L));
+      Entry entry = liveEntry(cache);
+      assertTrue(state(cache, entry) != null);
+
+      now.set(3_000L);
+      assertTrue(cache.putIfAbsentAsync("key", new Pojo("replacement"), 0L).join());
+      cache.flushAsync().join();
+
+      assertNull(state(cache, entry));
+    }
+  }
+
+  @Test
   public void serializerBackedReplacementPublishesTheNewWeakValue() {
     CountingPojoSerializer serializer = new CountingPojoSerializer();
     try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
@@ -722,9 +784,9 @@ public final class WeakValuesTest {
     OffHeapCache<String, Pojo> cache = newPojoCache(serializer);
     assertTrue(cache.put("key", new Pojo("value")));
     Entry entry = cache.dataForTest().values().stream().filter(e -> e.nativeKeyAddress != 0L).findFirst().get();
-    assertTrue(entry.weakValueSlot() != null);
+    assertTrue(slot(cache, entry) != null);
     cache.close();
-    assertEquals(entry.weakValueSlot(), null);
+    assertEquals(slot(cache, entry), null);
     assertEquals(cache.totalAllocatedBytes(), 0L);
   }
 
@@ -743,7 +805,7 @@ public final class WeakValuesTest {
       assertTrue(cache.put("two", new Pojo("value-two")));
       cache.flushAsync().join();
       assertTrue(cache.stats().evictionCount() > 0L);
-      assertEquals(first.weakValueSlot(), null);
+      assertEquals(slot(cache, first), null);
     }
   }
 
@@ -835,11 +897,11 @@ public final class WeakValuesTest {
           "length="
               + length
               + ", state="
-              + entry.valueState().fingerprintState()
+              + state(cache, entry).fingerprintState()
               + ", slot="
-              + entry.weakValueSlot());
-      assertTrue(entry.valueState().fingerprintReady());
-      assertEquals(entry.valueState().fingerprint(), expected.getValue());
+              + slot(cache, entry));
+      assertTrue(state(cache, entry).fingerprintReady());
+      assertEquals(state(cache, entry).fingerprint(), expected.getValue());
     }
   }
 
@@ -888,6 +950,7 @@ public final class WeakValuesTest {
 
   private static final class NativeFingerprintOrderSerializer extends CountingPojoSerializer {
     private final AtomicReference<Entry> entry = new AtomicReference<>();
+    private final AtomicReference<WeakValueStateStore> stateStore = new AtomicReference<>();
     private final AtomicReference<Boolean> fingerprintReadyAtSerialize = new AtomicReference<>();
     private volatile boolean observeValidation;
 
@@ -895,8 +958,9 @@ public final class WeakValuesTest {
     public void serialize(Pojo value, ByteBuffer buffer) {
       if (observeValidation) {
         Entry current = entry.get();
-        if (current != null) {
-          fingerprintReadyAtSerialize.set(current.valueState().fingerprintReady());
+        WeakValueStateStore store = stateStore.get();
+        if (current != null && store != null) {
+          fingerprintReadyAtSerialize.set(store.get(current).fingerprintReady());
         }
       }
       super.serialize(value, buffer);

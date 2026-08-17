@@ -92,10 +92,9 @@ public final class MaintenancePolicy {
       return;
     }
     long bytes = byteWeightOf(entry);
-    long weight = countBounded ? 1L : bytes;
-    entry.policyWeight = weight;
+    entry.policyByteWeight(bytes);
+    long weight = weightOf(entry);
     weightedSize += weight;
-    entry.policyByteWeight = bytes;
     liveBytes += bytes;
     switch (eviction) {
       case S3_FIFO:
@@ -104,16 +103,16 @@ public final class MaintenancePolicy {
         if (ghostEntryWeight != Long.MIN_VALUE) {
           ghostWeight -= ghostEntryWeight;
           link(main, entry, Entry.POLICY_S3_MAIN);
-          mainWeight += entry.policyWeight;
+          mainWeight += weight;
         } else {
           link(small, entry, Entry.POLICY_S3_SMALL);
-          smallWeight += entry.policyWeight;
+          smallWeight += weight;
         }
         entry.policyAccessCount(0);
         break;
       case W_TINY_LFU:
         link(window, entry, Entry.POLICY_TINY_WINDOW);
-        windowWeight += entry.policyWeight;
+        windowWeight += weight;
         sketch.increment(entry.keyHash64());
         recordWriteMiss();
         drainWindow();
@@ -150,9 +149,10 @@ public final class MaintenancePolicy {
         sketch.increment(entry.keyHash64());
         advanceTinyCandidate(entry);
         unlink(probation, entry);
-        probationWeight -= entry.policyWeight;
+        long weight = weightOf(entry);
+        probationWeight -= weight;
         link(protectedQueue, entry, Entry.POLICY_TINY_PROTECTED);
-        protectedWeight += entry.policyWeight;
+        protectedWeight += weight;
         demoteProtected();
         break;
       case Entry.POLICY_TINY_PROTECTED:
@@ -175,46 +175,44 @@ public final class MaintenancePolicy {
   private void remove(Entry entry, boolean eviction, long keyHash64, boolean hashProvided) {
     int state = entry.policyState();
     if (state == Entry.POLICY_NONE) {
-      entry.policyWeight = 0L;
-      entry.policyByteWeight = 0L;
+      entry.policyByteWeight(0L);
       return;
     }
-    long removedWeight = entry.policyWeight;
+    long removedWeight = weightOf(entry);
     switch (state) {
       case Entry.POLICY_LRU:
         unlink(lru, entry);
         break;
       case Entry.POLICY_S3_SMALL:
         unlink(small, entry);
-        smallWeight -= entry.policyWeight;
+        smallWeight -= removedWeight;
         if (eviction) {
           addGhost(entry, hashProvided ? keyHash64 : entry.keyHash64());
         }
         break;
       case Entry.POLICY_S3_MAIN:
         unlink(main, entry);
-        mainWeight -= entry.policyWeight;
+        mainWeight -= removedWeight;
         break;
       case Entry.POLICY_TINY_WINDOW:
         unlink(window, entry);
-        windowWeight -= entry.policyWeight;
+        windowWeight -= removedWeight;
         break;
       case Entry.POLICY_TINY_PROBATION:
         advanceTinyCandidate(entry);
         unlink(probation, entry);
-        probationWeight -= entry.policyWeight;
+        probationWeight -= removedWeight;
         break;
       case Entry.POLICY_TINY_PROTECTED:
         unlink(protectedQueue, entry);
-        protectedWeight -= entry.policyWeight;
+        protectedWeight -= removedWeight;
         break;
       default:
     }
-    weightedSize -= entry.policyWeight;
-    liveBytes -= entry.policyByteWeight;
+    weightedSize -= removedWeight;
+    liveBytes -= entry.policyByteWeight();
     entry.policyState(Entry.POLICY_NONE);
-    entry.policyWeight = 0L;
-    entry.policyByteWeight = 0L;
+    entry.policyByteWeight(0L);
     entry.policyAccessCount(0);
     if (eviction) {
       evictions++;
@@ -324,11 +322,12 @@ public final class MaintenancePolicy {
         Entry candidate = small.tail;
         lastVictimScanCount++;
         if (candidate.policyAccessCount() > 1) {
+          long candidateWeight = weightOf(candidate);
           unlink(small, candidate);
-          smallWeight -= candidate.policyWeight;
+          smallWeight -= candidateWeight;
           candidate.policyAccessCount(0);
           link(main, candidate, Entry.POLICY_S3_MAIN);
-          mainWeight += candidate.policyWeight;
+          mainWeight += candidateWeight;
           continue;
         }
         return selection.entry(candidate);
@@ -399,10 +398,11 @@ public final class MaintenancePolicy {
   }
 
   private void promoteWindow(Entry candidate) {
+    long weight = weightOf(candidate);
     unlink(window, candidate);
-    windowWeight -= candidate.policyWeight;
+    windowWeight -= weight;
     link(probation, candidate, Entry.POLICY_TINY_PROBATION);
-    probationWeight += candidate.policyWeight;
+    probationWeight += weight;
     if (tinyCandidate == null) {
       tinyCandidate = candidate;
     }
@@ -418,10 +418,11 @@ public final class MaintenancePolicy {
   private void demoteProtected() {
     while (protectedWeight > protectedMaximum && protectedQueue.tail != null) {
       Entry candidate = protectedQueue.tail;
+      long weight = weightOf(candidate);
       unlink(protectedQueue, candidate);
-      protectedWeight -= candidate.policyWeight;
+      protectedWeight -= weight;
       link(probation, candidate, Entry.POLICY_TINY_PROBATION);
-      probationWeight += candidate.policyWeight;
+      probationWeight += weight;
     }
   }
 
@@ -489,8 +490,10 @@ public final class MaintenancePolicy {
   private void updateWeight(Entry entry) {
     long updatedBytes = byteWeightOf(entry);
     long updated = countBounded ? 1L : updatedBytes;
-    long delta = updated - entry.policyWeight;
-    long byteDelta = updatedBytes - entry.policyByteWeight;
+    long oldWeight = weightOf(entry);
+    long oldBytes = entry.policyByteWeight();
+    long delta = updated - oldWeight;
+    long byteDelta = updatedBytes - oldBytes;
     if (delta == 0L && byteDelta == 0L) {
       return;
     }
@@ -514,8 +517,7 @@ public final class MaintenancePolicy {
         break;
       default:
     }
-    entry.policyWeight = updated;
-    entry.policyByteWeight = updatedBytes;
+    entry.policyByteWeight(updatedBytes);
   }
 
   private void addGhost(Entry entry, long fingerprint) {
@@ -523,8 +525,9 @@ public final class MaintenancePolicy {
     if (previous != Long.MIN_VALUE) {
       ghostWeight -= previous;
     }
-    ghost.put(fingerprint, entry.policyWeight);
-    ghostWeight += entry.policyWeight;
+    long weight = weightOf(entry);
+    ghost.put(fingerprint, weight);
+    ghostWeight += weight;
     if (ghostWeight > ghostMaximum) {
       while (ghostWeight > ghostMaximum && !ghost.isEmpty()) {
         ghostWeight -= ghost.removeFirstLong();
@@ -579,6 +582,10 @@ public final class MaintenancePolicy {
     return key
         + WriterArena.allocationWeight(
             ValueBlock.allocationLength(ValueBlock.length(valueAddress)));
+  }
+
+  private long weightOf(Entry entry) {
+    return countBounded ? 1L : entry.policyByteWeight();
   }
 
   private static void link(EntryDeque deque, Entry entry, int state) {

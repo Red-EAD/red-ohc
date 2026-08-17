@@ -20,8 +20,10 @@ import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.infra.ThreadParams;
 
 import com.red.ohc.api.AllocatorType;
+import com.red.ohc.api.DirectValueConsumer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
+import com.red.ohc.api.ValueView;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
 
@@ -101,6 +103,18 @@ public class OHCSerializedBenchmark {
     access(state, blackhole);
   }
 
+  @Benchmark
+  @Threads(1)
+  public void directOneThread(ThreadState state, Blackhole blackhole) {
+    directAccess(state, blackhole);
+  }
+
+  @Benchmark
+  @Threads(Threads.MAX)
+  public void directCpuThreads(ThreadState state, Blackhole blackhole) {
+    directAccess(state, blackhole);
+  }
+
   private void access(ThreadState state, Blackhole blackhole) {
     int index =
         dataset.accessSequence[Math.floorMod(state.cursor++, dataset.accessSequence.length)];
@@ -108,6 +122,17 @@ public class OHCSerializedBenchmark {
       cache.put(dataset.keys[index], dataset.values[index]);
     } else {
       blackhole.consume(cache.get(dataset.keys[index]));
+    }
+  }
+
+  private void directAccess(ThreadState state, Blackhole blackhole) {
+    int index =
+        dataset.accessSequence[Math.floorMod(state.cursor++, dataset.accessSequence.length)];
+    if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
+      cache.put(dataset.keys[index], dataset.values[index]);
+    } else {
+      state.blackhole = blackhole;
+      blackhole.consume(cache.getDirect(dataset.keys[index], state));
     }
   }
 
@@ -119,9 +144,10 @@ public class OHCSerializedBenchmark {
   }
 
   @State(Scope.Thread)
-  public static class ThreadState {
+  public static class ThreadState implements DirectValueConsumer {
     private long cursor;
     private long operations;
+    private Blackhole blackhole;
 
     @Setup(Level.Trial)
     public void setup(ThreadParams params) {
@@ -130,6 +156,11 @@ public class OHCSerializedBenchmark {
               params.getThreadIndex(),
               params.getThreadCount(),
               SerializedBenchmarkSupport.ACCESS_SEQUENCE_LENGTH);
+    }
+
+    @Override
+    public void accept(ValueView value) {
+      blackhole.consume(value.getLong(0));
     }
   }
 }

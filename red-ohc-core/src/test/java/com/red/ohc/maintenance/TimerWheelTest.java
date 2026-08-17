@@ -9,12 +9,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 
 public class TimerWheelTest {
   @Test
   public void maximumExpiryDoesNotOverflowIntoTheCurrentWheelRound() {
     TimerWheel wheel = new TimerWheel(0L);
-    Entry entry = new Entry(0L, 0, 1, 0L);
+    Entry entry = EntryTestSupport.entry(0, 1, 0L);
     wheel.add(entry, Long.MAX_VALUE);
 
     AtomicInteger expiries = new AtomicInteger();
@@ -27,7 +28,7 @@ public class TimerWheelTest {
   @Test
   public void nextWakeTickPointsAtTheNextSixtyFourMillisecondBoundary() {
     TimerWheel wheel = new TimerWheel(0L);
-    wheel.add(new Entry(0L, 0, 2, 0L), 10_000L);
+    wheel.add(EntryTestSupport.entry(0, 2, 0L), 10_000L);
 
     assertEquals(wheel.nextWakeTick(), 157L);
   }
@@ -35,7 +36,7 @@ public class TimerWheelTest {
   @Test
   public void idleCatchUpSkipsEmptyTicksToReachALongOverdueDeadline() {
     TimerWheel wheel = new TimerWheel(0L);
-    wheel.add(new Entry(0L, 0, 23, 0L), 10_000L * 64L);
+    wheel.add(EntryTestSupport.entry(0, 23, 0L), 10_000L * 64L);
 
     assertEquals(
         wheel.advance(10_000L * 64L, (ignored, generation, address) -> {}),
@@ -46,7 +47,7 @@ public class TimerWheelTest {
   @Test
   public void overflowHeapIndexZeroRemainsRemovable() {
     TimerWheel wheel = new TimerWheel(0L);
-    Entry entry = new Entry(0L, 0, 22, 0L);
+    Entry entry = EntryTestSupport.entry(0, 22, 0L);
     wheel.add(entry, 10_000_000_000L);
     assertTrue(entry.timerInOverflowHeap());
 
@@ -58,9 +59,9 @@ public class TimerWheelTest {
   @Test
   public void ceilPlacementHandlesTickBoundariesWithoutWheelRoundDelay() {
     TimerWheel wheel = new TimerWheel(0L);
-    wheel.add(new Entry(0L, 0, 3, 0L), 63L);
-    wheel.add(new Entry(0L, 0, 4, 0L), 64L);
-    wheel.add(new Entry(0L, 0, 5, 0L), 65L);
+    wheel.add(EntryTestSupport.entry(0, 3, 0L), 63L);
+    wheel.add(EntryTestSupport.entry(0, 4, 0L), 64L);
+    wheel.add(EntryTestSupport.entry(0, 5, 0L), 65L);
 
     wheel.advance(64L, (ignored, generation, address) -> {});
     assertEquals(wheel.scheduled(), 1L);
@@ -72,7 +73,7 @@ public class TimerWheelTest {
   public void expiryBudgetContinuesTheCurrentBucketBeforeTheNextWheelRound() {
     TimerWheel wheel = new TimerWheel(0L);
     for (int index = 0; index < 2_049; index++) {
-      wheel.add(new Entry(0L, 0, index + 10, 0L), 64L);
+      wheel.add(EntryTestSupport.entry(0, index + 10, 0L), 64L);
     }
 
     assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> {}), 1_024);
@@ -91,7 +92,7 @@ public class TimerWheelTest {
   public void expiryBudgetUsesTheBinaryMaintenanceBatchSize() {
     TimerWheel wheel = new TimerWheel(0L);
     for (int index = 0; index < 1_025; index++) {
-      wheel.add(new Entry(0L, 0, index + 3_000, 0L), 64L);
+      wheel.add(EntryTestSupport.entry(0, index + 3_000, 0L), 64L);
     }
 
     assertEquals(wheel.advance(64L, 1_024, (ignored, generation, address) -> {}), 1_024);
@@ -106,7 +107,7 @@ public class TimerWheelTest {
     TimerWheel wheel = new TimerWheel(nowMillis);
     // tick=100 starts the search at slot 101. target=1114 maps back to slot 90, which is
     // in the same bitmap word but below the starting bit after one L0 rotation.
-    wheel.add(new Entry(0L, 0, 6, 0L), 1_114L * 64L);
+    wheel.add(EntryTestSupport.entry(0, 6, 0L), 1_114L * 64L);
 
     assertEquals(wheel.advance(1_114L * 64L, (ignored, generation, address) -> {}), 1);
     assertEquals(wheel.scheduled(), 0L);
@@ -122,7 +123,7 @@ public class TimerWheelTest {
 
   private static void assertCascadeConsumesDeadline(long targetTick) throws Exception {
     TimerWheel wheel = new TimerWheel(0L);
-    wheel.add(new Entry(0L, 0, (int) targetTick, 0L), targetTick * 64L);
+    wheel.add(EntryTestSupport.entry(0, (int) targetTick, 0L), targetTick * 64L);
     Field tick = TimerWheel.class.getDeclaredField("tick");
     tick.setAccessible(true);
     tick.setLong(wheel, targetTick - 1L);

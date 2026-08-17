@@ -28,6 +28,7 @@ import com.red.ohc.api.OHCache;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.storage.Budget;
 
@@ -498,8 +499,8 @@ public final class MaxSizeTest {
             .valueSerializer(STRING)
             .buildTyped();
     MaintenanceEventLoop worker = worker(cache);
-    Entry first = new Entry(0L, 0, 101, 0L);
-    Entry second = new Entry(0L, 0, 102, 0L);
+    Entry first = EntryTestSupport.entry(0, 101, 0L);
+    Entry second = EntryTestSupport.entry(0, 102, 0L);
     try {
       waitUntilParked(worker);
       cache.dataForTest().put(first, first);

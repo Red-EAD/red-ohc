@@ -6,6 +6,7 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.Eviction;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 
 public final class MaintenancePolicyAdmissionTest {
   @Test
@@ -29,7 +30,7 @@ public final class MaintenancePolicyAdmissionTest {
   }
 
   private static Entry entry(long hash) {
-    return new Entry(0L, 1, (int) hash, hash, 0L);
+    return EntryTestSupport.entry(1, (int) hash, hash, 0L);
   }
 
   private static void access(MaintenancePolicy policy, Entry entry, int count) {

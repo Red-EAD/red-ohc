@@ -68,7 +68,7 @@ public final class TimerWheel {
     if (target <= tick) {
       target = tick + 1L;
     }
-    entry.timerDeadlineTick = target;
+    entry.timerDeadlineTick(target);
     link(entry, target);
     scheduled++;
   }
@@ -156,7 +156,7 @@ public final class TimerWheel {
       if (scheduled > 0L) {
         scheduled--;
       }
-      link(entry, entry.timerDeadlineTick);
+      link(entry, entry.timerDeadlineTick());
       scheduled++;
       entry = next;
     }
@@ -197,7 +197,7 @@ public final class TimerWheel {
   private void promoteOverflow() {
     while (overflowSize != 0) {
       Entry entry = overflow[0];
-      if (entry.timerDeadlineTick - tick >= L3_SPAN) {
+      if (entry.timerDeadlineTick() - tick >= L3_SPAN) {
         return;
       }
       heapPoll();
@@ -205,7 +205,7 @@ public final class TimerWheel {
       if (scheduled > 0L) {
         scheduled--;
       }
-      link(entry, entry.timerDeadlineTick);
+      link(entry, entry.timerDeadlineTick());
       scheduled++;
     }
   }
@@ -336,7 +336,7 @@ public final class TimerWheel {
     next = Math.min(next, nextCascade(level3Occupied & 0xffffffffL, tick >>> 22, 22, L3_SIZE));
     Entry entry = overflowSize == 0 ? null : overflow[0];
     if (entry != null) {
-      long promote = entry.timerDeadlineTick - L3_SPAN + 1L;
+      long promote = entry.timerDeadlineTick() - L3_SPAN + 1L;
       next = Math.min(next, Math.max(tick + 1L, promote));
     }
     return next;
@@ -477,7 +477,7 @@ public final class TimerWheel {
   }
 
   private static boolean before(Entry left, Entry right) {
-    return left.timerDeadlineTick < right.timerDeadlineTick;
+    return left.timerDeadlineTick() < right.timerDeadlineTick();
   }
 
   @FunctionalInterface

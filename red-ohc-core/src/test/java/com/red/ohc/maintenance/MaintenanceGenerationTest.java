@@ -12,6 +12,7 @@ import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.storage.Budget;
 import com.red.ohc.storage.NativeMemory;
@@ -25,7 +26,7 @@ public class MaintenanceGenerationTest {
     ValueBlock.initialize(oldValue, 1L, 1, 0L);
     long newValue = memory.allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(newValue, 2L, 1, 0L);
-    Entry entry = new Entry(0L, 0, 7, oldValue);
+    Entry entry = EntryTestSupport.entry(memory, 0, 7, oldValue);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
     MaintenanceEventLoop worker =
@@ -54,7 +55,7 @@ public class MaintenanceGenerationTest {
   @Test
   public void detachedEntryCannotRemoveAChmMappingWithNoValueAddress() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    Entry entry = new Entry(0L, 0, 7, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 7, 0L);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
     MaintenanceEventLoop worker =
@@ -78,7 +79,7 @@ public class MaintenanceGenerationTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long value = memory.allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, Long.MAX_VALUE, 1, 0L);
-    Entry entry = new Entry(0L, 0, 9, value);
+    Entry entry = EntryTestSupport.entry(memory, 0, 9, value);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
     MaintenanceEventLoop worker =

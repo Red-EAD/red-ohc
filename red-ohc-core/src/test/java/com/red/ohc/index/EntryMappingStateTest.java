@@ -14,7 +14,7 @@ import org.testng.annotations.Test;
 public final class EntryMappingStateTest {
   @Test
   public void retiredEntryIsImmediatelyInvisibleAndCannotBeClaimedAgain() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
 
     assertTrue(entry.isAlive());
     assertTrue(entry.claimWriter());
@@ -26,7 +26,7 @@ public final class EntryMappingStateTest {
 
   @Test(timeOut = 2_000L)
   public void reliableRemovalClaimFailsImmediatelyWhenAnotherRemovalOwnsTheEntry() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
     assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
     assertFalse(entry.tryBeginPending(Entry.PENDING_REMOVE));
     entry.completePendingClaim();
@@ -34,7 +34,7 @@ public final class EntryMappingStateTest {
 
   @Test
   public void completedPendingPublicationAdvancesTheMutationVersion() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
 
     assertEquals(entry.mutationVersion(), 0L);
     assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
@@ -48,7 +48,7 @@ public final class EntryMappingStateTest {
 
   @Test
   public void appliedVersionDoesNotAdvanceAfterAConcurrentMutation() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
 
     assertTrue(entry.publishMutation(Entry.PENDING_ADD));
     assertTrue(entry.markAppliedVersion(1L));
@@ -60,7 +60,7 @@ public final class EntryMappingStateTest {
 
   @Test
   public void maintenanceVersionSurvivesPolicyMetadataUpdates() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
 
     entry.publishMutation(Entry.PENDING_ADD);
     assertTrue(entry.markAppliedVersion(1L));
@@ -75,8 +75,20 @@ public final class EntryMappingStateTest {
   }
 
   @Test
+  public void policyPresenceIsPublishedInTheHeapPendingWord() {
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
+
+    assertEquals(entry.pendingFlags, 0);
+    entry.policyState(Entry.POLICY_LRU);
+    assertTrue(entry.policyPresent());
+    entry.policyState(Entry.POLICY_NONE);
+    assertFalse(entry.policyPresent());
+    assertEquals(entry.pendingFlags, 0);
+  }
+
+  @Test
   public void advisoryMutationUsesPackedVersionsWithoutAWriterClaim() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
 
     assertTrue(entry.publishMutation(Entry.PENDING_ADD));
     assertEquals(entry.mutationVersion(), 1L);
@@ -92,8 +104,8 @@ public final class EntryMappingStateTest {
 
   @Test
   public void mutationVersionDoesNotWrapWhileMaintenanceIsBehind() {
-    Entry entry = new Entry(0L, 1, 7, 0L);
-    entry.maintenanceMeta = (0xffffffffL << 32) | 0xfffffffeL;
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
+    EntryTestSupport.maintenanceMeta(entry, (0xffffffffL << 32) | 0xfffffffeL);
 
     assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
     assertEquals(
@@ -104,8 +116,8 @@ public final class EntryMappingStateTest {
 
   @Test(timeOut = 2_000L)
   public void laterMutationDoesNotWaitForTheRolloverFenceToDrain() throws Exception {
-    Entry entry = new Entry(0L, 1, 7, 0L);
-    entry.maintenanceMeta = (0xffffffffL << 32) | 0xffffffffL;
+    Entry entry = EntryTestSupport.entry(1, 7, 0L);
+    EntryTestSupport.maintenanceMeta(entry, (0xffffffffL << 32) | 0xffffffffL);
     assertTrue(entry.publishMutation(Entry.PENDING_ADD));
 
     ExecutorService executor = Executors.newSingleThreadExecutor();
