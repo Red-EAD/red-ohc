@@ -128,18 +128,6 @@ public final class SerializedBenchmarkSupport {
     return value == null ? null : Arrays.copyOf(value, value.length);
   }
 
-  public static long fullValueChecksum(byte[] value) {
-    if (value == null) {
-      return 0L;
-    }
-    long checksum = 0xcbf29ce484222325L;
-    for (byte element : value) {
-      checksum ^= element & 0xffL;
-      checksum *= 0x100000001b3L;
-    }
-    return checksum;
-  }
-
   private static byte[] bytes(int length, int seed) {
     byte[] bytes = new byte[length];
     long value = seed * 0x9e3779b97f4a7c15L;

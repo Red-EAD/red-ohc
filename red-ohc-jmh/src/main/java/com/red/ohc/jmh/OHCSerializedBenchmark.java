@@ -107,8 +107,7 @@ public class OHCSerializedBenchmark {
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
       cache.put(dataset.keys[index], dataset.values[index]);
     } else {
-      blackhole.consume(
-          SerializedBenchmarkSupport.fullValueChecksum(cache.get(dataset.keys[index])));
+      blackhole.consume(cache.get(dataset.keys[index]));
     }
   }
 

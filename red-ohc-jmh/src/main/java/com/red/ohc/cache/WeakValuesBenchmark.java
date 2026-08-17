@@ -72,7 +72,7 @@ public class WeakValuesBenchmark {
         }
       };
 
-  @Param({"256", "1024"})
+  @Param({"64", "255", "256", "257", "1024", "5120", "65536", "65537"})
   public int valueBytes;
 
   @Param({"false", "true"})
@@ -103,12 +103,11 @@ public class WeakValuesBenchmark {
     strongCache.put(2, secondValue, expiry);
     weakCache.flushAsync().join();
     strongCache.flushAsync().join();
-    weakValue = weakCache.get(1);
     weakEntry =
         weakCache.dataForTest().values().stream()
             .filter(entry -> entry.nativeKeyAddress != 0L)
             .filter(entry -> entry.weakValueSlot() != null)
-            .filter(entry -> entry.weakValueSlot().get() == weakValue)
+            .filter(entry -> entry.weakValueSlot().get() == value)
             .findFirst()
             .orElseThrow(() -> new IllegalStateException("weak benchmark entry missing"));
     mixedNativeEntry =
@@ -119,6 +118,7 @@ public class WeakValuesBenchmark {
             .filter(entry -> entry.weakValueSlot().get() == secondValue)
             .findFirst()
             .orElseThrow(() -> new IllegalStateException("mixed benchmark entry missing"));
+    weakValue = weakCache.get(1);
     WeakMissState.entryForBenchmark = weakEntry;
     MixedGetAllState.entryForBenchmark = mixedNativeEntry;
   }

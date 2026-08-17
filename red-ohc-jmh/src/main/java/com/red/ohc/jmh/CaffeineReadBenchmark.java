@@ -96,8 +96,7 @@ public class CaffeineReadBenchmark {
       putOwned(cache, keys[index], values[index]);
       return;
     }
-    blackhole.consume(
-        SerializedBenchmarkSupport.fullValueChecksum(getOwned(cache, keys[index])));
+    blackhole.consume(getOwned(cache, keys[index]));
   }
 
   static void putOwned(Cache<EncodedKey, byte[]> cache, EncodedKey key, byte[] value) {

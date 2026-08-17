@@ -54,19 +54,8 @@ public class SerializedBenchmarkSupportTest {
   }
 
   @Test
-  public void fullValueChecksumVisitsAllBytes() {
-    byte[] source = new byte[] {1, 2, 3, 4, 5};
-    long original = SerializedBenchmarkSupport.fullValueChecksum(source);
-
-    source[4] = 6;
-
-    Assert.assertNotEquals(SerializedBenchmarkSupport.fullValueChecksum(source), original);
-  }
-
-  @Test
   public void ownershipHelpersHandleNull() {
     Assert.assertNull(SerializedBenchmarkSupport.ownedCopy(null));
-    Assert.assertEquals(SerializedBenchmarkSupport.fullValueChecksum(null), 0L);
   }
 
   @Test

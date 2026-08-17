@@ -81,8 +81,7 @@ public class MapDbSerializedBenchmark {
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
       map.put(dataset.keys[index], dataset.values[index]);
     } else {
-      blackhole.consume(
-          SerializedBenchmarkSupport.fullValueChecksum(map.get(dataset.keys[index])));
+      blackhole.consume(map.get(dataset.keys[index]));
     }
   }
 
