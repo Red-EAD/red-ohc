@@ -128,9 +128,23 @@ public final class MaxSizeTest {
   @Test
   public void maxSizeDoesNotTrackNativeBudgetReservations() throws Exception {
     OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(8);
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(8)
+            .loaderExecutor(Runnable::run)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped();
     try {
       assertTrue(cache.put("one", "value"));
+      Map<String, String> batch = new LinkedHashMap<>();
+      batch.put("batch", "batch-value");
+      assertEquals(cache.putAll(batch), 1);
+      assertTrue(cache.putIfAbsentAsync("async", "async-value", 0L).get(2L, TimeUnit.SECONDS));
+      assertTrue(
+          cache.replaceAsync("one", "value", "replacement", 0L).get(2L, TimeUnit.SECONDS));
+      assertEquals(
+          cache.getOrLoadAsync("loaded", ignored -> "loaded-value", 0L).get(2L, TimeUnit.SECONDS),
+          "loaded-value");
       assertEquals(budget(cache).reserved(), 0L);
     } finally {
       cache.close();
@@ -222,6 +236,56 @@ public final class MaxSizeTest {
 
       assertEquals(cache.putAll(entries), 2);
       assertEquals(serializedSizes.get(), 2);
+    } finally {
+      release.countDown();
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void putAllKeepsExistingReplacementAndRejectsNewKeyAtHighWatermark() throws Exception {
+    AtomicInteger serializedSizes = new AtomicInteger();
+    CacheSerializer<String> countingValueSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            serializedSizes.incrementAndGet();
+            return STRING.serializedSize(value);
+          }
+        };
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(1)
+            .keySerializer(STRING)
+            .valueSerializer(countingValueSerializer)
+            .buildTyped();
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    pauseMaintenance(cache, paused, release);
+    try {
+      assertTrue(cache.put("one", "value-one"));
+      assertTrue(cache.put("two", "value-two"));
+      serializedSizes.set(0);
+
+      Map<String, String> entries = new LinkedHashMap<>();
+      entries.put("one", "replacement");
+      entries.put("three", "rejected");
+
+      assertEquals(cache.putAll(entries), 1);
+      assertEquals(serializedSizes.get(), 1);
+      assertEquals(cache.get("one"), "replacement");
+      assertEquals(cache.get("three"), null);
+      assertEquals(budget(cache).reserved(), 0L);
     } finally {
       release.countDown();
       cache.close();

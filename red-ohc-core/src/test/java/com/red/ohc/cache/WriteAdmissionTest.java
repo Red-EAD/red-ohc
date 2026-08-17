@@ -127,6 +127,73 @@ public class WriteAdmissionTest {
     }
   }
 
+  @Test
+  public void capacityOversizeReplacementSkipsDefaultTtlAndNativeAdmission() throws Exception {
+    AtomicInteger serializedSizes = new AtomicInteger();
+    AtomicInteger currentTimeMillisCalls = new AtomicInteger();
+    Thread writer = Thread.currentThread();
+    CacheSerializer<String> countingValueSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            serializedSizes.incrementAndGet();
+            return STRING.serializedSize(value);
+          }
+        };
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return System.nanoTime();
+          }
+
+          @Override
+          public long currentTimeMillis() {
+            if (Thread.currentThread() == writer) {
+              currentTimeMillisCalls.incrementAndGet();
+            }
+            return 1_000_000L;
+          }
+        };
+
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(512)
+            .defaultTTLmillis(1_000L)
+            .ticker(ticker)
+            .keySerializer(STRING)
+            .valueSerializer(countingValueSerializer)
+            .buildTyped()) {
+      assertTrue(cache.put("baseline", "value", 0L));
+      cache.flushAsync().join();
+      long allocatedBeforeOversize = cache.totalAllocatedBytes();
+      long reservedBeforeOversize = budgetReserved(cache);
+      serializedSizes.set(0);
+      currentTimeMillisCalls.set(0);
+
+      expectThrows(
+          IllegalArgumentException.class,
+          () -> cache.put("baseline", "x".repeat(4_096)));
+
+      assertEquals(serializedSizes.get(), 1);
+      assertEquals(currentTimeMillisCalls.get(), 0);
+      assertEquals(cache.totalAllocatedBytes(), allocatedBeforeOversize);
+      assertEquals(budgetReserved(cache), reservedBeforeOversize);
+      assertTrue(cache.put("baseline", "replacement"));
+      assertEquals(cache.get("baseline"), "replacement");
+    }
+  }
+
   @Test(timeOut = 5_000L)
   public void readOnlyThreadDoesNotAllocateWriterState() throws Exception {
     try (OffHeapCache<String, String> cache =

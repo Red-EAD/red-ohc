@@ -504,7 +504,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean deferMaintenanceWake,
       long newAllocation,
       long newWeight) {
-    if (!reserveBudget(context, newWeight)) {
+    if (!countBounded && !reserveBudget(context, newWeight)) {
       return 0;
     }
     return replaceExistingAfterReserve(
@@ -747,7 +747,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long keyAllocation,
       long valueAllocation,
       long totalWeight) {
-    if (!reserveBudget(context, totalWeight)) {
+    if (!countBounded && !reserveBudget(context, totalWeight)) {
       return null;
     }
     return allocateEntryAfterReserve(
@@ -1542,8 +1542,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ensureReplacementFitsCapacity(entry.keyAllocationLength(), allocation);
       if (countBounded) {
         worker.throwIfUnavailable();
-      }
-      if (weight > byteCapacity || !reserveBudget(context, weight)) {
+      } else if (!reserveBudget(context, weight)) {
         return false;
       }
       budgetReserved = true;
@@ -1942,9 +1941,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private boolean reserveBudget(ThreadContext context, long weight) {
     if (weight <= 0L || weight > byteCapacity) {
       throw new IllegalArgumentException("entry allocation exceeds cache capacity");
-    }
-    if (countBounded) {
-      return true;
     }
     worker.throwIfUnavailable();
     if (budget.tryReserve(weight, context.budgetStripeIndex())) {
