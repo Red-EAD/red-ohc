@@ -345,6 +345,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return true;
   }
 
+  private static long keyAllocationLength(int keyLength) {
+    return Math.max(8L, CacheMath.roundUpTo8((long) keyLength + Long.BYTES));
+  }
+
   private boolean putSerialized(
       ThreadContext context,
       LookupKey lookup,
@@ -365,6 +369,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     if (existing != null) {
       int valueLength = serializedSize(valueSerializer, value);
+      long valueAllocation = ValueBlock.allocationLength(valueLength);
+      if (!countBounded) {
+        ensureReplacementFitsCapacity(existing.keyAllocationLength(), valueAllocation);
+      }
       long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
       return replaceExistingResult(
           context,
@@ -372,13 +380,19 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           value,
           null,
           valueLength,
+          valueAllocation,
+          allocationWeight(valueAllocation),
           expireAtMillis,
           deferMaintenanceWake);
     }
-    if (!admitNewEntry()) {
+    if (countBounded && !admitNewEntry()) {
       return false;
     }
     int valueLength = serializedSize(valueSerializer, value);
+    long keyAllocation = keyAllocationLength(keyLength);
+    long valueAllocation = ValueBlock.allocationLength(valueLength);
+    long totalWeight = allocationWeight(keyAllocation) + allocationWeight(valueAllocation);
+    ensureNewEntryFitsCapacity(totalWeight);
     long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
     return insertNewEntry(
         context,
@@ -388,6 +402,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         value,
         null,
         valueLength,
+        keyAllocation,
+        valueAllocation,
+        totalWeight,
         expireAtMillis,
         deferMaintenanceWake);
   }
@@ -398,6 +415,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Object value,
       byte[] valueBytes,
       int valueLength,
+      long newAllocation,
+      long newWeight,
       long expireAtMillis,
       boolean deferMaintenanceWake) {
     int result =
@@ -408,7 +427,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             valueBytes,
             valueLength,
             expireAtMillis,
-            deferMaintenanceWake);
+            deferMaintenanceWake,
+            newAllocation,
+            newWeight);
     if (result < 0) {
       throw new IllegalStateException("cache write failed");
     }
@@ -423,6 +444,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Object value,
       byte[] valueBytes,
       int valueLength,
+      long keyAllocation,
+      long valueAllocation,
+      long totalWeight,
       long expireAtMillis,
       boolean deferMaintenanceWake) {
     Entry candidate =
@@ -435,12 +459,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             value,
             valueBytes,
             valueLength,
-            expireAtMillis);
+            expireAtMillis,
+            keyAllocation,
+            valueAllocation,
+            totalWeight);
     if (candidate == null) {
       return false;
     }
     if (!enter(context)) {
-      freeEntry(context, candidate, ValueBlock.allocationLength(valueLength));
+      freeEntry(context, candidate, valueAllocation);
       throw new IllegalStateException("cache is closed");
     }
     Entry winner;
@@ -453,7 +480,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       worker.publishMutation(candidate, Entry.PENDING_ADD, !deferMaintenanceWake);
       return true;
     }
-    freeEntry(context, candidate, ValueBlock.allocationLength(valueLength));
+    freeEntry(context, candidate, valueAllocation);
     candidate.markDead();
     return replaceExistingResult(
         context,
@@ -461,6 +488,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         value,
         valueBytes,
         valueLength,
+        valueAllocation,
+        allocationWeight(valueAllocation),
         expireAtMillis,
         deferMaintenanceWake);
   }
@@ -472,10 +501,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       byte[] valueBytes,
       int valueLength,
       long expireAtMillis,
-      boolean deferMaintenanceWake) {
-    long newAllocation = ValueBlock.allocationLength(valueLength);
-    long newWeight = allocationWeight(newAllocation);
-    ensureReplacementFitsCapacity(entry.keyAllocationLength(), newAllocation);
+      boolean deferMaintenanceWake,
+      long newAllocation,
+      long newWeight) {
     if (!reserveBudget(context, newWeight)) {
       return 0;
     }
@@ -715,13 +743,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Object value,
       byte[] valueBytes,
       int valueLength,
-      long expireAtMillis) {
-    long keyAllocation = Math.max(8L, CacheMath.roundUpTo8((long) keyLength + Long.BYTES));
-    long valueAllocation = ValueBlock.allocationLength(valueLength);
-    long totalWeight = allocationWeight(keyAllocation) + allocationWeight(valueAllocation);
-    if (totalWeight > byteCapacity) {
-      throw new IllegalArgumentException("serialized entry allocation exceeds cache capacity");
-    }
+      long expireAtMillis,
+      long keyAllocation,
+      long valueAllocation,
+      long totalWeight) {
     if (!reserveBudget(context, totalWeight)) {
       return null;
     }
@@ -1049,16 +1074,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               K key = Objects.requireNonNull(iterator.next(), "key");
               KeyEncoder.encode(keySerializer, key, context);
               Entry entry = data.get(context.lookupKey);
+              long observedTaggedValue = entry == null ? 0L : entry.valueAddress;
               long value;
-              if (entry != null && Entry.hasTtl(entry.valueAddress)) {
+              if (Entry.hasTtl(observedTaggedValue)) {
                 if (!bulkClockRead) {
                   bulkNowMillis = ticker.currentTimeMillis();
                   bulkClockRead = true;
                 }
-                value = valueIfLive(entry, bulkNowMillis);
-              } else {
-                value = valueIfLive(entry);
               }
+              value = valueIfLive(entry, observedTaggedValue, bulkNowMillis);
               if (value == 0L) {
                 context.bulkMiss();
               } else {
@@ -1160,16 +1184,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               K key = Objects.requireNonNull(iterator.next(), "key");
               KeyEncoder.encode(keySerializer, key, context);
               Entry entry = data.get(context.lookupKey);
+              long observedTaggedValue = entry == null ? 0L : entry.valueAddress;
               long value;
-              if (entry != null && Entry.hasTtl(entry.valueAddress)) {
+              if (Entry.hasTtl(observedTaggedValue)) {
                 if (!bulkClockRead) {
                   bulkNowMillis = ticker.currentTimeMillis();
                   bulkClockRead = true;
                 }
-                value = valueIfLive(entry, bulkNowMillis);
-              } else {
-                value = valueIfLive(entry);
               }
+              value = valueIfLive(entry, observedTaggedValue, bulkNowMillis);
               if (value == 0L) {
                 context.bulkMiss();
               } else {
@@ -1322,10 +1345,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return false;
       }
     }
-    if (!admitNewEntry()) {
+    if (countBounded && !admitNewEntry()) {
       return false;
     }
     int valueLength = serializedSize(valueSerializer, value);
+    long keyAllocation = keyAllocationLength(keyLength);
+    long valueAllocation = ValueBlock.allocationLength(valueLength);
+    long totalWeight = allocationWeight(keyAllocation) + allocationWeight(valueAllocation);
+    ensureNewEntryFitsCapacity(totalWeight);
     Entry candidate =
         allocateEntry(
             context,
@@ -1336,12 +1363,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             value,
             null,
             valueLength,
-            expireAtMillis);
+            expireAtMillis,
+            keyAllocation,
+            valueAllocation,
+            totalWeight);
     if (candidate == null) {
       return false;
     }
     if (!enter(context)) {
-      freeEntry(context, candidate, ValueBlock.allocationLength(valueLength));
+      freeEntry(context, candidate, valueAllocation);
       throw new IllegalStateException("cache is closed");
     }
     Entry winner;
@@ -1355,7 +1385,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       worker.afterWrite(context);
       return true;
     }
-    freeEntry(context, candidate, ValueBlock.allocationLength(valueLength));
+    freeEntry(context, candidate, valueAllocation);
     candidate.markDead();
     return false;
   }
@@ -1510,6 +1540,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       allocation = ValueBlock.allocationLength(valueLength);
       weight = allocationWeight(allocation);
       ensureReplacementFitsCapacity(entry.keyAllocationLength(), allocation);
+      if (countBounded) {
+        worker.throwIfUnavailable();
+      }
       if (weight > byteCapacity || !reserveBudget(context, weight)) {
         return false;
       }
@@ -1910,10 +1943,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (weight <= 0L || weight > byteCapacity) {
       throw new IllegalArgumentException("entry allocation exceeds cache capacity");
     }
-    worker.throwIfUnavailable();
     if (countBounded) {
       return true;
     }
+    worker.throwIfUnavailable();
     if (budget.tryReserve(weight, context.budgetStripeIndex())) {
       return true;
     }
@@ -2041,12 +2074,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return ValueBlock.expired(value, ticker.currentTimeMillis()) ? 0L : value;
   }
 
-  private long valueIfLive(Entry entry, long nowMillis) {
-    if (entry == null || !entry.isAlive()) {
-      return 0L;
-    }
-    long taggedValue = entry.valueAddress;
-    if (taggedValue == 0L) {
+  private long valueIfLive(Entry entry, long taggedValue, long nowMillis) {
+    if (entry == null || !entry.isAlive() || taggedValue == 0L) {
       return 0L;
     }
     if (!Entry.hasTtl(taggedValue)) {
@@ -2274,6 +2303,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         || keyWeight > byteCapacity - valueWeight) {
       throw new IllegalArgumentException(
           "replacement key and value allocations exceed cache capacity");
+    }
+  }
+
+  private void ensureNewEntryFitsCapacity(long totalWeight) {
+    if (totalWeight > byteCapacity) {
+      throw new IllegalArgumentException("serialized entry allocation exceeds cache capacity");
     }
   }
 

@@ -71,6 +71,22 @@ public final class BulkTtlClockTest {
   }
 
   @Test
+  public void getAllKeepsThePublishedValueObservedBeforeTheTtlClockRead() {
+    ReentrantReplacementTicker ticker = new ReentrantReplacementTicker();
+    try (OHCache<String, String> cache = newCache(ticker)) {
+      assertTrue(cache.put("key", "old", 1_060_000L));
+      cache.flushAsync().join();
+      ticker.arm(cache);
+
+      Map<String, String> values = cache.getAll(Arrays.asList("key"));
+
+      assertEquals(values.get("key"), "old");
+      assertEquals(cache.get("key"), "new");
+      assertEquals(ticker.readerCalls(), 1);
+    }
+  }
+
+  @Test
   public void noTtlWritesDoNotReadTheWallClock() {
     CountingTicker ticker = new CountingTicker();
     try (OHCache<String, String> cache = newNoTtlCache(ticker)) {
@@ -83,7 +99,7 @@ public final class BulkTtlClockTest {
     }
   }
 
-  private static OHCache<String, String> newCache(CountingTicker ticker) {
+  private static OHCache<String, String> newCache(Ticker ticker) {
     return OHCacheBuilder.<String, String>newBuilder()
         .capacity(1 << 20)
         .defaultTTLmillis(60_000L)
@@ -121,6 +137,40 @@ public final class BulkTtlClockTest {
 
     void resetReaderCalls() {
       readerCalls.set(0);
+    }
+
+    int readerCalls() {
+      return readerCalls.get();
+    }
+  }
+
+  private static final class ReentrantReplacementTicker implements Ticker {
+    private final Thread reader = Thread.currentThread();
+    private final AtomicInteger readerCalls = new AtomicInteger();
+    private OHCache<String, String> cache;
+    private boolean replaceOnNextRead;
+
+    @Override
+    public long nanos() {
+      return System.nanoTime();
+    }
+
+    @Override
+    public long currentTimeMillis() {
+      if (Thread.currentThread() == reader) {
+        int call = readerCalls.incrementAndGet();
+        if (replaceOnNextRead && call == 1) {
+          replaceOnNextRead = false;
+          assertTrue(cache.put("key", "new", 0L));
+        }
+      }
+      return 1_000_000L;
+    }
+
+    void arm(OHCache<String, String> cache) {
+      this.cache = cache;
+      readerCalls.set(0);
+      replaceOnNextRead = true;
     }
 
     int readerCalls() {
