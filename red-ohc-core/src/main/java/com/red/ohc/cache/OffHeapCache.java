@@ -2111,8 +2111,17 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return null;
     }
     try {
-      long nativeFingerprint;
       try {
+        valueSerializer.serialize((V) cached, scratch);
+        if (scratch.position() != nativeLength) {
+          throw new IllegalArgumentException(
+              "value serializer wrote "
+                  + scratch.position()
+                  + " bytes, expected "
+                  + nativeLength);
+        }
+
+        long nativeFingerprint;
         if (state.fingerprintReady()) {
           nativeFingerprint = state.fingerprint();
         } else {
@@ -2126,14 +2135,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           state.tryPublishFingerprint(nativeFingerprint);
         }
 
-        valueSerializer.serialize((V) cached, scratch);
-        if (scratch.position() != nativeLength) {
-          throw new IllegalArgumentException(
-              "value serializer wrote "
-                  + scratch.position()
-                  + " bytes, expected "
-                  + nativeLength);
-        }
         long cachedFingerprint = context.fingerprint(scratch, nativeLength);
         if (cachedFingerprint != nativeFingerprint) {
           disableWeakReuse(entry, state);

@@ -122,6 +122,44 @@ public final class WeakValuesTest {
   }
 
   @Test
+  public void lengthMismatchDoesNotComputeNativeFingerprintBeforeSerialization() {
+    NativeFingerprintOrderSerializer serializer = new NativeFingerprintOrderSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("first");
+      assertTrue(cache.put("key", value));
+
+      Entry entry = liveEntry(cache);
+      serializer.entry.set(entry);
+      serializer.observeValidation = true;
+      value.text = "x";
+
+      Pojo loaded = cache.get("key");
+      assertNotSame(loaded, value);
+      assertEquals(serializer.fingerprintReadyAtSerialize.get(), Boolean.FALSE);
+      assertTrue(entry.valueState().fingerprintDisabled());
+    }
+  }
+
+  @Test
+  public void serializationOverflowDoesNotComputeNativeFingerprintBeforeSerialization() {
+    NativeFingerprintOrderSerializer serializer = new NativeFingerprintOrderSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("first");
+      assertTrue(cache.put("key", value));
+
+      Entry entry = liveEntry(cache);
+      serializer.entry.set(entry);
+      serializer.observeValidation = true;
+      value.text = "longer";
+
+      Pojo loaded = cache.get("key");
+      assertNotSame(loaded, value);
+      assertEquals(serializer.fingerprintReadyAtSerialize.get(), Boolean.FALSE);
+      assertTrue(entry.valueState().fingerprintDisabled());
+    }
+  }
+
+  @Test
   public void longerValidationSerializationOverflowsBoundAndQuarantinesThePublication() {
     ByteArraySerializer serializer = new ByteArraySerializer();
     byte[] value = new byte[256];
@@ -845,6 +883,23 @@ public final class WeakValuesTest {
         throw new IllegalStateException("validation size failure");
       }
       return value.text.getBytes(StandardCharsets.UTF_8).length;
+    }
+  }
+
+  private static final class NativeFingerprintOrderSerializer extends CountingPojoSerializer {
+    private final AtomicReference<Entry> entry = new AtomicReference<>();
+    private final AtomicReference<Boolean> fingerprintReadyAtSerialize = new AtomicReference<>();
+    private volatile boolean observeValidation;
+
+    @Override
+    public void serialize(Pojo value, ByteBuffer buffer) {
+      if (observeValidation) {
+        Entry current = entry.get();
+        if (current != null) {
+          fingerprintReadyAtSerialize.set(current.valueState().fingerprintReady());
+        }
+      }
+      super.serialize(value, buffer);
     }
   }
 
