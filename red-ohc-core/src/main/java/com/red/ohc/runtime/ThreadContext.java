@@ -14,6 +14,8 @@ import com.red.ohc.storage.WriterArena;
 
 public final class ThreadContext {
   private static final int MAX_REUSABLE_BULK_KEYS = 4_096;
+  public static final int MAX_THREAD_LOCAL_FINGERPRINT_BYTES = 64 * 1024;
+  public static final int MAX_FINGERPRINT_BYTES = FingerprintScratchPool.MAX_FINGERPRINT_BYTES;
   public byte[] keyBytes = new byte[64];
   public ByteBuffer keyBuffer = ByteBuffer.wrap(keyBytes);
   public LookupKey lookupKey = new LookupKey();
@@ -24,6 +26,9 @@ public final class ThreadContext {
   private ByteBuffer writableValueBuffer;
   private ByteBuffer[] readOnlyValueBuffers;
   private int readOnlyValueDepth;
+  private FingerprintScratch[] fingerprintScratches;
+  private boolean[] pooledFingerprintScratches;
+  private int fingerprintScratchDepth;
   private Set<Entry>[] bulkEntrySets;
   private int[] bulkEntrySetCapacities;
   private boolean[] reusableBulkEntrySets;
@@ -35,10 +40,16 @@ public final class ThreadContext {
   private MaintenanceEventLoop maintenance;
   private int bulkReadDepth;
   private boolean bulkReadChanged;
+  private final FingerprintScratchPool fingerprintScratchPool;
 
   boolean registered;
 
   public ThreadContext(WriterArena writerArena) {
+    this(writerArena, null);
+  }
+
+  public ThreadContext(WriterArena writerArena, FingerprintScratchPool fingerprintScratchPool) {
+    this.fingerprintScratchPool = fingerprintScratchPool;
     if (writerArena != null) {
       this.writerState = new WriterState(writerArena);
     }
@@ -122,6 +133,70 @@ public final class ThreadContext {
 
   public void invalidateWritableValueBuffer(ByteBuffer buffer) {
     NativeByteBuffer.invalidate(buffer);
+  }
+
+  /** Enters a per-depth direct scratch buffer for weak-value fingerprint validation. */
+  public ByteBuffer enterFingerprintScratch(int length) {
+    if (length < 0 || length > MAX_FINGERPRINT_BYTES) {
+      return null;
+    }
+    FingerprintScratch scratch = null;
+    boolean pooled = false;
+    try {
+      ensureFingerprintDepth();
+      int depth = fingerprintScratchDepth;
+      if (length <= MAX_THREAD_LOCAL_FINGERPRINT_BYTES) {
+        scratch = fingerprintScratches[depth];
+        if (scratch == null) {
+          scratch = new FingerprintScratch();
+          fingerprintScratches[depth] = scratch;
+        }
+        if (!scratch.ensureCapacity(length)) {
+          return null;
+        }
+      } else {
+        if (fingerprintScratchPool == null) {
+          return null;
+        }
+        scratch = fingerprintScratchPool.acquire(length);
+        if (scratch == null) {
+          return null;
+        }
+        pooled = true;
+        fingerprintScratches[depth] = scratch;
+      }
+      pooledFingerprintScratches[depth] = pooled;
+      ByteBuffer prepared = scratch.prepare(length);
+      fingerprintScratchDepth++;
+      return prepared;
+    } catch (OutOfMemoryError ignored) {
+      if (pooled && scratch != null) {
+        fingerprintScratchPool.release(scratch);
+        fingerprintScratches[fingerprintScratchDepth] = null;
+        pooledFingerprintScratches[fingerprintScratchDepth] = false;
+      }
+      return null;
+    }
+  }
+
+  /** Computes a CRC32C or Adler32 fingerprint using the currently entered scratch state. */
+  public long fingerprint(ByteBuffer buffer, int length) {
+    if (fingerprintScratchDepth <= 0) {
+      throw new IllegalStateException("fingerprint scratch is not entered");
+    }
+    return fingerprintScratches[fingerprintScratchDepth - 1].checksum(buffer, length);
+  }
+
+  public void exitFingerprintScratch() {
+    if (fingerprintScratchDepth <= 0) {
+      throw new IllegalStateException("fingerprint scratch is not entered");
+    }
+    int depth = --fingerprintScratchDepth;
+    if (pooledFingerprintScratches[depth]) {
+      fingerprintScratchPool.release(fingerprintScratches[depth]);
+      fingerprintScratches[depth] = null;
+      pooledFingerprintScratches[depth] = false;
+    }
   }
 
   public WriterArena writer() {
@@ -305,6 +380,22 @@ public final class ThreadContext {
     reusableBulkEntrySets = expandedReusable;
   }
 
+  private void ensureFingerprintDepth() {
+    if (fingerprintScratches == null) {
+      fingerprintScratches = new FingerprintScratch[2];
+      pooledFingerprintScratches = new boolean[2];
+    }
+    if (fingerprintScratchDepth < fingerprintScratches.length) {
+      return;
+    }
+    FingerprintScratch[] expanded = new FingerprintScratch[fingerprintScratches.length << 1];
+    boolean[] expandedPooled = new boolean[pooledFingerprintScratches.length << 1];
+    System.arraycopy(fingerprintScratches, 0, expanded, 0, fingerprintScratches.length);
+    System.arraycopy(pooledFingerprintScratches, 0, expandedPooled, 0, pooledFingerprintScratches.length);
+    fingerprintScratches = expanded;
+    pooledFingerprintScratches = expandedPooled;
+  }
+
   public void markRegistered() {
     registered = true;
   }
@@ -455,4 +546,5 @@ public final class ThreadContext {
     }
     return (int) size;
   }
+
 }

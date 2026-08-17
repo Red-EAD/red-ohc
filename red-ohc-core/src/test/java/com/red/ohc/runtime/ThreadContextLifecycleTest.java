@@ -8,6 +8,7 @@ import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 import org.testng.annotations.Test;
 
@@ -88,9 +89,33 @@ public final class ThreadContextLifecycleTest {
     assertNotNull(field("bulkEntrySets").get(context));
   }
 
+  @Test
+  public void fingerprintScratchIsLazyReusableAndNested() {
+    ThreadContext context = new ThreadContext(null);
+
+    assertNull(readField("fingerprintScratches", context));
+    ByteBuffer outer = context.enterFingerprintScratch(256);
+    outer.put("outer".getBytes(StandardCharsets.UTF_8));
+    ByteBuffer inner = context.enterFingerprintScratch(257);
+    inner.put("inner".getBytes(StandardCharsets.UTF_8));
+    context.exitFingerprintScratch();
+    context.exitFingerprintScratch();
+
+    assertNotNull(readField("fingerprintScratches", context));
+    assertEquals(((Integer) readField("fingerprintScratchDepth", context)).intValue(), 0);
+  }
+
   private static Field field(String name) throws Exception {
     Field field = ThreadContext.class.getDeclaredField(name);
     field.setAccessible(true);
     return field;
+  }
+
+  private static Object readField(String name, Object target) {
+    try {
+      return field(name).get(target);
+    } catch (Exception failure) {
+      throw new AssertionError(failure);
+    }
   }
 }

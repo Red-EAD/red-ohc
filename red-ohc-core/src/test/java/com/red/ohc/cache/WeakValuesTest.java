@@ -3,11 +3,14 @@ package com.red.ohc.cache;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotSame;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -20,6 +23,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.Adler32;
+import java.util.zip.CRC32C;
+import java.util.zip.Checksum;
 
 import org.testng.annotations.Test;
 
@@ -38,12 +44,341 @@ public final class WeakValuesTest {
       Pojo value = new Pojo("first");
       assertTrue(cache.put("key", value));
       int deserializationsAfterPut = serializer.deserializeCalls.get();
+      int serializationsAfterPut = serializer.serializeCalls.get();
+      int sizeCallsAfterPut = serializer.serializedSizeCalls.get();
 
       assertSame(cache.get("key"), value);
       assertEquals(serializer.deserializeCalls.get(), deserializationsAfterPut);
+      assertTrue(serializer.serializeCalls.get() > serializationsAfterPut);
+      assertEquals(serializer.serializedSizeCalls.get(), sizeCallsAfterPut);
       Map<String, Pojo> values = cache.getAll(Collections.singleton("key"));
       assertSame(values.get("key"), value);
       assertEquals(serializer.deserializeCalls.get(), deserializationsAfterPut);
+    }
+  }
+
+  @Test
+  public void reusedFingerprintScratchRestoresBigEndianByteOrder() {
+    ByteOrderChangingPojoSerializer serializer = new ByteOrderChangingPojoSerializer();
+    try (OHCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("value");
+      assertTrue(cache.put("key", value));
+
+      assertSame(cache.get("key"), value);
+      assertSame(cache.get("key"), value);
+      assertEquals(serializer.firstValidationOrder.get(), ByteOrder.BIG_ENDIAN);
+      assertEquals(serializer.secondValidationOrder.get(), ByteOrder.BIG_ENDIAN);
+      assertEquals(serializer.deserializations.get(), 0);
+    }
+  }
+
+  @Test
+  public void mutatedWeakValueFallsBackOnceAndQuarantinesThePublication() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("first");
+      assertTrue(cache.put("key", value));
+      value.text = "other";
+
+      int serializeCallsBeforeDirtyRead = serializer.serializeCalls.get();
+      int sizeCallsBeforeDirtyRead = serializer.serializedSizeCalls.get();
+      Pojo firstFallback = cache.get("key");
+      assertEquals(firstFallback.text, "first");
+      assertNotSame(firstFallback, value);
+      assertTrue(serializer.deserializeCalls.get() > 0);
+
+      Entry entry =
+          cache.dataForTest().values().stream()
+              .filter(candidate -> candidate.nativeKeyAddress != 0L)
+              .findFirst()
+              .get();
+      assertTrue(entry.valueState().fingerprintDisabled());
+      assertEquals(entry.weakValueSlot(), null);
+      int serializeCallsAfterDirtyRead = serializer.serializeCalls.get();
+      int sizeCallsAfterDirtyRead = serializer.serializedSizeCalls.get();
+      assertTrue(serializer.serializeCalls.get() > serializeCallsBeforeDirtyRead);
+      assertEquals(serializer.serializedSizeCalls.get(), sizeCallsBeforeDirtyRead);
+
+      Pojo secondFallback = cache.get("key");
+      assertEquals(secondFallback.text, "first");
+      assertEquals(serializer.serializeCalls.get(), serializeCallsAfterDirtyRead);
+      assertEquals(serializer.serializedSizeCalls.get(), sizeCallsAfterDirtyRead);
+    }
+  }
+
+  @Test
+  public void shorterValidationSerializationFallsBackAndQuarantinesThePublication() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OHCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("first");
+      assertTrue(cache.put("key", value));
+      value.text = "x";
+
+      Pojo loaded = cache.get("key");
+      assertEquals(loaded.text, "first");
+      assertNotSame(loaded, value);
+      assertTrue(liveEntry((OffHeapCache<?, ?>) cache).valueState().fingerprintDisabled());
+    }
+  }
+
+  @Test
+  public void longerValidationSerializationOverflowsBoundAndQuarantinesThePublication() {
+    ByteArraySerializer serializer = new ByteArraySerializer();
+    byte[] value = new byte[256];
+    try (OffHeapCache<String, byte[]> cache = newByteArrayCache(serializer)) {
+      assertTrue(cache.put("key", value));
+      serializer.appendExtraByte = true;
+
+      byte[] loaded = cache.get("key");
+      assertNotSame(loaded, value);
+      assertTrue(liveEntry(cache).valueState().fingerprintDisabled());
+      int serializationsAfterFailure = serializer.serializeCalls.get();
+
+      cache.get("key");
+      assertEquals(serializer.serializeCalls.get(), serializationsAfterFailure);
+    }
+  }
+
+  @Test
+  public void replacementRearmsWeakReuseAfterDirtyQuarantine() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo original = new Pojo("original");
+      assertTrue(cache.put("key", original));
+      original.text = "changed";
+      assertNotSame(cache.get("key"), original);
+
+      Entry entry = liveEntry(cache);
+      assertTrue(entry.valueState().fingerprintDisabled());
+
+      Pojo replacement = new Pojo("replacement");
+      assertTrue(cache.put("key", replacement));
+      assertFalse(entry.valueState().fingerprintDisabled());
+      int deserializationsAfterReplacement = serializer.deserializeCalls.get();
+
+      assertSame(cache.get("key"), replacement);
+      assertEquals(serializer.deserializeCalls.get(), deserializationsAfterReplacement);
+    }
+  }
+
+  @Test
+  public void validationSizeFailureDoesNotAffectWeakReuse() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("value");
+      assertTrue(cache.put("key", value));
+      serializer.failSerializedSize = true;
+
+      assertSame(cache.get("key"), value);
+      Entry entry = liveEntry(cache);
+      assertFalse(entry.valueState().fingerprintDisabled());
+      assertEquals(serializer.deserializeCalls.get(), 0);
+      assertEquals(serializer.serializedSizeCalls.get(), 1);
+    }
+  }
+
+  @Test
+  public void validationSerializeFailureQuarantinesThePublication() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("value");
+      assertTrue(cache.put("key", value));
+      serializer.failSerialize = true;
+
+      Pojo firstFallback = cache.get("key");
+      assertNotSame(firstFallback, value);
+      Entry entry = liveEntry(cache);
+      assertTrue(entry.valueState().fingerprintDisabled());
+      int serializeCallsAfterFailure = serializer.serializeCalls.get();
+      int sizeCallsAfterFailure = serializer.serializedSizeCalls.get();
+
+      serializer.failSerialize = false;
+      cache.get("key");
+      assertEquals(serializer.serializeCalls.get(), serializeCallsAfterFailure);
+      assertEquals(serializer.serializedSizeCalls.get(), sizeCallsAfterFailure);
+    }
+  }
+
+  @Test(timeOut = 10_000)
+  public void replacementCannotBeQuarantinedByAnInFlightValidation() throws Exception {
+    BlockingValidationSerializer serializer = new BlockingValidationSerializer();
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo first = new Pojo("first");
+      assertTrue(cache.put("key", first));
+      first.text = "other";
+      serializer.blockOnInvocation = serializer.serializeInvocations.get() + 1;
+
+      Future<Pojo> inFlight = executor.submit(() -> cache.get("key"));
+      assertTrue(serializer.validationEntered.await(5, TimeUnit.SECONDS));
+
+      Pojo replacement = new Pojo("replacement");
+      assertTrue(cache.put("key", replacement));
+      serializer.allowValidation.countDown();
+
+      assertEquals(inFlight.get(5, TimeUnit.SECONDS).text, "first");
+      Entry entry = liveEntry(cache);
+      assertFalse(entry.valueState().fingerprintDisabled());
+      assertSame(cache.get("key"), replacement);
+    } finally {
+      serializer.allowValidation.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void fingerprintUsesCrc32cAt256BytesAndAdler32After256Bytes() {
+    assertFingerprint(0, new CRC32C());
+    assertFingerprint(256, new CRC32C());
+    assertFingerprint(257, new Adler32());
+    assertFingerprint(64 * 1024, new Adler32());
+  }
+
+  @Test
+  public void largeValuesUseSharedFingerprintScratchPool() {
+    ByteArraySerializer serializer = new ByteArraySerializer();
+    byte[] value = new byte[128 * 1024];
+    for (int index = 0; index < value.length; index++) {
+      value[index] = (byte) index;
+    }
+    try (OffHeapCache<String, byte[]> cache = newByteArrayCache(serializer)) {
+      assertTrue(cache.put("key", value));
+      byte[] loaded = cache.get("key");
+      assertSame(loaded, value);
+      Entry entry = liveEntry(cache);
+      assertTrue(entry.valueState().fingerprintReady());
+      assertEquals(serializer.deserializeCalls.get(), 0);
+    }
+  }
+
+  @Test
+  public void valuesAboveFourMiBScratchLimitDisableWeakReuse() {
+    ByteArraySerializer serializer = new ByteArraySerializer();
+    byte[] value = new byte[4 * 1024 * 1024 + 1];
+    for (int index = 0; index < value.length; index++) {
+      value[index] = (byte) index;
+    }
+    try (OffHeapCache<String, byte[]> cache = newByteArrayCache(serializer)) {
+      assertTrue(cache.put("key", value));
+      int serializeCallsAfterPut = serializer.serializeCalls.get();
+
+      byte[] loaded = cache.get("key");
+      assertNotSame(loaded, value);
+      Entry entry = liveEntry(cache);
+      assertTrue(entry.valueState().fingerprintDisabled());
+      assertEquals(serializer.serializeCalls.get(), serializeCallsAfterPut);
+      assertTrue(serializer.deserializeCalls.get() > 0);
+    }
+  }
+
+  @Test(timeOut = 10_000)
+  public void maintenanceClearsGcWeakSlotButKeepsNativeEntryAndFingerprint() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      WeakReference<Pojo> referent = putAndValidateThenDrop(cache);
+      Entry entry = liveEntry(cache);
+      assertTrue(entry.valueState().fingerprintReady());
+
+      awaitCleared(referent);
+      cache.flushAsync().join();
+
+      assertNull(entry.weakValueSlot());
+      assertTrue(entry.valueAddress != 0L);
+      assertTrue(entry.valueState().fingerprintReady());
+
+      Pojo loaded = cache.get("key");
+      assertEquals(loaded.text, "value");
+      assertTrue(entry.weakValueSlot() != null);
+      assertTrue(entry.valueState().fingerprintReady());
+    }
+  }
+
+  @Test(timeOut = 5_000)
+  public void idleMaintenanceEventuallyClearsQueuedWeakSlotWithoutExplicitFlush() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("value");
+      assertTrue(cache.put("key", value));
+      Entry entry = liveEntry(cache);
+      Entry.WeakValueSlot slot = entry.weakValueSlot();
+      slot.clear();
+      assertTrue(slot.enqueue());
+
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+      while (entry.weakValueSlot() != null && System.nanoTime() < deadline) {
+        try {
+          Thread.sleep(10L);
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new AssertionError(interrupted);
+        }
+      }
+      assertNull(entry.weakValueSlot());
+      assertTrue(entry.valueAddress != 0L);
+    }
+  }
+
+  @Test
+  public void queuedOldWeakSlotCannotClearReplacementSlot() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo first = new Pojo("first");
+      assertTrue(cache.put("key", first));
+      Entry entry = liveEntry(cache);
+      Entry.WeakValueSlot oldSlot = entry.weakValueSlot();
+      oldSlot.clear();
+      assertTrue(oldSlot.enqueue());
+
+      Pojo replacement = new Pojo("replacement");
+      assertTrue(cache.put("key", replacement));
+      Entry.WeakValueSlot replacementSlot = entry.weakValueSlot();
+      cache.flushAsync().join();
+
+      assertSame(entry.weakValueSlot(), replacementSlot);
+      assertSame(cache.get("key"), replacement);
+    }
+  }
+
+  @Test
+  public void queuedWeakSlotAfterRemovalCannotRepopulateTheEntry() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo value = new Pojo("value");
+      assertTrue(cache.put("key", value));
+      Entry entry = liveEntry(cache);
+      Entry.WeakValueSlot slot = entry.weakValueSlot();
+      slot.clear();
+      assertTrue(slot.enqueue());
+
+      assertTrue(cache.remove("key"));
+      cache.flushAsync().join();
+
+      assertFalse(cache.containsKey("key"));
+      assertNull(entry.weakValueSlot());
+    }
+  }
+
+  @Test
+  public void getAllUsesValidatedWeakReadPath() {
+    CountingPojoSerializer serializer = new CountingPojoSerializer();
+    try (OffHeapCache<String, Pojo> cache = newPojoCache(serializer)) {
+      Pojo weak = new Pojo("weak");
+      Pojo nativeValue = new Pojo("native");
+      assertTrue(cache.put("weak", weak));
+      assertTrue(cache.put("native", nativeValue));
+      cache.dataForTest().values().stream()
+          .filter(entry -> entry.nativeKeyAddress != 0L)
+          .filter(entry -> entry.weakValueSlot() != null)
+          .filter(entry -> entry.weakValueSlot().get() == nativeValue)
+          .forEach(Entry::clearWeakValueSlot);
+      int serializeCallsAfterPut = serializer.serializeCalls.get();
+      int deserializeCallsAfterPut = serializer.deserializeCalls.get();
+
+      Map<String, Pojo> result = cache.getAll(java.util.Arrays.asList("weak", "native"));
+      assertSame(result.get("weak"), weak);
+      assertEquals(result.get("native").text, "native");
+      assertTrue(serializer.serializeCalls.get() > serializeCallsAfterPut);
+      assertTrue(serializer.deserializeCalls.get() > deserializeCallsAfterPut);
     }
   }
 
@@ -402,8 +737,76 @@ public final class WeakValuesTest {
         .buildTyped();
   }
 
+  private static OffHeapCache<String, byte[]> newByteArrayCache(ByteArraySerializer serializer) {
+    return OHCacheBuilder.<String, byte[]>newBuilder()
+        .capacity(8L << 20)
+        .keySerializer(STRING)
+        .valueSerializer(serializer)
+        .weakValues(true)
+        .buildTyped();
+  }
+
+  private static WeakReference<Pojo> putAndValidateThenDrop(OffHeapCache<String, Pojo> cache) {
+    Pojo value = new Pojo("value");
+    assertTrue(cache.put("key", value));
+    assertSame(cache.get("key"), value);
+    return new WeakReference<>(value);
+  }
+
+  private static void awaitCleared(WeakReference<?> reference) {
+    for (int attempt = 0; attempt < 100 && reference.get() != null; attempt++) {
+      System.gc();
+      System.runFinalization();
+      byte[] pressure = new byte[64 * 1024];
+      pressure[0] = (byte) attempt;
+      try {
+        Thread.sleep(10L);
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError(interrupted);
+      }
+    }
+    assertNull(reference.get(), "test referent was not collected");
+  }
+
+  private static Entry liveEntry(OffHeapCache<?, ?> cache) {
+    return cache.dataForTest().values().stream()
+        .filter(entry -> entry.nativeKeyAddress != 0L)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("live entry missing"));
+  }
+
+  private static void assertFingerprint(int length, Checksum expected) {
+    ByteArraySerializer serializer = new ByteArraySerializer();
+    byte[] value = new byte[length];
+    for (int index = 0; index < value.length; index++) {
+      value[index] = (byte) (index * 31);
+    }
+    expected.update(value, 0, value.length);
+    try (OffHeapCache<String, byte[]> cache = newByteArrayCache(serializer)) {
+      assertTrue(cache.put("key", value));
+      Entry entry =
+          cache.dataForTest().values().stream()
+              .filter(candidate -> candidate.nativeKeyAddress != 0L)
+              .findFirst()
+              .get();
+      byte[] loaded = cache.get("key");
+      assertSame(
+          loaded,
+          value,
+          "length="
+              + length
+              + ", state="
+              + entry.valueState().fingerprintState()
+              + ", slot="
+              + entry.weakValueSlot());
+      assertTrue(entry.valueState().fingerprintReady());
+      assertEquals(entry.valueState().fingerprint(), expected.getValue());
+    }
+  }
+
   private static final class Pojo {
-    private final String text;
+    private String text;
 
     private Pojo(String text) {
       this.text = text;
@@ -412,9 +815,17 @@ public final class WeakValuesTest {
 
   private static class CountingPojoSerializer implements CacheSerializer<Pojo> {
     private final AtomicInteger deserializeCalls = new AtomicInteger();
+    private final AtomicInteger serializeCalls = new AtomicInteger();
+    private final AtomicInteger serializedSizeCalls = new AtomicInteger();
+    private boolean failSerialize;
+    private boolean failSerializedSize;
 
     @Override
     public void serialize(Pojo value, ByteBuffer buffer) {
+      serializeCalls.incrementAndGet();
+      if (failSerialize) {
+        throw new IllegalStateException("validation serialize failure");
+      }
       byte[] bytes = value.text.getBytes(StandardCharsets.UTF_8);
       buffer.put(bytes);
     }
@@ -429,7 +840,92 @@ public final class WeakValuesTest {
 
     @Override
     public int serializedSize(Pojo value) {
+      serializedSizeCalls.incrementAndGet();
+      if (failSerializedSize) {
+        throw new IllegalStateException("validation size failure");
+      }
       return value.text.getBytes(StandardCharsets.UTF_8).length;
+    }
+  }
+
+  private static final class ByteOrderChangingPojoSerializer extends CountingPojoSerializer {
+    private final AtomicInteger validationCalls = new AtomicInteger();
+    private final AtomicInteger deserializations = new AtomicInteger();
+    private final AtomicReference<ByteOrder> firstValidationOrder = new AtomicReference<>();
+    private final AtomicReference<ByteOrder> secondValidationOrder = new AtomicReference<>();
+
+    @Override
+    public void serialize(Pojo value, ByteBuffer buffer) {
+      int call = validationCalls.incrementAndGet();
+      if (call == 2) {
+        firstValidationOrder.set(buffer.order());
+        super.serialize(value, buffer);
+        buffer.order(ByteOrder.LITTLE_ENDIAN);
+        return;
+      }
+      if (call == 3) {
+        secondValidationOrder.set(buffer.order());
+      }
+      super.serialize(value, buffer);
+    }
+
+    @Override
+    public Pojo deserialize(ByteBuffer buffer) {
+      deserializations.incrementAndGet();
+      return super.deserialize(buffer);
+    }
+  }
+
+  private static final class BlockingValidationSerializer extends CountingPojoSerializer {
+    private final CountDownLatch validationEntered = new CountDownLatch(1);
+    private final CountDownLatch allowValidation = new CountDownLatch(1);
+    private final AtomicInteger serializeInvocations = new AtomicInteger();
+    private volatile int blockOnInvocation;
+
+    @Override
+    public void serialize(Pojo value, ByteBuffer buffer) {
+      if (serializeInvocations.incrementAndGet() == blockOnInvocation) {
+        validationEntered.countDown();
+        try {
+          if (!allowValidation.await(5, TimeUnit.SECONDS)) {
+            throw new AssertionError("timed out waiting to release validation");
+          }
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new AssertionError(interrupted);
+        }
+      }
+      super.serialize(value, buffer);
+    }
+  }
+
+  private static final class ByteArraySerializer implements CacheSerializer<byte[]> {
+    private final AtomicInteger serializeCalls = new AtomicInteger();
+    private final AtomicInteger deserializeCalls = new AtomicInteger();
+    private final AtomicInteger serializedSizeCalls = new AtomicInteger();
+    private boolean appendExtraByte;
+
+    @Override
+    public void serialize(byte[] value, ByteBuffer buffer) {
+      serializeCalls.incrementAndGet();
+      buffer.put(value);
+      if (appendExtraByte) {
+        buffer.put((byte) 1);
+      }
+    }
+
+    @Override
+    public byte[] deserialize(ByteBuffer buffer) {
+      deserializeCalls.incrementAndGet();
+      byte[] value = new byte[buffer.remaining()];
+      buffer.get(value);
+      return value;
+    }
+
+    @Override
+    public int serializedSize(byte[] value) {
+      serializedSizeCalls.incrementAndGet();
+      return value.length;
     }
   }
 

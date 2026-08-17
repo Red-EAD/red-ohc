@@ -1,5 +1,6 @@
 package com.red.ohc.index;
 
+import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
@@ -172,7 +173,7 @@ public final class Entry {
       ValueState next =
           current == null
               ? new ValueState(valueAddress, update)
-              : new ValueState(current.taggedValueAddress, update);
+              : current.withWeakValue(update);
       if (VALUE_STATE.compareAndSet(this, current, next)) {
         return true;
       }
@@ -184,7 +185,7 @@ public final class Entry {
   public void clearWeakValueSlot() {
     ValueState current = valueState;
     while (current != null) {
-      ValueState next = new ValueState(current.taggedValueAddress, null);
+      ValueState next = current.withWeakValue(null);
       if (valueAddress != current.taggedValueAddress) {
         return;
       }
@@ -195,6 +196,29 @@ public final class Entry {
     }
   }
 
+  /** Clears one queued weak slot only if it is still the current publication. */
+  public boolean clearWeakValueIfCurrent(WeakValueSlot expected) {
+    if (expected == null || expected.owner() != this) {
+      return false;
+    }
+    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
+      ValueState current = valueState;
+      if (current == null
+          || current.weakValue != expected
+          || current.taggedValueAddress != expected.taggedValueAddress()
+          || valueAddress != current.taggedValueAddress) {
+        return false;
+      }
+      ValueState next = current.withWeakValue(null);
+      if (VALUE_STATE.compareAndSet(this, current, next)) {
+        expected.clear();
+        return true;
+      }
+      Thread.onSpinWait();
+    }
+    return false;
+  }
+
   public void setWeakValueSlot(WeakValueSlot slot) {
     if (slot == null && valueState == null) {
       return;
@@ -203,7 +227,11 @@ public final class Entry {
     if (taggedValueAddress == 0L && slot != null) {
       throw new IllegalArgumentException("weak value requires a native value address");
     }
-    valueState = new ValueState(taggedValueAddress, slot);
+    ValueState current = valueState;
+    valueState =
+        current == null || current.taggedValueAddress != taggedValueAddress
+            ? new ValueState(taggedValueAddress, slot)
+            : current.withWeakValue(slot);
   }
 
   /** Initializes weak-value publication metadata without allocating it for disabled caches. */
@@ -266,10 +294,44 @@ public final class Entry {
     return false;
   }
 
+  /** Disables weak reuse for the still-current native publication and drops its weak referent. */
+  public boolean disableWeakValue(ValueState expected) {
+    if (expected == null) {
+      return false;
+    }
+    for (int attempt = 0; attempt < NativeMemory.LOGICAL_CPU_COUNT; attempt++) {
+      ValueState current = valueState;
+      if (current == null
+          || current.publication != expected.publication
+          || current.taggedValueAddress != expected.taggedValueAddress
+          || valueAddress != current.taggedValueAddress) {
+        return false;
+      }
+      current.disableFingerprint();
+      ValueState disabled = current.withWeakValue(null);
+      if (VALUE_STATE.compareAndSet(this, current, disabled)) {
+        if (current.weakValue != null) {
+          current.weakValue.clear();
+        }
+        return true;
+      }
+      Thread.onSpinWait();
+    }
+    return false;
+  }
+
   /** Immutable token joining a native value address and its optional weak Java object. */
   public static final class ValueState {
+    private static final long FINGERPRINT_UNINITIALIZED = 0L;
+    private static final long FINGERPRINT_DISABLED = 1L;
+    private static final long FINGERPRINT_READY_MARKER = 2L;
+    private static final AtomicLongFieldUpdater<ValueState> FINGERPRINT_STATE =
+        AtomicLongFieldUpdater.newUpdater(ValueState.class, "fingerprintState");
+
     private final long taggedValueAddress;
     private final WeakValueSlot weakValue;
+    private final ValueState publication;
+    private volatile long fingerprintState;
 
     public ValueState(long taggedValueAddress, WeakValueSlot weakValue) {
       if (taggedValueAddress == 0L && weakValue != null) {
@@ -277,6 +339,18 @@ public final class Entry {
       }
       this.taggedValueAddress = taggedValueAddress;
       this.weakValue = weakValue;
+      this.publication = this;
+      this.fingerprintState = FINGERPRINT_UNINITIALIZED;
+    }
+
+    private ValueState(long taggedValueAddress, WeakValueSlot weakValue, ValueState publication) {
+      if (taggedValueAddress == 0L && weakValue != null) {
+        throw new IllegalArgumentException("weak value requires a native value address");
+      }
+      this.taggedValueAddress = taggedValueAddress;
+      this.weakValue = weakValue;
+      this.publication = publication;
+      this.fingerprintState = FINGERPRINT_UNINITIALIZED;
     }
 
     public long taggedValueAddress() {
@@ -286,31 +360,80 @@ public final class Entry {
     public WeakValueSlot weakValue() {
       return weakValue;
     }
+
+    public ValueState withWeakValue(WeakValueSlot replacement) {
+      return new ValueState(taggedValueAddress, replacement, publication);
+    }
+
+    public long fingerprintState() {
+      return publication.fingerprintState;
+    }
+
+    public boolean fingerprintReady() {
+      return (publication.fingerprintState & 0xffffffffL) == FINGERPRINT_READY_MARKER;
+    }
+
+    public boolean fingerprintDisabled() {
+      return publication.fingerprintState == FINGERPRINT_DISABLED;
+    }
+
+    public long fingerprint() {
+      if (!fingerprintReady()) {
+        throw new IllegalStateException("fingerprint is not ready");
+      }
+      return publication.fingerprintState >>> 32;
+    }
+
+    public boolean tryPublishFingerprint(long fingerprint) {
+      long packed = (fingerprint << 32) | FINGERPRINT_READY_MARKER;
+      return FINGERPRINT_STATE.compareAndSet(
+          publication, FINGERPRINT_UNINITIALIZED, packed);
+    }
+
+    private void disableFingerprint() {
+      for (; ; ) {
+        long current = publication.fingerprintState;
+        if (current == FINGERPRINT_DISABLED
+            || FINGERPRINT_STATE.compareAndSet(publication, current, FINGERPRINT_DISABLED)) {
+          return;
+        }
+      }
+    }
   }
 
   /** Weak value metadata bound to one exact tagged native value address. */
-  public static final class WeakValueSlot {
-    private final WeakReference<Object> reference;
+  public static final class WeakValueSlot extends WeakReference<Object> {
+    private final Entry owner;
     private final long taggedValueAddress;
 
     public WeakValueSlot(Object value, long taggedValueAddress) {
+      this(value, taggedValueAddress, null, null);
+    }
+
+    public WeakValueSlot(
+        Object value,
+        long taggedValueAddress,
+        Entry owner,
+        ReferenceQueue<Object> queue) {
+      super(value, queue);
       if (value == null) {
         throw new NullPointerException("value");
       }
       if (taggedValueAddress == 0L) {
         throw new IllegalArgumentException("weak value requires a native value address");
       }
-      this.reference = new WeakReference<>(value);
+      this.owner = owner;
       this.taggedValueAddress = taggedValueAddress;
     }
 
-    public Object get() {
-      return reference.get();
+    public Entry owner() {
+      return owner;
     }
 
     public long taggedValueAddress() {
       return taggedValueAddress;
     }
+
   }
 
   public static long tagValueAddress(long rawAddress, boolean hasTtl) {

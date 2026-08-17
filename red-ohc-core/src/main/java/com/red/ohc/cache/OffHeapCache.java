@@ -1,5 +1,6 @@
 package com.red.ohc.cache;
 
+import java.lang.ref.ReferenceQueue;
 import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.HashMap;
@@ -34,6 +35,7 @@ import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
+import com.red.ohc.runtime.FingerprintScratchPool;
 import com.red.ohc.runtime.ReaderGuard;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ThreadContext;
@@ -67,6 +69,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final long nativeHardLimit;
   private final NativeMemory.Memory memory;
   private final Budget budget;
+  private final ReferenceQueue<Object> weakValueQueue;
+  private final FingerprintScratchPool fingerprintScratchPool;
   private final ReaderRegistry readers = new ReaderRegistry();
   private final ThreadLocal<ThreadContext> contexts;
   private final ThreadContext evictionContexts;
@@ -103,6 +107,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.valueSerializer = valueSerializer;
     this.evictionListener = evictionListener;
     this.weakValues = weakValues;
+    this.weakValueQueue = weakValues ? new ReferenceQueue<>() : null;
+    this.fingerprintScratchPool = weakValues ? new FingerprintScratchPool() : null;
     this.ticker = ticker;
     this.defaultTtlMillis = defaultTtlMillis;
     this.loaderExecutor = loaderExecutor;
@@ -141,7 +147,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     data.remove(bootstrap, bootstrap);
     this.memory = new NativeMemory.Memory(allocatorType, nativeHardLimit);
     this.budget = new Budget(residentHardLimit, memory.writerStripeCount());
-    this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null));
+    this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null, fingerprintScratchPool));
     this.evictionContexts = evictionListener == null ? null : new ThreadContext(null);
     this.worker =
         new MaintenanceEventLoop(
@@ -153,8 +159,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             eviction,
             evictionListener == null ? null : this::notifyEviction,
             readers,
-            ChmSizing.maintenanceQueueCapacity(entryEstimate, limit),
+                ChmSizing.maintenanceQueueCapacity(entryEstimate, limit),
                 countBounded);
+    worker.bindWeakValueQueue(weakValueQueue);
     this.readerGuard = new ReaderGuard(worker, this::isClosing);
     worker.start();
   }
@@ -666,7 +673,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Object value,
       byte[] valueBytes,
       long newTaggedValue) {
-    Entry.WeakValueSlot newWeakValue = prepareWeakValue(value, valueBytes, newTaggedValue);
+    Entry.WeakValueSlot newWeakValue =
+        prepareWeakValue(entry, value, valueBytes, newTaggedValue);
     entry.publishValue(newTaggedValue, newWeakValue);
   }
 
@@ -771,7 +779,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               Entry.tagValueAddress(valueAddress, expireAtMillis > 0L));
       if (weakValues) {
         entry.initializeValueState(
-            entry.valueAddress, prepareWeakValue(value, valueBytes, entry.valueAddress));
+            entry.valueAddress,
+            prepareWeakValue(entry, value, valueBytes, entry.valueAddress));
       }
       return entry;
     } catch (NativeMemory.AllocationLimitException rejected) {
@@ -908,7 +917,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         hit(context, entry);
       }
       Entry.ValueState observedState = entry.valueState();
-      V cached = weakValue(entry, value, observedState);
+      V cached = validatedWeakValue(context, entry, value, observedState);
       if (cached != null) {
         return cached;
       }
@@ -1172,7 +1181,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 }
                 context.bulkHit(entry);
                 Entry.ValueState observedState = entry.valueState();
-                V cached = weakValue(entry, value, observedState);
+                V cached = validatedWeakValue(context, entry, value, observedState);
                 if (cached != null) {
                   result.put(key, cached);
                   continue;
@@ -1527,7 +1536,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       }
       retirementPrepared = true;
       long newTaggedValue = Entry.tagValueAddress(replacement, expireAtMillis > 0L);
-      Entry.WeakValueSlot newWeakValue = prepareWeakValue(value, null, newTaggedValue);
+      Entry.WeakValueSlot newWeakValue =
+          prepareWeakValue(entry, value, null, newTaggedValue);
       entry.publishValue(newTaggedValue, newWeakValue);
       published = true;
       worker.retireValue(context, old, oldAllocation);
@@ -1801,6 +1811,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               + ", bulk operations="
               + activeBulkOperations.get());
     }
+    if (fingerprintScratchPool != null) {
+      fingerprintScratchPool.clear();
+    }
     synchronized (lifecycleLock) {
       closeState.compareAndSet(CLOSING, CLOSED);
     }
@@ -2068,29 +2081,103 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   @SuppressWarnings("unchecked")
-  private V weakValue(Entry entry, long rawValueAddress, Entry.ValueState state) {
+  private V validatedWeakValue(
+      ThreadContext context, Entry entry, long rawValueAddress, Entry.ValueState state) {
     if (!weakValues) {
       return null;
     }
     if (state == null || Entry.rawValueAddress(state.taggedValueAddress()) != rawValueAddress) {
       return null;
     }
+    if (state.fingerprintDisabled()) {
+      return null;
+    }
     Entry.WeakValueSlot slot = state.weakValue();
     if (slot == null || entry.valueAddress != state.taggedValueAddress()) {
       return null;
     }
-    return (V) slot.get();
+    Object cached = slot.get();
+    if (cached == null) {
+      return null;
+    }
+
+    int nativeLength = ValueBlock.length(rawValueAddress);
+
+    ByteBuffer scratch = context.enterFingerprintScratch(nativeLength);
+    if (scratch == null) {
+      if (nativeLength > ThreadContext.MAX_FINGERPRINT_BYTES) {
+        disableWeakReuse(entry, state);
+      }
+      return null;
+    }
+    try {
+      long nativeFingerprint;
+      try {
+        if (state.fingerprintReady()) {
+          nativeFingerprint = state.fingerprint();
+        } else {
+          ByteBuffer nativeValue =
+              context.readOnlyValueBuffer(ValueBlock.payloadAddress(rawValueAddress), nativeLength);
+          try {
+            nativeFingerprint = context.fingerprint(nativeValue, nativeLength);
+          } finally {
+            context.releaseReadOnlyValueBuffer();
+          }
+          state.tryPublishFingerprint(nativeFingerprint);
+        }
+
+        valueSerializer.serialize((V) cached, scratch);
+        if (scratch.position() != nativeLength) {
+          throw new IllegalArgumentException(
+              "value serializer wrote "
+                  + scratch.position()
+                  + " bytes, expected "
+                  + nativeLength);
+        }
+        long cachedFingerprint = context.fingerprint(scratch, nativeLength);
+        if (cachedFingerprint != nativeFingerprint) {
+          disableWeakReuse(entry, state);
+          return null;
+        }
+      } catch (RuntimeException failure) {
+        disableWeakReuse(entry, state);
+        return null;
+      }
+      if (!isCurrentWeakPublication(entry, rawValueAddress, state)) {
+        return null;
+      }
+      return (V) cached;
+    } finally {
+      context.exitFingerprintScratch();
+    }
+  }
+
+  private boolean isCurrentWeakPublication(
+      Entry entry, long rawValueAddress, Entry.ValueState state) {
+    if (state.fingerprintDisabled() || !entry.isAlive() || entry.valueState() != state) {
+      return false;
+    }
+    long taggedValue = entry.valueAddress;
+    if (Entry.rawValueAddress(taggedValue) != rawValueAddress) {
+      return false;
+    }
+    return !Entry.hasTtl(taggedValue)
+        || !ValueBlock.expired(rawValueAddress, ticker.currentTimeMillis());
+  }
+
+  private void disableWeakReuse(Entry entry, Entry.ValueState state) {
+    entry.disableWeakValue(state);
   }
 
   private Entry.WeakValueSlot prepareWeakValue(
-      Object value, byte[] valueBytes, long taggedValueAddress) {
+      Entry entry, Object value, byte[] valueBytes, long taggedValueAddress) {
     if (!weakValues) {
       return null;
     }
     if (valueBytes != null || value == null) {
       return null;
     }
-    return new Entry.WeakValueSlot(value, taggedValueAddress);
+    return new Entry.WeakValueSlot(value, taggedValueAddress, entry, weakValueQueue);
   }
 
   private void publishWeakValueIfCurrent(
@@ -2099,6 +2186,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return;
     }
     try {
+      if (observedState == null || observedState.fingerprintDisabled()) {
+        return;
+      }
       if (observedState == null || observedState.taggedValueAddress() != taggedValueAddress) {
         return;
       }
@@ -2106,8 +2196,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return;
       }
       Entry.WeakValueSlot replacement =
-          value == null ? null : new Entry.WeakValueSlot(value, taggedValueAddress);
-      Entry.ValueState next = new Entry.ValueState(taggedValueAddress, replacement);
+          value == null
+              ? null
+              : new Entry.WeakValueSlot(value, taggedValueAddress, entry, weakValueQueue);
+      Entry.ValueState next = observedState.withWeakValue(replacement);
       entry.compareAndSetValueState(observedState, next);
     } catch (OutOfMemoryError ignored) {
       // Weak-value backfill is an optimization; the native-deserialized result remains valid.

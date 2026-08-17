@@ -10,11 +10,15 @@ public interface CacheSerializer<T> {
    * @param value non-{@code null} object that needs to be serialized
    * @param buf bounded {@code ByteBuffer} into which serialization needs to happen. Value
    *     serialization receives a direct, non-array buffer; key serialization may use the cache's
-   *     reusable heap lookup buffer. In both cases the position starts at {@code 0}, limit and
-   *     capacity equal {@link #serializedSize}, and byte order is
-   *     {@link java.nio.ByteOrder#BIG_ENDIAN}. Implementations must write exactly
-   *     {@code serializedSize(value)} bytes and must not call {@link ByteBuffer#array()} or retain
-   *     the buffer after returning.
+   *     reusable heap lookup buffer. In both cases the position starts at {@code 0}, and byte
+   *     order is {@link java.nio.ByteOrder#BIG_ENDIAN}. For an ordinary write, limit and capacity
+   *     equal {@link #serializedSize}; during weak-value validation, limit and capacity instead
+   *     equal the native publication length. Implementations must use relative writes so that the
+   *     final position is the number of bytes written, must not call {@link ByteBuffer#array()},
+   *     and must not retain the buffer after returning. With weak-value reuse enabled, the cache
+   *     may call this method again during a cache hit to validate that the weak object still
+   *     represents the native publication; implementations must not mutate the value or depend on
+   *     time, randomness, buffer capacity, or other mutable external state during that validation.
    */
   void serialize(T value, ByteBuffer buf);
 
@@ -43,6 +47,9 @@ public interface CacheSerializer<T> {
    *
    * @param value non-{@code null} object to calculate serialized size for
    * @return serialized size of {@code t}
+   * @implNote The result must be deterministic for the value and agree with the number of bytes
+   *     written by {@link #serialize(Object, ByteBuffer)}. Weak-value validation may use the
+   *     native publication length directly, so this method is not guaranteed to run on a weak hit.
    */
   int serializedSize(T value);
 }

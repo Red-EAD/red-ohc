@@ -1,5 +1,6 @@
 package com.red.ohc.maintenance;
 
+import java.lang.ref.ReferenceQueue;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -61,6 +62,8 @@ public final class MaintenanceEventLoop
   private static final int WORK_ASYNC = 1 << 5;
   private static final int WORK_FLUSH = 1 << 6;
   private static final int WORK_CLOCK = 1 << 7;
+  private static final int WORK_WEAK_VALUES = 1 << 8;
+  private static final long WEAK_VALUE_CLEANUP_INTERVAL_NANOS = 1_000_000_000L;
 
   private final ConcurrentHashMap<Entry, Entry> data;
   private final NativeMemory.Memory memory;
@@ -127,6 +130,8 @@ public final class MaintenanceEventLoop
   private volatile boolean closing;
   private volatile boolean stopping;
   private volatile boolean parked;
+  private volatile ReferenceQueue<Object> weakValueQueue;
+  private boolean weakValueCleanupContinuation;
 
   /** Incremented before the actor's final empty-source check for an idle park. */
 
@@ -317,6 +322,14 @@ public final class MaintenanceEventLoop
 
   public void start() {
     thread.start();
+  }
+
+  /** Binds cache-local weak-value cleanup before the actor thread starts. */
+  public void bindWeakValueQueue(ReferenceQueue<Object> queue) {
+    if (thread.getState() != Thread.State.NEW) {
+      throw new IllegalStateException("weak-value queue must be bound before maintenance starts");
+    }
+    weakValueQueue = queue;
   }
 
   public void stop() {
@@ -835,6 +848,9 @@ public final class MaintenanceEventLoop
   private int maintenancePass(WorkPlan plan) {
     refreshClock(plan);
     int work = 0;
+    if (weakValueQueue != null) {
+      work += drainWeakValueReferences(batchLimits.general);
+    }
     if (plan.budget && budgetPressureRequested.getAndSet(false)) {
       if (budget.reclaimIdleCredits() != 0L) {
         work++;
@@ -909,6 +925,7 @@ public final class MaintenanceEventLoop
     return requestedWork.get() != 0
         || reclaimContinuation
         || pendingRemovalRetirement
+        || weakValueCleanupContinuation
         || !queue.isEmpty()
         || accessHint.get()
         || repairNeeded.get()
@@ -946,6 +963,7 @@ public final class MaintenanceEventLoop
   private boolean hasContinuationWork() {
     return reclaimContinuation
         || pendingRemovalRetirement
+        || weakValueCleanupContinuation
         || !queue.isEmpty()
         || accessHint.get()
         || repairNeeded.get()
@@ -985,6 +1003,8 @@ public final class MaintenanceEventLoop
         (retirements.hasPendingReclaim() || reclaimContinuation) && reclaimWorkDue(nowNanos);
     plan.eviction = (!stopping || plan.flush) && evictionWorkDue(nowNanos);
     plan.async = (plan.requested & WORK_ASYNC) != 0 || !asyncMutations.isEmpty();
+    plan.weakValues =
+        (plan.requested & WORK_WEAK_VALUES) != 0 || weakValueCleanupContinuation;
     plan.refreshClock =
         (plan.requested & WORK_CLOCK) != 0
             || plan.flush
@@ -1008,11 +1028,20 @@ public final class MaintenanceEventLoop
     parked = true;
     try {
       long ttlWakeNanos = nextTtlWakeNanos();
-      if (ttlWakeNanos == Long.MAX_VALUE) {
+      if (ttlWakeNanos == Long.MAX_VALUE && weakValueQueue == null) {
         LockSupport.park(this);
       } else {
-        long delay = ttlWakeNanos - System.nanoTime();
+        long delay =
+            ttlWakeNanos == Long.MAX_VALUE
+                ? WEAK_VALUE_CLEANUP_INTERVAL_NANOS
+                : ttlWakeNanos - System.nanoTime();
+        if (weakValueQueue != null) {
+          delay = Math.min(delay, WEAK_VALUE_CLEANUP_INTERVAL_NANOS);
+        }
         LockSupport.parkNanos(this, Math.max(1L, delay));
+      }
+      if (weakValueQueue != null && !stopping) {
+        requestWork(WORK_WEAK_VALUES);
       }
     } finally {
       parked = false;
@@ -1410,6 +1439,32 @@ public final class MaintenanceEventLoop
         saturatingAdd(sampleMonotonicNow(), deferredMutationRetryBackoffNanos);
     deferredMutationRetryBackoffNanos =
         Math.min(DEFERRED_MUTATION_RETRY_MAX_NANOS, deferredMutationRetryBackoffNanos << 1);
+  }
+
+  private int drainWeakValueReferences(int limit) {
+    ReferenceQueue<Object> queue = weakValueQueue;
+    if (queue == null || limit <= 0) {
+      weakValueCleanupContinuation = false;
+      return 0;
+    }
+    int processed = 0;
+    int cleared = 0;
+    while (processed < limit) {
+      Object reference = queue.poll();
+      if (reference == null) {
+        break;
+      }
+      processed++;
+      if (reference instanceof Entry.WeakValueSlot) {
+        Entry.WeakValueSlot slot = (Entry.WeakValueSlot) reference;
+        Entry owner = slot.owner();
+        if (owner != null && owner.clearWeakValueIfCurrent(slot)) {
+          cleared++;
+        }
+      }
+    }
+    weakValueCleanupContinuation = processed == limit;
+    return cleared;
   }
 
   private void resetDeferredMutationRetry() {
@@ -1936,6 +1991,7 @@ public final class MaintenanceEventLoop
       }
     }
     clearPendingMutationQueues();
+    drainWeakValueReferences(Integer.MAX_VALUE);
     dirtyReaderQueue.clear();
     dirtyReaderOverflowQueue.clear();
     accessHint.set(false);
@@ -2135,6 +2191,7 @@ public final class MaintenanceEventLoop
     private boolean eviction;
     private boolean allocation;
     private boolean async;
+    private boolean weakValues;
     private boolean flush;
     private boolean refreshClock;
 
@@ -2152,6 +2209,7 @@ public final class MaintenanceEventLoop
       eviction = false;
       allocation = false;
       async = false;
+      weakValues = false;
       flush = false;
       refreshClock = false;
       return this;
@@ -2174,6 +2232,7 @@ public final class MaintenanceEventLoop
           || eviction
           || allocation
           || async
+          || weakValues
           || flush;
     }
   }
