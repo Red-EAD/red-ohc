@@ -9,13 +9,16 @@ import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
 
@@ -26,6 +29,7 @@ import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
+import com.red.ohc.storage.Budget;
 
 public final class MaxSizeTest {
   private static final CacheSerializer<String> STRING =
@@ -118,6 +122,123 @@ public final class MaxSizeTest {
       assertEquals(cache.get("medium"), medium);
       assertEquals(cache.get("large"), large);
       assertTrue(cache.stats().liveWeight() > medium.length());
+    }
+  }
+
+  @Test
+  public void maxSizeDoesNotTrackNativeBudgetReservations() throws Exception {
+    OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>) newMaxSizeCache(8);
+    try {
+      assertTrue(cache.put("one", "value"));
+      assertEquals(budget(cache).reserved(), 0L);
+    } finally {
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void highWaterRejectionSkipsValueSizingButReplacementStillSizes() throws Exception {
+    AtomicInteger serializedSizes = new AtomicInteger();
+    CacheSerializer<String> countingValueSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            serializedSizes.incrementAndGet();
+            return STRING.serializedSize(value);
+          }
+        };
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(1)
+            .keySerializer(STRING)
+            .valueSerializer(countingValueSerializer)
+            .buildTyped();
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    pauseMaintenance(cache, paused, release);
+    try {
+      assertTrue(cache.put("one", "value-one"));
+      assertTrue(cache.put("two", "value-two"));
+      serializedSizes.set(0);
+
+      assertFalse(cache.put("three", "value-three"));
+      assertEquals(serializedSizes.get(), 0);
+
+      assertTrue(cache.put("one", "replacement"));
+      assertEquals(serializedSizes.get(), 1);
+    } finally {
+      release.countDown();
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void putAllSkipsValueSizingForHighWaterRejectedEntries() throws Exception {
+    AtomicInteger serializedSizes = new AtomicInteger();
+    CacheSerializer<String> countingValueSerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            serializedSizes.incrementAndGet();
+            return STRING.serializedSize(value);
+          }
+        };
+    OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .maxSize(1)
+            .keySerializer(STRING)
+            .valueSerializer(countingValueSerializer)
+            .buildTyped();
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    pauseMaintenance(cache, paused, release);
+    try {
+      serializedSizes.set(0);
+      Map<String, String> entries = new LinkedHashMap<>();
+      entries.put("one", "value-one");
+      entries.put("two", "value-two");
+      entries.put("three", "value-three");
+
+      assertEquals(cache.putAll(entries), 2);
+      assertEquals(serializedSizes.get(), 2);
+    } finally {
+      release.countDown();
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void replaceAsyncUsesTheUnboundedMaxSizeBudgetPath() throws Exception {
+    OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    try {
+      assertTrue(cache.put("one", "old"));
+      assertTrue(cache.replaceAsync("one", "old", "new", 0L).get(2L, TimeUnit.SECONDS));
+      assertEquals(cache.get("one"), "new");
+      assertEquals(budget(cache).reserved(), 0L);
+    } finally {
+      cache.close();
     }
   }
 
@@ -391,6 +512,12 @@ public final class MaxSizeTest {
     Field workerField = OffHeapCache.class.getDeclaredField("worker");
     workerField.setAccessible(true);
     return (MaintenanceEventLoop) workerField.get(cache);
+  }
+
+  private static Budget budget(OffHeapCache<?, ?> cache) throws Exception {
+    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
+    budgetField.setAccessible(true);
+    return (Budget) budgetField.get(cache);
   }
 
   private static void waitUntilParked(MaintenanceEventLoop worker) throws InterruptedException {

@@ -40,6 +40,26 @@ public class BudgetTest {
   }
 
   @Test
+  public void unboundedBudgetSkipsCreditAccountingAndStorage() throws Exception {
+    Budget budget = Budget.unbounded(4);
+
+    assertTrue(budget.tryReserve(1L, 0));
+    assertFalse(budget.tryReserve(0L, 0));
+    budget.refund(1L, 0);
+    budget.release(1L);
+
+    assertEquals(budget.reserved(), 0L);
+    assertEquals(budget.reclaimIdleCredits(), 0L);
+    assertFalse(budget.hasIdleCreditHint());
+    assertEquals(budget.availableBalance(), Long.MAX_VALUE);
+    assertEquals(budget.stripeCredit(0), 0L);
+    assertTrue(dirtyStripeQueue(budget) == null);
+
+    budget.clear();
+    assertEquals(budget.reserved(), 0L);
+  }
+
+  @Test
   public void rejectsInvalidReservationSizes() {
     Budget budget = new Budget(64L, 1);
 

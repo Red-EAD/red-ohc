@@ -62,6 +62,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final long defaultTtlMillis;
   private final Executor loaderExecutor;
   private final long closeTimeoutMillis;
+  private final boolean countBounded;
   private final long capacity;
   private final long byteCapacity;
   private final long maxSizeHighWatermark;
@@ -114,6 +115,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.loaderExecutor = loaderExecutor;
     this.closeTimeoutMillis = closeTimeoutMillis;
     boolean countBounded = maxSize > 0L;
+    this.countBounded = countBounded;
     this.capacity = countBounded ? -1L : capacity;
     this.byteCapacity = countBounded ? Long.MAX_VALUE : capacity;
     this.maxSizeHighWatermark =
@@ -146,7 +148,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     data.put(bootstrap, bootstrap);
     data.remove(bootstrap, bootstrap);
     this.memory = new NativeMemory.Memory(allocatorType, nativeHardLimit);
-    this.budget = new Budget(residentHardLimit, memory.writerStripeCount());
+    this.budget =
+        countBounded
+            ? Budget.unbounded(memory.writerStripeCount())
+            : new Budget(residentHardLimit, memory.writerStripeCount());
     this.contexts = ThreadLocal.withInitial(() -> new ThreadContext(null, fingerprintScratchPool));
     this.evictionContexts = evictionListener == null ? null : new ThreadContext(null);
     this.worker =
@@ -313,19 +318,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private boolean putOne(
       ThreadContext context, K key, V value, long expireAtMillis, boolean deferMaintenanceWake) {
-    Objects.requireNonNull(key, "key");
-    Objects.requireNonNull(value, "value");
-    rejectByteBufferValue(value);
     int keyLength = KeyEncoder.encode(keySerializer, key, context);
-    int valueLength = serializedSize(valueSerializer, value);
     return putSerialized(
         context,
         context.lookupKey,
         context.keyBytes,
         keyLength,
         value,
-        null,
-        valueLength,
         expireAtMillis,
         deferMaintenanceWake);
   }
@@ -352,14 +351,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       byte[] keyBytes,
       int keyLength,
       Object value,
-      byte[] valueBytes,
-      int valueLength,
       long requestedExpiry,
       boolean deferMaintenanceWake) {
-    if (value != null) {
-      rejectByteBufferValue(value);
-    }
-    long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
     worker.throwIfUnavailable();
     Entry existing;
     if (!enter(context)) {
@@ -371,11 +364,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       exit(context);
     }
     if (existing != null) {
+      int valueLength = serializedSize(valueSerializer, value);
+      long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
       return replaceExistingResult(
           context,
           existing,
           value,
-          valueBytes,
+          null,
           valueLength,
           expireAtMillis,
           deferMaintenanceWake);
@@ -383,13 +378,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (!admitNewEntry()) {
       return false;
     }
+    int valueLength = serializedSize(valueSerializer, value);
+    long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
     return insertNewEntry(
         context,
         lookup,
         keyBytes,
         keyLength,
         value,
-        valueBytes,
+        null,
         valueLength,
         expireAtMillis,
         deferMaintenanceWake);
@@ -686,7 +683,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (replacement != 0L) {
       freeBlock(replacement, newAllocation);
     }
-    budget.refund(newWeight, context.budgetStripeIndex());
+    refundBudget(context, newWeight);
   }
 
   private void cleanupFailedReplacement(
@@ -791,7 +788,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (keyAddress != 0L) {
         freeBlock(keyAddress, keyAllocation);
       }
-      budget.refund(totalWeight, context.budgetStripeIndex());
+      refundBudget(context, totalWeight);
       worker.requestAllocationPressure();
       return null;
     } catch (Throwable failure) {
@@ -801,7 +798,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (keyAddress != 0L) {
         freeBlock(keyAddress, keyAllocation);
       }
-      budget.refund(totalWeight, context.budgetStripeIndex());
+      refundBudget(context, totalWeight);
       throw failure;
     }
   }
@@ -1566,7 +1563,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         freeBlock(replacement, allocation);
       }
       if (!published && budgetReserved) {
-        budget.refund(weight, context.budgetStripeIndex());
+        refundBudget(context, weight);
       }
       if (writerHeld) {
         entry.finishWriter();
@@ -1909,16 +1906,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return closing || closeState.get() != OPEN;
   }
 
-  private boolean prepareRetirement(ThreadContext context, int records) {
-    worker.throwIfUnavailable();
-    return worker.prepareRetirement(context, records);
-  }
-
   private boolean reserveBudget(ThreadContext context, long weight) {
     if (weight <= 0L || weight > byteCapacity) {
       throw new IllegalArgumentException("entry allocation exceeds cache capacity");
     }
     worker.throwIfUnavailable();
+    if (countBounded) {
+      return true;
+    }
     if (budget.tryReserve(weight, context.budgetStripeIndex())) {
       return true;
     }
@@ -1927,6 +1922,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       worker.requestBudgetPressure();
     }
     return false;
+  }
+
+  private void refundBudget(ThreadContext context, long weight) {
+    if (!countBounded) {
+      budget.refund(weight, context.budgetStripeIndex());
+    }
   }
 
   @SuppressWarnings("unchecked")
@@ -2248,7 +2249,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void freeEntry(ThreadContext context, Entry entry, long valueAllocation) {
     freeBlock(Entry.rawValueAddress(entry.valueAddress), valueAllocation);
     freeBlock(entry.nativeKeyAddress, entry.keyAllocationLength());
-    budget.refund(entryWeight(entry, valueAllocation), context.budgetStripeIndex());
+    refundBudget(context, entryWeight(entry, valueAllocation));
   }
 
   private void freeBlock(long address, long allocation) {

@@ -50,6 +50,8 @@ public interface CacheSerializer<T> {
    * @implNote The result must be deterministic for the value and agree with the number of bytes
    *     written by {@link #serialize(Object, ByteBuffer)}. Weak-value validation may use the
    *     native publication length directly, so this method is not guaranteed to run on a weak hit.
+   *     A write may also be rejected by cache admission before this method is called; callers must
+   *     not rely on serializer side effects or exceptions for rejected writes.
    */
   int serializedSize(T value);
 }

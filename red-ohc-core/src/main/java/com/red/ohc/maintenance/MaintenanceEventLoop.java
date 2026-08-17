@@ -70,6 +70,7 @@ public final class MaintenanceEventLoop
   private final Budget budget;
   private final Ticker ticker;
   private final long capacity;
+  private final boolean countBounded;
   private volatile EvictionNotifier evictionNotifier;
   private final int queueCapacity;
   private final MpscArrayQueue<Entry> queue;
@@ -278,6 +279,7 @@ public final class MaintenanceEventLoop
     this.budget = budget;
     this.ticker = ticker;
     this.capacity = capacity;
+    this.countBounded = countBounded;
     this.evictionNotifier = evictionNotifier;
     if (Integer.bitCount(queueCapacity) != 1 || queueCapacity < 1_024) {
       throw new IllegalArgumentException("queueCapacity must be a power of two >= 1024");
@@ -851,8 +853,9 @@ public final class MaintenanceEventLoop
     if (weakValueQueue != null) {
       work += drainWeakValueReferences(batchLimits.general);
     }
-    if (plan.budget && budgetPressureRequested.getAndSet(false)) {
-      if (budget.reclaimIdleCredits() != 0L) {
+    if (plan.budget) {
+      boolean budgetRequested = budgetPressureRequested.getAndSet(false);
+      if (!countBounded && budgetRequested && budget.reclaimIdleCredits() != 0L) {
         work++;
       }
     }
@@ -1720,7 +1723,9 @@ public final class MaintenanceEventLoop
   private int reclaim(int limit) {
     long before = retirements.retiredBytes();
     int reclaimed = retirements.reclaim(readers, limit);
-    budget.release(before - retirements.retiredBytes());
+    if (!countBounded) {
+      budget.release(before - retirements.retiredBytes());
+    }
     // An active reader cannot be observed through a write-side queue event. Keep a bounded
     // QSBR deadline while it remains active so its ordinary exit need not perform a WakeGate
     // CAS on every cache operation. This is deadline-driven reclaim work, not idle polling.
@@ -2007,8 +2012,10 @@ public final class MaintenanceEventLoop
     retirements.freeAll();
     retirements.close();
     memory.closeArenas();
-    budget.reclaimIdleCredits();
-    budget.clear();
+    if (!countBounded) {
+      budget.reclaimIdleCredits();
+      budget.clear();
+    }
     readers.clear();
     evictionNotifier = null;
   }

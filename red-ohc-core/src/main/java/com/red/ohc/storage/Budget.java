@@ -16,6 +16,7 @@ public final class Budget {
   private static final int RESERVE_RETRY_WITH_SPIN = -1;
   private static final int RESERVE_FAILURE = -2;
 
+  private final boolean bounded;
   private final long capacity;
   private final AtomicLong available;
   private final AtomicLongArray stripeCredits;
@@ -29,31 +30,53 @@ public final class Budget {
 
   /** Test and low-level callers that do not have a NativeMemory stripe count use one stripe. */
   public Budget(long capacity) {
-    this(capacity, 1);
+    this(capacity, 1, true);
   }
 
   public Budget(long capacity, int stripeCount) {
-    if (capacity <= 0L) {
+    this(capacity, stripeCount, true);
+  }
+
+  /** Creates a budget-shaped lifecycle object without byte admission accounting. */
+  public static Budget unbounded(int stripeCount) {
+    return new Budget(Long.MAX_VALUE, stripeCount, false);
+  }
+
+  private Budget(long capacity, int stripeCount, boolean bounded) {
+    if (bounded && capacity <= 0L) {
       throw new IllegalArgumentException("capacity must be positive");
     }
     if (Integer.bitCount(stripeCount) != 1 || stripeCount <= 0) {
       throw new IllegalArgumentException("stripeCount must be a positive power of two");
     }
+    this.bounded = bounded;
     this.capacity = capacity;
-    this.available = new AtomicLong(capacity);
-    this.stripeCredits = new AtomicLongArray(stripeCount * CACHE_LINE_LONGS);
-    this.stripeRefills = new AtomicIntegerArray(stripeCount);
-    this.dirtyStripes = new AtomicIntegerArray(stripeCount);
-    this.stripeTokens = new StripeToken[stripeCount];
-    for (int stripe = 0; stripe < stripeCount; stripe++) {
-      stripeTokens[stripe] = new StripeToken(stripe);
+    if (bounded) {
+      this.available = new AtomicLong(capacity);
+      this.stripeCredits = new AtomicLongArray(stripeCount * CACHE_LINE_LONGS);
+      this.stripeRefills = new AtomicIntegerArray(stripeCount);
+      this.dirtyStripes = new AtomicIntegerArray(stripeCount);
+      this.stripeTokens = new StripeToken[stripeCount];
+      for (int stripe = 0; stripe < stripeCount; stripe++) {
+        stripeTokens[stripe] = new StripeToken(stripe);
+      }
+      this.dirtyStripeQueue = new MpscArrayQueue<>(Math.max(2, stripeCount));
+    } else {
+      this.available = null;
+      this.stripeCredits = null;
+      this.stripeRefills = null;
+      this.dirtyStripes = null;
+      this.stripeTokens = null;
+      this.dirtyStripeQueue = null;
     }
-    this.dirtyStripeQueue = new MpscArrayQueue<>(Math.max(2, stripeCount));
     this.stripeMask = stripeCount - 1;
   }
 
   /** Attempts admission without waiting indefinitely on a contended fixed stripe. */
   public boolean tryReserve(long bytes, int stripe) {
+    if (!bounded) {
+      return bytes > 0L;
+    }
     if (bytes <= 0L || bytes > capacity) {
       return false;
     }
@@ -129,7 +152,7 @@ public final class Budget {
 
   /** Returns a reservation to an already-cached fixed stripe. */
   public void refund(long bytes, int stripe) {
-    if (bytes <= 0L) {
+    if (!bounded || bytes <= 0L) {
       return;
     }
     addStripeCredit(stripeOffset(stripe), bytes);
@@ -137,7 +160,7 @@ public final class Budget {
 
   /** Returns reclaimed resident bytes directly to the global balance. */
   public void release(long bytes) {
-    if (bytes <= 0L) {
+    if (!bounded || bytes <= 0L) {
       return;
     }
     while (true) {
@@ -155,6 +178,9 @@ public final class Budget {
 
   /** Returns idle credit from every fixed stripe to the global balance. */
   public long reclaimIdleCredits() {
+    if (!bounded) {
+      return 0L;
+    }
     if (dirtyStripeQueue.isEmpty()) {
       return 0L;
     }
@@ -178,6 +204,9 @@ public final class Budget {
 
   /** A stats-only snapshot; producers are not stopped, so a concurrent value is approximate. */
   public long reserved() {
+    if (!bounded) {
+      return 0L;
+    }
     long free = available.get();
     for (int stripe = 0; stripe <= stripeMask; stripe++) {
       free += stripeCredits.get(stripeOffset(stripe));
@@ -191,6 +220,9 @@ public final class Budget {
   }
 
   public void clear() {
+    if (!bounded) {
+      return;
+    }
     for (int stripe = 0; stripe <= stripeMask; stripe++) {
       stripeCredits.set(stripeOffset(stripe), 0L);
       dirtyStripes.set(stripe, 0);
@@ -209,14 +241,23 @@ public final class Budget {
   }
 
   long availableBalance() {
+    if (!bounded) {
+      return Long.MAX_VALUE;
+    }
     return available.get();
   }
 
   long stripeCredit(int stripe) {
+    if (!bounded) {
+      return 0L;
+    }
     return stripeCredits.get(stripeOffset(stripe));
   }
 
   public boolean hasIdleCreditHint() {
+    if (!bounded) {
+      return false;
+    }
     return !dirtyStripeQueue.isEmpty();
   }
 
