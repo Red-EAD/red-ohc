@@ -23,11 +23,11 @@ import org.openjdk.jmh.infra.ThreadParams;
 /** MapDB direct-memory map benchmark using its byte[] serializers. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
-@Warmup(iterations = 5, time = 3)
-@Measurement(iterations = 5, time = 3)
+@Warmup(iterations = 4, time = 5)
+@Measurement(iterations = 6, time = 10)
 @Fork(
-    value = 3,
-    jvmArgsAppend = {"-Xms1g", "-Xmx1g"})
+    value = 1,
+    jvmArgsAppend = {"-Xms1g", "-Xmx1g", "-XX:MaxDirectMemorySize=1g"})
 @State(Scope.Benchmark)
 public class MapDbSerializedBenchmark {
   @Param({"32"})
@@ -36,10 +36,10 @@ public class MapDbSerializedBenchmark {
   @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_90_WRITE_10", "READ_100"})
+  @Param({"READ_100", "READ_90_WRITE_10", "WRITE_100"})
   public String workload;
 
-  @Param({"UNIFORM", "ZIPF_099"})
+  @Param({"UNIFORM"})
   public String distribution;
 
   private SerializedBenchmarkSupport.Dataset dataset;

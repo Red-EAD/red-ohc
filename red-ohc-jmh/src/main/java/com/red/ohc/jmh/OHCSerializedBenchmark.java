@@ -30,11 +30,11 @@ import com.red.ohc.cache.OffHeapCache;
 /** OHC generic API benchmark: raw byte[] codec plus off-heap cache access. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
-@Warmup(iterations = 5, time = 3)
-@Measurement(iterations = 5, time = 3)
+@Warmup(iterations = 4, time = 5)
+@Measurement(iterations = 6, time = 10)
 @Fork(
-    value = 3,
-    jvmArgsAppend = {"-Xms1g", "-Xmx1g"})
+    value = 1,
+    jvmArgsAppend = {"-Xms1g", "-Xmx1g", "-XX:MaxDirectMemorySize=1g"})
 @State(Scope.Benchmark)
 public class OHCSerializedBenchmark {
   @Param({"JNA"})
@@ -46,10 +46,10 @@ public class OHCSerializedBenchmark {
   @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_90_WRITE_10", "READ_100"})
+  @Param({"READ_100", "READ_90_WRITE_10", "WRITE_100"})
   public String workload;
 
-  @Param({"UNIFORM", "ZIPF_099"})
+  @Param({"UNIFORM"})
   public String distribution;
 
   private SerializedBenchmarkSupport.Dataset dataset;
@@ -119,7 +119,9 @@ public class OHCSerializedBenchmark {
     int index =
         dataset.accessSequence[Math.floorMod(state.cursor++, dataset.accessSequence.length)];
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
-      cache.put(dataset.keys[index], dataset.values[index]);
+      if (!cache.put(dataset.keys[index], dataset.values[index])) {
+        state.rejectedWrites++;
+      }
     } else {
       blackhole.consume(cache.get(dataset.keys[index]));
     }
@@ -129,7 +131,9 @@ public class OHCSerializedBenchmark {
     int index =
         dataset.accessSequence[Math.floorMod(state.cursor++, dataset.accessSequence.length)];
     if (SerializedBenchmarkSupport.isWrite(workload, ++state.operations)) {
-      cache.put(dataset.keys[index], dataset.values[index]);
+      if (!cache.put(dataset.keys[index], dataset.values[index])) {
+        state.rejectedWrites++;
+      }
     } else {
       state.blackhole = blackhole;
       blackhole.consume(cache.getDirect(dataset.keys[index], state));
@@ -147,6 +151,7 @@ public class OHCSerializedBenchmark {
   public static class ThreadState implements DirectValueConsumer {
     private long cursor;
     private long operations;
+    private long rejectedWrites;
     private Blackhole blackhole;
 
     @Setup(Level.Trial)
@@ -161,6 +166,14 @@ public class OHCSerializedBenchmark {
     @Override
     public void accept(ValueView value) {
       blackhole.consume(value.getLong(0));
+    }
+
+    @TearDown(Level.Iteration)
+    public void logRejectedWrites() {
+      if (rejectedWrites != 0L) {
+        System.err.println("OHC diagnostic put_false=" + rejectedWrites);
+      }
+      rejectedWrites = 0L;
     }
   }
 }

@@ -22,16 +22,14 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.infra.ThreadParams;
 
-import com.red.ohc.api.EncodedKey;
-
 /** Caffeine ordinary owned-byte[] counterpart to {@link OHCSerializedBenchmark}. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
-@Warmup(iterations = 10, time = 10)
-@Measurement(iterations = 10, time = 10)
+@Warmup(iterations = 4, time = 5)
+@Measurement(iterations = 6, time = 10)
 @Fork(
-    value = 3,
-    jvmArgsAppend = {"-Xms2g", "-Xmx2g"})
+    value = 1,
+    jvmArgsAppend = {"-Xms1g", "-Xmx1g", "-XX:MaxDirectMemorySize=1g"})
 @State(Scope.Benchmark)
 public class CaffeineReadBenchmark {
   private static final int WORKING_SET = 24_576;
@@ -42,29 +40,29 @@ public class CaffeineReadBenchmark {
   @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_90_WRITE_10", "READ_100"})
+  @Param({"READ_100", "READ_90_WRITE_10", "WRITE_100"})
   public String workload;
 
-  @Param({"UNIFORM", "ZIPF_099"})
+  @Param({"UNIFORM"})
   public String distribution;
 
-  private EncodedKey[] keys;
+  private SerializedBenchmarkSupport.RawKey[] keys;
   private byte[][] values;
   private int[] accessSequence;
-  private Cache<EncodedKey, byte[]> cache;
+  private Cache<SerializedBenchmarkSupport.RawKey, byte[]> cache;
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new EncodedKey[WORKING_SET];
+    keys = new SerializedBenchmarkSupport.RawKey[WORKING_SET];
     values = new byte[WORKING_SET][];
     for (int i = 0; i < WORKING_SET; i++) {
-      keys[i] = EncodedKey.copyOf(bytes(keyBytes, i));
+      keys[i] = SerializedBenchmarkSupport.RawKey.copyOf(bytes(keyBytes, i));
       values[i] = bytes(valueBytes, i * 31 + 7);
     }
     accessSequence =
         "ZIPF_099".equals(distribution) ? zipfSequence(WORKING_SET) : uniformSequence(WORKING_SET);
     cache =
-        Caffeine.<EncodedKey, byte[]>newBuilder()
+        Caffeine.<SerializedBenchmarkSupport.RawKey, byte[]>newBuilder()
             .maximumSize(SerializedBenchmarkSupport.CAPACITY_ENTRIES)
             .expireAfterWrite(Duration.ofMillis(SerializedBenchmarkSupport.TTL_MILLIS))
             .build();
@@ -99,11 +97,16 @@ public class CaffeineReadBenchmark {
     blackhole.consume(getOwned(cache, keys[index]));
   }
 
-  static void putOwned(Cache<EncodedKey, byte[]> cache, EncodedKey key, byte[] value) {
+  static void putOwned(
+      Cache<SerializedBenchmarkSupport.RawKey, byte[]> cache,
+      SerializedBenchmarkSupport.RawKey key,
+      byte[] value) {
     cache.put(key, SerializedBenchmarkSupport.ownedCopy(value));
   }
 
-  static byte[] getOwned(Cache<EncodedKey, byte[]> cache, EncodedKey key) {
+  static byte[] getOwned(
+      Cache<SerializedBenchmarkSupport.RawKey, byte[]> cache,
+      SerializedBenchmarkSupport.RawKey key) {
     return SerializedBenchmarkSupport.ownedCopy(cache.getIfPresent(key));
   }
 

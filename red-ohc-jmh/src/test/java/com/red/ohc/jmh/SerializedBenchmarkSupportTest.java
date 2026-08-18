@@ -8,8 +8,6 @@ import org.testng.Assert;
 import org.testng.SkipException;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.EncodedKey;
-
 public class SerializedBenchmarkSupportTest {
   @Test
   public void defaultPolicyUsesTheTargetBenchmarkShape() {
@@ -32,6 +30,22 @@ public class SerializedBenchmarkSupportTest {
     }
 
     Assert.assertEquals(writes, 100);
+  }
+
+  @Test
+  public void writeScheduleSupportsEveryWrite() {
+    for (long operation = 1; operation <= 1_000; operation++) {
+      Assert.assertTrue(
+          SerializedBenchmarkSupport.isWrite("WRITE_100", operation),
+          "WRITE_100 must write operation " + operation);
+    }
+  }
+
+  @Test
+  public void readScheduleNeverWrites() {
+    for (long operation = 1; operation <= 1_000; operation++) {
+      Assert.assertFalse(SerializedBenchmarkSupport.isWrite("READ_100", operation));
+    }
   }
 
   @Test
@@ -60,9 +74,10 @@ public class SerializedBenchmarkSupportTest {
 
   @Test
   public void caffeineAdapterCopiesOnWriteAndRead() {
-    com.github.benmanes.caffeine.cache.Cache<EncodedKey, byte[]> cache =
+    com.github.benmanes.caffeine.cache.Cache<SerializedBenchmarkSupport.RawKey, byte[]> cache =
         Caffeine.newBuilder().build();
-    EncodedKey key = EncodedKey.copyOf(new byte[] {7, 8, 9});
+    SerializedBenchmarkSupport.RawKey key =
+        SerializedBenchmarkSupport.RawKey.copyOf(new byte[] {7, 8, 9});
     byte[] source = new byte[] {10, 11, 12, 13};
     byte[] expected = source.clone();
 
@@ -81,6 +96,20 @@ public class SerializedBenchmarkSupportTest {
     byte[] secondRead = CaffeineReadBenchmark.getOwned(cache, key);
     Assert.assertEquals(secondRead, expected);
     Assert.assertNotSame(secondRead, firstRead);
+  }
+
+  @Test
+  public void rawKeyAdapterUsesContentEqualityAndOwnsItsBytes() {
+    byte[] source = new byte[] {7, 8, 9};
+    SerializedBenchmarkSupport.RawKey first =
+        SerializedBenchmarkSupport.RawKey.copyOf(source);
+    SerializedBenchmarkSupport.RawKey second =
+        SerializedBenchmarkSupport.RawKey.copyOf(new byte[] {7, 8, 9});
+
+    Assert.assertEquals(first, second);
+    Assert.assertEquals(first.hashCode(), second.hashCode());
+    source[0] = 99;
+    Assert.assertEquals(first, second);
   }
 
   @Test
@@ -104,6 +133,30 @@ public class SerializedBenchmarkSupportTest {
   }
 
   @Test
+  public void ehcacheCapacityFitsTheTargetResidentSet() {
+    SerializedBenchmarkSupport.Dataset dataset =
+        SerializedBenchmarkSupport.dataset(32, 5120, "UNIFORM");
+    SerializedBenchmarkSupport.EhcacheStore store =
+        SerializedBenchmarkSupport.newEhcache(
+            SerializedBenchmarkSupport.ehcacheCapacityBytes(32, 5120),
+            SerializedBenchmarkSupport.TTL_MILLIS);
+    try {
+      Cache<byte[], byte[]> cache = store.cache();
+      for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
+        cache.put(dataset.keys[i], dataset.values[i]);
+      }
+
+      int resident = 0;
+      for (Cache.Entry<byte[], byte[]> ignored : cache) {
+        resident++;
+      }
+      Assert.assertEquals(resident, SerializedBenchmarkSupport.CAPACITY_ENTRIES);
+    } finally {
+      store.close();
+    }
+  }
+
+  @Test
   public void mapDbDirectStoreRoundTripsTheRawByteCodecWithoutPersistence() {
     SerializedBenchmarkSupport.MapDbStore store =
         SerializedBenchmarkSupport.newMapDb(
@@ -115,6 +168,7 @@ public class SerializedBenchmarkSupportTest {
       store.map().put(key, value);
 
       Assert.assertEquals(store.map().get(key), value);
+      Assert.assertEquals(store.segmentCount(), SerializedBenchmarkSupport.MAPDB_SEGMENTS);
     } finally {
       store.close();
     }

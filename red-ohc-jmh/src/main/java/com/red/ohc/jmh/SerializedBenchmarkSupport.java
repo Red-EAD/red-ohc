@@ -17,7 +17,6 @@ import org.ehcache.config.builders.ExpiryPolicyBuilder;
 import org.ehcache.config.builders.ResourcePoolsBuilder;
 import org.ehcache.config.units.MemoryUnit;
 import org.ehcache.spi.serialization.Serializer;
-import org.mapdb.DB;
 import org.mapdb.DBMaker;
 import org.mapdb.HTreeMap;
 
@@ -31,6 +30,8 @@ public final class SerializedBenchmarkSupport {
   public static final int DEFAULT_KEY_BYTES = 32;
   public static final int DEFAULT_VALUE_BYTES = 5 * 1024;
   public static final int CAPACITY_ENTRIES = WORKING_SET * 4 / 5;
+  public static final int MAPDB_SEGMENTS = 16;
+  private static final int EHCACHE_ENTRY_OVERHEAD_BYTES = 256;
   public static final long TTL_MILLIS = TimeUnit.MINUTES.toMillis(10);
   public static final int ACCESS_SEQUENCE_LENGTH = 1 << 16;
 
@@ -56,7 +57,6 @@ public final class SerializedBenchmarkSupport {
   }
 
   public static MapDbStore newMapDb(long capacityEntries, long ttlMillis) {
-    DB db = DBMaker.memoryDirectDB().make();
     ScheduledExecutorService expiryExecutor =
         Executors.newSingleThreadScheduledExecutor(
             runnable -> {
@@ -64,15 +64,21 @@ public final class SerializedBenchmarkSupport {
               thread.setDaemon(true);
               return thread;
             });
+    @SuppressWarnings("unchecked")
+    org.mapdb.DB.HashMapMaker<byte[], byte[]> maker =
+        (org.mapdb.DB.HashMapMaker<byte[], byte[]>)
+            (org.mapdb.DB.HashMapMaker<?, ?>) DBMaker.memoryShardedHashMap(MAPDB_SEGMENTS);
     HTreeMap<byte[], byte[]> map =
-        db.hashMap("serialized", org.mapdb.Serializer.BYTE_ARRAY, org.mapdb.Serializer.BYTE_ARRAY)
+        maker
+            .keySerializer(org.mapdb.Serializer.BYTE_ARRAY)
+            .valueSerializer(org.mapdb.Serializer.BYTE_ARRAY)
             .expireAfterCreate(ttlMillis, TimeUnit.MILLISECONDS)
             .expireAfterUpdate(ttlMillis, TimeUnit.MILLISECONDS)
             .expireMaxSize(capacityEntries)
             .expireExecutor(expiryExecutor)
             .expireExecutorPeriod(TimeUnit.SECONDS.toMillis(1L))
-            .createOrOpen();
-    return new MapDbStore(db, map, expiryExecutor);
+            .create();
+    return new MapDbStore(map, expiryExecutor);
   }
 
   public static ChronicleMapStore newChronicleMap(int keyBytes, int valueBytes, long entries) {
@@ -99,10 +105,16 @@ public final class SerializedBenchmarkSupport {
   }
 
   public static boolean isWrite(String workload, long operation) {
-    if ("READ_90_WRITE_10".equals(workload)) {
-      return operation % 10L == 0L;
+    if ("READ_100".equals(workload)) {
+      return false;
     }
-    return "READ_95_WRITE_5".equals(workload) && operation % 20L == 0L;
+    if ("WRITE_100".equals(workload)) {
+      return true;
+    }
+    if ("READ_90_WRITE_10".equals(workload)) {
+      return Math.floorMod(operation, 10L) == 0L;
+    }
+    throw new IllegalArgumentException("unsupported workload: " + workload);
   }
 
   public static int threadStartOffset(int threadIndex, int threadCount, int sequenceLength) {
@@ -112,8 +124,13 @@ public final class SerializedBenchmarkSupport {
     return (int) ((long) sequenceLength * threadIndex / threadCount);
   }
 
-  public static long logicalCapacityBytes(int keyBytes, int valueBytes) {
-    return (long) CAPACITY_ENTRIES * (keyBytes + valueBytes);
+  /**
+   * Ehcache's off-heap tier charges serialized mapping metadata in addition to key and value
+   * bytes. The fixed headroom keeps the target 32B/5KiB preload resident at the same entry cap.
+   */
+  public static long ehcacheCapacityBytes(int keyBytes, int valueBytes) {
+    return (long) CAPACITY_ENTRIES
+        * (keyBytes + valueBytes + EHCACHE_ENTRY_OVERHEAD_BYTES);
   }
 
   public static long ohcCapacityBytes(int keyBytes, int valueBytes) {
@@ -124,8 +141,45 @@ public final class SerializedBenchmarkSupport {
     return entryWeight * CAPACITY_ENTRIES;
   }
 
+  public static int benchmarkThreadCount() {
+    int configured = Integer.getInteger("redohc.benchmark.threads", Runtime.getRuntime().availableProcessors());
+    if (configured <= 0) {
+      throw new IllegalArgumentException("redohc.benchmark.threads must be positive");
+    }
+    return configured;
+  }
+
   public static byte[] ownedCopy(byte[] value) {
     return value == null ? null : Arrays.copyOf(value, value.length);
+  }
+
+  /** Benchmark-local content key; it keeps raw-key semantics without using OHC's EncodedKey API. */
+  public static final class RawKey {
+    private final byte[] bytes;
+    private final int hashCode;
+
+    private RawKey(byte[] bytes) {
+      this.bytes = bytes;
+      this.hashCode = Arrays.hashCode(bytes);
+    }
+
+    public static RawKey copyOf(byte[] source) {
+      if (source == null) {
+        throw new NullPointerException("source");
+      }
+      return new RawKey(Arrays.copyOf(source, source.length));
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other == this
+          || (other instanceof RawKey && Arrays.equals(bytes, ((RawKey) other).bytes));
+    }
+
+    @Override
+    public int hashCode() {
+      return hashCode;
+    }
   }
 
   private static byte[] bytes(int length, int seed) {
@@ -217,13 +271,10 @@ public final class SerializedBenchmarkSupport {
   }
 
   public static final class MapDbStore implements AutoCloseable {
-    private final DB db;
     private final HTreeMap<byte[], byte[]> map;
     private final ScheduledExecutorService expiryExecutor;
 
-    private MapDbStore(
-        DB db, HTreeMap<byte[], byte[]> map, ScheduledExecutorService expiryExecutor) {
-      this.db = db;
+    private MapDbStore(HTreeMap<byte[], byte[]> map, ScheduledExecutorService expiryExecutor) {
       this.map = map;
       this.expiryExecutor = expiryExecutor;
     }
@@ -232,10 +283,14 @@ public final class SerializedBenchmarkSupport {
       return map;
     }
 
+    public int segmentCount() {
+      return map.getStores().length;
+    }
+
     @Override
     public void close() {
       try {
-        db.close();
+        map.close();
       } finally {
         expiryExecutor.shutdownNow();
       }

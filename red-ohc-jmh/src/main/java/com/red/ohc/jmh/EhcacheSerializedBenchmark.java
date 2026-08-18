@@ -23,11 +23,11 @@ import org.openjdk.jmh.infra.ThreadParams;
 /** Ehcache 3 in-memory off-heap benchmark using the same raw byte[] codec as OHC. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
-@Warmup(iterations = 5, time = 3)
-@Measurement(iterations = 5, time = 3)
+@Warmup(iterations = 4, time = 5)
+@Measurement(iterations = 6, time = 10)
 @Fork(
-    value = 3,
-    jvmArgsAppend = {"-Xms1g", "-Xmx1g"})
+    value = 1,
+    jvmArgsAppend = {"-Xms1g", "-Xmx1g", "-XX:MaxDirectMemorySize=1g"})
 @State(Scope.Benchmark)
 public class EhcacheSerializedBenchmark {
   @Param({"32"})
@@ -36,10 +36,10 @@ public class EhcacheSerializedBenchmark {
   @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_90_WRITE_10", "READ_100"})
+  @Param({"READ_100", "READ_90_WRITE_10", "WRITE_100"})
   public String workload;
 
-  @Param({"UNIFORM", "ZIPF_099"})
+  @Param({"UNIFORM"})
   public String distribution;
 
   private SerializedBenchmarkSupport.Dataset dataset;
@@ -49,11 +49,18 @@ public class EhcacheSerializedBenchmark {
   @Setup(Level.Trial)
   public void setup() {
     dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
-    long capacity = SerializedBenchmarkSupport.logicalCapacityBytes(keyBytes, valueBytes);
+    long capacity = SerializedBenchmarkSupport.ehcacheCapacityBytes(keyBytes, valueBytes);
     store = SerializedBenchmarkSupport.newEhcache(capacity, SerializedBenchmarkSupport.TTL_MILLIS);
     cache = store.cache();
     for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
       cache.put(dataset.keys[i], dataset.values[i]);
+    }
+    int resident = 0;
+    for (Cache.Entry<byte[], byte[]> ignored : cache) {
+      resident++;
+    }
+    if (resident != SerializedBenchmarkSupport.CAPACITY_ENTRIES) {
+      throw new IllegalStateException("Ehcache preload was evicted: size=" + resident);
     }
   }
 

@@ -2,6 +2,7 @@ package com.red.ohc.jmh;
 
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -18,17 +19,18 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.infra.ThreadParams;
+import redis.clients.jedis.Connection;
 import redis.clients.jedis.JedisPooled;
 import redis.clients.jedis.params.SetParams;
 
 /** Redis service benchmark with server-side maxmemory eviction and write TTL. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
-@Warmup(iterations = 5, time = 15)
-@Measurement(iterations = 8, time = 30)
+@Warmup(iterations = 4, time = 5)
+@Measurement(iterations = 6, time = 10)
 @Fork(
-    value = 3,
-    jvmArgsAppend = {"-Xms512m", "-Xmx512m"})
+    value = 1,
+    jvmArgsAppend = {"-Xms1g", "-Xmx1g", "-XX:MaxDirectMemorySize=1g"})
 @State(Scope.Benchmark)
 public class RedisSerializedBenchmark {
   private static final long REDIS_BOOTSTRAP_MAX_MEMORY_BYTES = 256L * 1024L * 1024L;
@@ -41,10 +43,10 @@ public class RedisSerializedBenchmark {
   @Param({"5120"})
   public int valueBytes;
 
-  @Param({"READ_90_WRITE_10", "READ_100"})
+  @Param({"READ_100", "READ_90_WRITE_10", "WRITE_100"})
   public String workload;
 
-  @Param({"UNIFORM", "ZIPF_099"})
+  @Param({"UNIFORM"})
   public String distribution;
 
   private SerializedBenchmarkSupport.Dataset dataset;
@@ -55,7 +57,13 @@ public class RedisSerializedBenchmark {
     dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
     String host = System.getProperty("redohc.redis.host", "127.0.0.1");
     int port = Integer.getInteger("redohc.redis.port", 6379);
-    redis = new JedisPooled(host, port);
+    int poolSize = SerializedBenchmarkSupport.benchmarkThreadCount();
+    GenericObjectPoolConfig<Connection> poolConfig = new GenericObjectPoolConfig<>();
+    poolConfig.setMaxTotal(poolSize);
+    poolConfig.setMaxIdle(poolSize);
+    poolConfig.setMinIdle(Math.min(poolSize, 1));
+    poolConfig.setBlockWhenExhausted(true);
+    redis = new JedisPooled(poolConfig, host, port);
     if (!"PONG".equals(redis.ping())) {
       throw new IllegalStateException("Redis ping failed");
     }
