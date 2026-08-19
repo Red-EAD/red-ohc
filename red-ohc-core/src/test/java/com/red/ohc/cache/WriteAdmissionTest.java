@@ -307,6 +307,76 @@ public class WriteAdmissionTest {
     }
   }
 
+  @Test
+  public void speculativeInsertPutsANewKey() {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .speculativeInsert(true)
+            .buildTyped()) {
+      assertTrue(cache.put("alpha", "one"));
+      assertEquals(cache.get("alpha"), "one");
+      assertEquals(cache.size(), 1L);
+    }
+  }
+
+  @Test
+  public void speculativeInsertOverwritesAnExistingKey() {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .speculativeInsert(true)
+            .buildTyped()) {
+      assertTrue(cache.put("k", "v1"));
+      assertTrue(cache.put("k", "v2"));
+      // The CAS-loss branch must free the candidate and replace the winner's value.
+      assertEquals(cache.get("k"), "v2");
+      assertEquals(cache.size(), 1L);
+    }
+  }
+
+  @Test(timeOut = 30_000L)
+  public void speculativeInsertConcurrentSameKeyConvergesToOneEntry() throws Exception {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .speculativeInsert(true)
+            .buildTyped()) {
+      int threads = 8;
+      java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+      java.util.List<Thread> workers = new java.util.ArrayList<>(threads);
+      for (int t = 0; t < threads; t++) {
+        final String value = "v" + t;
+        Thread worker =
+            new Thread(
+                () -> {
+                  try {
+                    start.await();
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                  }
+                  cache.put("shared", value);
+                });
+        workers.add(worker);
+        worker.start();
+      }
+      start.countDown();
+      for (Thread worker : workers) {
+        worker.join();
+      }
+      cache.flushAsync().join();
+      // Exactly one winner survives regardless of how many speculative candidates lost the CAS.
+      assertEquals(cache.size(), 1L);
+      assertEquals(cache.get("shared").length(), 2);
+    }
+  }
+
   private static int budgetStripeCount(OffHeapCache<?, ?> cache) throws Exception {
     Field budgetField = OffHeapCache.class.getDeclaredField("budget");
     budgetField.setAccessible(true);

@@ -23,6 +23,7 @@ public final class OHCacheBuilder<K, V> {
   private Eviction eviction = Eviction.S3_FIFO;
   private EvictionListener<K, V> evictionListener;
   private boolean weakValues;
+  private boolean speculativeInsert;
   private AllocatorType allocatorType = AllocatorType.JNA;
   private Executor loaderExecutor;
   private long closeTimeoutMillis = 30_000L;
@@ -112,6 +113,23 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
+  /**
+   * Skips the pre-read {@code get} on the put miss path for capacity-bounded caches: a new entry is
+   * allocated and published via {@code putIfAbsent} directly, falling back to a replace only when
+   * the CAS loses to a concurrent writer. This removes one CHM traversal plus its reader-epoch
+   * handshake per new-key put, which dominates insert-heavy workloads. On a CAS loss the candidate
+   * is freed and the existing entry is replaced, so correctness is unchanged.
+   *
+   * <p>The option has no effect on count-bounded ({@link #maxSize(long)}) caches: their write
+   * admission needs to know whether the key already exists before deciding to admit a new entry,
+   * so the pre-read cannot be elided. Defaults to {@code false} to preserve the historical
+   * read-then-write ordering.
+   */
+  public OHCacheBuilder<K, V> speculativeInsert(boolean enabled) {
+    this.speculativeInsert = enabled;
+    return this;
+  }
+
   public OHCacheBuilder<K, V> allocator(AllocatorType allocatorType) {
     this.allocatorType = Objects.requireNonNull(allocatorType, "allocatorType");
     return this;
@@ -153,6 +171,7 @@ public final class OHCacheBuilder<K, V> {
         eviction,
         evictionListener,
         weakValues,
+        speculativeInsert,
         capacity,
         maxSize);
   }

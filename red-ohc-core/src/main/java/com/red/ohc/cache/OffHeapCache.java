@@ -58,6 +58,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final CacheSerializer<V> valueSerializer;
   private final EvictionListener<K, V> evictionListener;
   private final boolean weakValues;
+  private final boolean speculativeInsert;
   private final Ticker ticker;
   private final long defaultTtlMillis;
   private final Executor loaderExecutor;
@@ -102,6 +103,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Eviction eviction,
       EvictionListener<K, V> evictionListener,
       boolean weakValues,
+      boolean speculativeInsert,
       long capacity,
       long maxSize) {
     ThreadContext.verifyNativeByteBufferSupported();
@@ -109,6 +111,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.valueSerializer = valueSerializer;
     this.evictionListener = evictionListener;
     this.weakValues = weakValues;
+    this.speculativeInsert = speculativeInsert;
     this.weakValueQueue = weakValues ? new ReferenceQueue<>() : null;
     this.weakValueStateStore = weakValues ? new WeakValueStateStore() : null;
     this.fingerprintScratchPool = weakValues ? new FingerprintScratchPool() : null;
@@ -170,7 +173,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 countBounded);
     worker.bindWeakValueQueue(weakValueQueue);
     worker.bindWeakValueStateStore(weakValueStateStore);
-    this.readerGuard = new ReaderGuard(worker, this::isClosing);
+    this.readerGuard = new ReaderGuard(worker, () -> closing);
     worker.start();
   }
 
@@ -361,6 +364,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long requestedExpiry,
       boolean deferMaintenanceWake) {
     worker.throwIfUnavailable();
+    if (speculativeInsert && !countBounded) {
+      return putSerializedSpeculative(
+          context, lookup, keyBytes, keyLength, value, requestedExpiry, deferMaintenanceWake);
+    }
     Entry existing;
     if (!enter(context)) {
       throw new IllegalStateException("cache is closed");
@@ -391,6 +398,35 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (countBounded && !admitNewEntry()) {
       return false;
     }
+    int valueLength = serializedSize(valueSerializer, value);
+    long keyAllocation = keyAllocationLength(keyLength);
+    long valueAllocation = ValueBlock.allocationLength(valueLength);
+    long totalWeight = allocationWeight(keyAllocation) + allocationWeight(valueAllocation);
+    ensureNewEntryFitsCapacity(totalWeight);
+    long expireAtMillis = requestedExpiry == DEFAULT_TTL ? defaultExpiry() : requestedExpiry;
+    return insertNewEntry(
+        context,
+        lookup,
+        keyBytes,
+        keyLength,
+        value,
+        null,
+        valueLength,
+        keyAllocation,
+        valueAllocation,
+        totalWeight,
+        expireAtMillis,
+        deferMaintenanceWake);
+  }
+
+  private boolean putSerializedSpeculative(
+      ThreadContext context,
+      LookupKey lookup,
+      byte[] keyBytes,
+      int keyLength,
+      Object value,
+      long requestedExpiry,
+      boolean deferMaintenanceWake) {
     int valueLength = serializedSize(valueSerializer, value);
     long keyAllocation = keyAllocationLength(keyLength);
     long valueAllocation = ValueBlock.allocationLength(valueLength);

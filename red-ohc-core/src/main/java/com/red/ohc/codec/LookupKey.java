@@ -59,7 +59,6 @@ public final class LookupKey {
     }
     Entry entry = (Entry) other;
     return entry.keyHash() == hash
-        && entry.keyHash64() == hash64
         && entry.keyLength() == length
         && NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, length);
   }

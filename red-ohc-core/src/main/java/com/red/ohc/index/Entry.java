@@ -156,11 +156,8 @@ public final class Entry {
 
   public void initializeNativeMetadata() {
     long metadata = nativeMetadataAddress();
-    NativeMemory.putInt(metadata + POLICY_META_OFFSET, POLICY_NONE);
+    NativeMemory.setMemory(metadata, NATIVE_METADATA_BYTES, (byte) 0);
     NativeMemory.putInt(metadata + TIMER_LOCATION_OFFSET, TIMER_UNSCHEDULED);
-    NativeMemory.putLong(metadata + TIMER_DEADLINE_OFFSET, 0L);
-    NativeMemory.putLong(metadata + MAINTENANCE_META_OFFSET, 0L);
-    NativeMemory.putLong(metadata + POLICY_BYTE_WEIGHT_OFFSET, 0L);
   }
 
   /** Immutable token joining a native value address and its optional weak Java object. */
@@ -316,7 +313,11 @@ public final class Entry {
       return false;
     }
     Entry entry = (Entry) other;
-    if (keyMeta != entry.keyMeta || keyHash64() != entry.keyHash64()) {
+    // keyMeta already fuses chmHash + keyLength, so it rejects both spread collisions and
+    // length mismatches from the heap cache line. The hash64 native read is dropped for the
+    // same reason as LookupKey.equals: a hit always matches it, and the memcmp below is
+    // authoritative while reading the same native key block.
+    if (keyMeta != entry.keyMeta) {
       return false;
     }
     return keyLength() == 0

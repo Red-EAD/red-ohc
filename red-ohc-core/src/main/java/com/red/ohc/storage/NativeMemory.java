@@ -468,6 +468,11 @@ public final class NativeMemory {
     U.putByte(address, value);
   }
 
+  /** Fills a contiguous native range with one byte value. */
+  public static void setMemory(long address, long bytes, byte value) {
+    U.setMemory(address, bytes, value);
+  }
+
   public static void copy(byte[] source, int sourceOffset, long destination, long bytes) {
     U.copyMemory(source, BYTE_ARRAY_BASE + sourceOffset, null, destination, bytes);
   }
