@@ -10,7 +10,6 @@ import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -857,73 +856,55 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void dirtyReaderSignalUsesOneTokenAndRequeuesAfterTheDrainLimit() throws Exception {
+  public void accessScanDrainsMultipleReaderRingsAndRotatesAfterTheBatchLimit() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     ReaderRegistry readers = new ReaderRegistry();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
-    ReaderSlot slot = new ReaderSlot();
-    slot.access = new AccessRing();
-    slot.access.offer(EntryTestSupport.entry(memory, 0, 1, 0L), 1L);
-    slot.access.offer(EntryTestSupport.entry(memory, 0, 2, 0L), 1L);
+    ReaderSlot first = new ReaderSlot();
+    ReaderSlot second = new ReaderSlot();
+    first.access = new AccessRing();
+    second.access = new AccessRing();
+    first.access.offer(EntryTestSupport.entry(memory, 0, 1, 0L), 1L);
+    first.access.offer(EntryTestSupport.entry(memory, 0, 2, 0L), 1L);
+    second.access.offer(EntryTestSupport.entry(memory, 0, 3, 0L), 1L);
+    second.access.offer(EntryTestSupport.entry(memory, 0, 4, 0L), 1L);
     try {
-      loop.signalAccess(slot);
-      loop.signalAccess(slot);
-
-      Field field = MaintenanceEventLoop.class.getDeclaredField("dirtyReaderQueue");
-      field.setAccessible(true);
-      Queue<?> dirtyReaders = (Queue<?>) field.get(loop);
-      assertEquals(dirtyReaders.size(), 1, "a dirty reader must publish one coalesced token");
+      loop.registerReader(first);
+      loop.registerReader(second);
 
       Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainAccesses", int.class);
       drain.setAccessible(true);
-      assertEquals(drain.invoke(loop, 1), 1);
-      assertEquals(dirtyReaders.size(), 1, "remaining ring data must requeue the same reader");
+      assertEquals(drain.invoke(loop, 2), 2);
+      assertEquals(drain.invoke(loop, 2), 2);
+      assertTrue(first.access.isEmpty());
+      assertTrue(second.access.isEmpty());
     } finally {
       memory.closeArenas();
     }
   }
 
   @Test
-  public void dirtyReaderOverflowRetainsTokensWhenTheReusableQueueIsFull() throws Exception {
+  public void readerRegistrationRequestsTheColdAccessScanWake() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU,
-            new ReaderRegistry(), 1_024);
-    List<ReaderSlot> slots = new ArrayList<>(1_025);
+            new ReaderRegistry());
     try {
-      for (int i = 0; i < 1_025; i++) {
-        ReaderSlot slot = new ReaderSlot();
-        slot.access = new AccessRing();
-        slot.access.offer(EntryTestSupport.entry(memory, 0, i + 1, 0L), 1L);
-        slots.add(slot);
-        loop.signalAccess(slot);
-      }
-
-      Field overflowField =
-          MaintenanceEventLoop.class.getDeclaredField("dirtyReaderOverflowQueue");
-      overflowField.setAccessible(true);
-      Queue<?> overflow = (Queue<?>) overflowField.get(loop);
-      assertEquals(overflow.size(), 1, "the full fixed queue must spill its token");
-
-      Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainAccesses", int.class);
-      drain.setAccessible(true);
-      assertEquals(drain.invoke(loop, 1_024), 1_024);
-      assertEquals(drain.invoke(loop, 1_024), 1);
-      assertTrue(overflow.isEmpty(), "overflow tokens must be drained");
-      for (ReaderSlot slot : slots) {
-        assertFalse(slot.hasAccessPending(), "draining a token must clear its pending state");
-        assertTrue(slot.access.isEmpty(), "draining a token must consume its access ring");
-      }
+      loop.registerReader(new ReaderSlot());
+      Field requestedWork = MaintenanceEventLoop.class.getDeclaredField("requestedWork");
+      requestedWork.setAccessible(true);
+      AtomicInteger requested = (AtomicInteger) requestedWork.get(loop);
+      assertTrue(requested.get() != 0, "the first reader must cold-wake the maintenance actor");
     } finally {
       memory.closeArenas();
     }
   }
 
   @Test
-  public void readerRegistrationDoesNotWakeAnIdleWorker() throws Exception {
+  public void readerRegistrationStillLetsAnEmptyCacheParkBetweenScanWindows() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -937,9 +918,11 @@ public class MaintenanceEventLoopTest {
     try {
       loop.start();
       waitUntilParked(loop);
-      loop.registerReader(new ReaderSlot());
-      Thread.sleep(10L);
-      assertTrue(loop.isParked(), "registering a reader is not maintenance work");
+      ReaderSlot slot = new ReaderSlot();
+      loop.registerReader(slot);
+      waitForAccessScanActive(loop);
+      waitUntilParked(loop);
+      assertTrue(loop.isParked(), "an empty cache must park between periodic access scans");
     } finally {
       loop.stop();
       loop.join(1_000L);
@@ -1192,15 +1175,14 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void publishedAccessHintDrainsCountersWithoutScanningEveryIdlePass() throws Exception {
+  public void actorAccessScanDrainsCountersWithoutReaderSideSignal() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     ReaderRegistry readers = new ReaderRegistry();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
     ThreadContext context = new ThreadContext(null);
-    readers.register(context.slot);
-    context.bindMaintenance(loop);
+    loop.registerReader(context.slot);
     loop.start();
     try {
       Entry entry = EntryTestSupport.entry(memory, 0, 91, 0L);
@@ -1214,6 +1196,60 @@ public class MaintenanceEventLoopTest {
     } finally {
       loop.stop();
       loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void flushWaitsForEveryRegisteredReaderRingToDrain() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry readers = new ReaderRegistry();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
+    ReaderSlot first = new ReaderSlot();
+    ReaderSlot second = new ReaderSlot();
+    first.access = new AccessRing();
+    second.access = new AccessRing();
+    Entry entry = EntryTestSupport.entry(memory, 0, 92, 0L);
+    for (int i = 0; i < 256; i++) {
+      assertTrue(first.access.offer(entry, 1L));
+      assertTrue(second.access.offer(entry, 1L));
+    }
+    loop.registerReader(first);
+    loop.registerReader(second);
+    loop.start();
+    try {
+      loop.flush().join();
+      assertTrue(first.access.isEmpty(), "flush must drain the first reader ring");
+      assertTrue(second.access.isEmpty(), "flush must drain the second reader ring");
+    } finally {
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void closeFinalDrainConsumesPublishedReaderRingData() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry readers = new ReaderRegistry();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, new Budget(1 << 20), Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers);
+    ReaderSlot slot = new ReaderSlot();
+    slot.access = new AccessRing();
+    Entry entry = EntryTestSupport.entry(memory, 0, 93, 0L);
+    for (int i = 0; i < 256; i++) {
+      assertTrue(slot.access.offer(entry, 1L));
+    }
+    loop.registerReader(slot);
+    loop.start();
+    try {
+      loop.stop();
+      loop.join(1_000L);
+      assertTrue(slot.access.isEmpty(), "close must final-drain already-published access data");
+    } finally {
       memory.closeArenas();
     }
   }
@@ -2693,6 +2729,18 @@ public class MaintenanceEventLoopTest {
       Thread.sleep(1L);
     }
     assertTrue(loop.isParked(), "maintenance actor did not park");
+  }
+
+  private static void waitForAccessScanActive(MaintenanceEventLoop loop)
+      throws Exception {
+    long deadline = System.nanoTime() + 1_000_000_000L;
+    while (!Boolean.TRUE.equals(getField(loop, "accessScanActive"))
+        && System.nanoTime() < deadline) {
+      Thread.yield();
+    }
+    assertTrue(
+        Boolean.TRUE.equals(getField(loop, "accessScanActive")),
+        "reader registration did not activate the actor access scan");
   }
 
   private static void waitForMonotonicCalls(CountingTicker ticker, int expected) {

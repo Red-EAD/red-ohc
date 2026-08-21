@@ -18,7 +18,7 @@ import org.testng.annotations.Test;
 
 public final class ReaderRegistryTest {
   @Test
-  public void registrationPublishesAnActorScanArrayBeforeTheReaderCanEnter() {
+  public void registrationPublishesAnActorScanArrayBeforeTheReaderCanEnter() throws Exception {
     ReaderRegistry registry = new ReaderRegistry();
     ReaderSlot slot = new ReaderSlot();
 
@@ -26,7 +26,9 @@ public final class ReaderRegistryTest {
     registry.register(slot);
 
     assertEquals(registry.registeredCount(), 1);
-    assertSame(registry.references().iterator().next().get(), slot);
+    WeakReference<ReaderSlot>[] snapshot = accessScanSnapshot(registry);
+    assertEquals(snapshot.length, 1);
+    assertSame(snapshot[0].get(), slot);
   }
 
   @Test
@@ -34,7 +36,7 @@ public final class ReaderRegistryTest {
     ReaderRegistry registry = new ReaderRegistry();
     ReaderSlot slot = new ReaderSlot();
     registry.register(slot);
-    WeakReference<ReaderSlot> reference = registry.references().iterator().next();
+    WeakReference<ReaderSlot> reference = accessScanSnapshot(registry)[0];
 
     reference.clear();
     assertTrue(
@@ -84,7 +86,7 @@ public final class ReaderRegistryTest {
           for (int scan = 0; scan < 100; scan++) {
             System.gc();
             registry.cleanupCollected(64);
-            for (WeakReference<ReaderSlot> reference : registry.references()) {
+            for (WeakReference<ReaderSlot> reference : accessScanSnapshot(registry)) {
               assertNotNull(reference);
             }
           }
@@ -104,5 +106,13 @@ public final class ReaderRegistryTest {
     Method method = ReaderRegistry.class.getDeclaredMethod("cleanupCollected", int.class);
     method.setAccessible(true);
     return (Integer) method.invoke(registry, limit);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static WeakReference<ReaderSlot>[] accessScanSnapshot(ReaderRegistry registry)
+      throws Exception {
+    Method method = ReaderRegistry.class.getDeclaredMethod("accessScanSnapshot");
+    method.setAccessible(true);
+    return (WeakReference<ReaderSlot>[]) method.invoke(registry);
   }
 }

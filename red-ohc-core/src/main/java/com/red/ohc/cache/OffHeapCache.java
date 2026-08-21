@@ -2020,7 +2020,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     ThreadContext context = contexts.get();
     if (!context.isRegistered()) {
-      context.bindMaintenance(worker);
       context.markRegistered();
       worker.registerReader(context.slot);
     }

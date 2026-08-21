@@ -7,7 +7,6 @@ import java.util.Set;
 
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
-import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.maintenance.ReliableRemovalQueue;
 import com.red.ohc.maintenance.RetirementQueue;
 import com.red.ohc.storage.WriterArena;
@@ -37,7 +36,6 @@ public final class ThreadContext {
   private WriterState writerState;
   private long readSequence;
   private long accessSequence;
-  private MaintenanceEventLoop maintenance;
   private int bulkReadDepth;
   private boolean bulkReadChanged;
   private final FingerprintScratchPool fingerprintScratchPool;
@@ -432,7 +430,7 @@ public final class ThreadContext {
     bulkReadChanged = true;
   }
 
-  /** Publishes one batch of read counters and one worker hint instead of one per key. */
+  /** Publishes one batch of read counters instead of one per key. */
   public void finishBulkRead() {
     if (bulkReadDepth == 0) {
       return;
@@ -442,15 +440,11 @@ public final class ThreadContext {
     }
     if (bulkReadChanged) {
       publish();
-      MaintenanceEventLoop loop = maintenance;
-      if (loop != null) {
-        loop.signalAccess(slot);
-      }
     }
     bulkReadChanged = false;
   }
 
-  /** Delivers every hit to the policy stream; only an empty-to-nonempty transition wakes it. */
+  /** Delivers every sampled hit to this thread's actor-owned access ring. */
   public void access(Entry entry) {
     if ((++accessSequence & 15L) != 0L) {
       return;
@@ -459,13 +453,7 @@ public final class ThreadContext {
   }
 
   private void publishSampledAccess(Entry entry) {
-    if (!accessRing().offer(entry, entry.generation())) {
-      return;
-    }
-    MaintenanceEventLoop loop = maintenance;
-    if (loop != null) {
-      loop.signalAccess(slot);
-    }
+    accessRing().offer(entry, entry.generation());
   }
 
   public void finishRead(long sequence) {
@@ -477,26 +465,11 @@ public final class ThreadContext {
 
   private void publishReadCounters() {
     publish();
-    // Global counters are deliberately decoupled from the policy stream. This bounded
-    // stats publication may wake the actor even when an earlier access burst was already
-    // drained; hit delivery itself still signals only on an empty-to-nonempty ring edge.
-    MaintenanceEventLoop loop = maintenance;
-    if (loop != null) {
-      loop.signalAccess(slot);
-    }
   }
 
   /** Flushes sub-threshold read counters when a control-plane barrier is requested. */
   public void flushRead() {
     publish();
-    MaintenanceEventLoop loop = maintenance;
-    if (loop != null) {
-      loop.signalAccess(slot);
-    }
-  }
-
-  public void bindMaintenance(MaintenanceEventLoop maintenance) {
-    this.maintenance = maintenance;
   }
 
   public void markRetirementPublished() {

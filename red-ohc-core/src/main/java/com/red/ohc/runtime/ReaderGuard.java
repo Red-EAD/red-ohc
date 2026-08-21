@@ -31,7 +31,6 @@ public final class ReaderGuard {
 
   private boolean enter(ThreadContext context, boolean rejectClosing) {
     if (!context.isRegistered()) {
-      context.bindMaintenance(worker);
       context.markRegistered();
       worker.registerReader(context.slot);
     }

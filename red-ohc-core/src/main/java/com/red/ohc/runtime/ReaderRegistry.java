@@ -13,13 +13,25 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class ReaderRegistry {
   private static final int REGISTER_CLEANUP_LIMIT = 4;
+  @SuppressWarnings("unchecked")
+  private static final WeakReference<ReaderSlot>[] EMPTY_SCAN_SNAPSHOT = new WeakReference[0];
 
   private final ReferenceQueue<ReaderSlot> collectedReaders = new ReferenceQueue<>();
   private final Set<WeakReference<ReaderSlot>> slots = ConcurrentHashMap.newKeySet();
+  private final Object snapshotLock = new Object();
+  private volatile WeakReference<ReaderSlot>[] accessScanSnapshot = EMPTY_SCAN_SNAPSHOT;
 
   public void register(ReaderSlot slot) {
-    cleanupCollected(REGISTER_CLEANUP_LIMIT);
-    slots.add(new IdentityWeakReference(slot, collectedReaders));
+    synchronized (snapshotLock) {
+      cleanupCollectedLocked(REGISTER_CLEANUP_LIMIT);
+      slots.add(new IdentityWeakReference(slot, collectedReaders));
+      rebuildAccessScanSnapshotLocked();
+    }
+  }
+
+  /** Actor-owned access scan view; the array and its elements retain only weak reader references. */
+  public WeakReference<ReaderSlot>[] accessScanSnapshot() {
+    return accessScanSnapshot;
   }
 
   /** Weakly consistent live view for actor and close-side scans. */
@@ -32,6 +44,16 @@ public final class ReaderRegistry {
     if (limit <= 0) {
       return 0;
     }
+    synchronized (snapshotLock) {
+      int removed = cleanupCollectedLocked(limit);
+      if (removed != 0) {
+        rebuildAccessScanSnapshotLocked();
+      }
+      return removed;
+    }
+  }
+
+  private int cleanupCollectedLocked(int limit) {
     int removed = 0;
     for (int processed = 0; processed < limit; processed++) {
       Reference<? extends ReaderSlot> reference = collectedReaders.poll();
@@ -93,13 +115,32 @@ public final class ReaderRegistry {
   }
 
   public void clear() {
+    synchronized (snapshotLock) {
+      for (WeakReference<ReaderSlot> reference : slots) {
+        reference.clear();
+      }
+      slots.clear();
+      while (collectedReaders.poll() != null) {
+        // Drain references already queued before shutdown.
+      }
+      accessScanSnapshot = EMPTY_SCAN_SNAPSHOT;
+    }
+  }
+
+  private void rebuildAccessScanSnapshotLocked() {
+    @SuppressWarnings("unchecked")
+    WeakReference<ReaderSlot>[] snapshot = new WeakReference[slots.size()];
+    int index = 0;
     for (WeakReference<ReaderSlot> reference : slots) {
-      reference.clear();
+      snapshot[index++] = reference;
     }
-    slots.clear();
-    while (collectedReaders.poll() != null) {
-      // Drain references already queued before shutdown.
+    if (index != snapshot.length) {
+      @SuppressWarnings("unchecked")
+      WeakReference<ReaderSlot>[] compacted = new WeakReference[index];
+      System.arraycopy(snapshot, 0, compacted, 0, index);
+      snapshot = compacted;
     }
+    accessScanSnapshot = snapshot;
   }
 
   int registeredCount() {

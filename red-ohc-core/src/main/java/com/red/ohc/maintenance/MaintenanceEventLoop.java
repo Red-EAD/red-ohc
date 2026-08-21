@@ -1,6 +1,7 @@
 package com.red.ohc.maintenance;
 
 import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -57,7 +58,7 @@ public final class MaintenanceEventLoop
 
   private static final int WORK_MUTATION = 1;
   private static final int WORK_REMOVAL = 1 << 1;
-  private static final int WORK_ACCESS = 1 << 2;
+  private static final int WORK_ACCESS_SCAN = 1 << 2;
   private static final int WORK_PRESSURE = 1 << 3;
   private static final int WORK_RETIREMENT = 1 << 4;
   private static final int WORK_ASYNC = 1 << 5;
@@ -106,12 +107,6 @@ public final class MaintenanceEventLoop
 
   private long deferredMutationRetryNanos = Long.MAX_VALUE;
   private long deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
-  private final AtomicBoolean accessHint = new AtomicBoolean();
-  /** Reusable normal-path storage; a steady access stream must not allocate queue nodes. */
-  private final MpscArrayQueue<ReaderSlot> dirtyReaderQueue;
-  /** Bounded-queue overflow is rare and must retain tokens rather than dropping them. */
-  private final ConcurrentLinkedQueue<ReaderSlot> dirtyReaderOverflowQueue =
-      new ConcurrentLinkedQueue<>();
   private final ReaderRegistry readers;
   private final RetirementQueue retirements;
   private final int retirementRecordsPerStripe;
@@ -135,6 +130,10 @@ public final class MaintenanceEventLoop
   private volatile ReferenceQueue<Object> weakValueQueue;
   private volatile WeakValueStateStore weakValueStateStore;
   private boolean weakValueCleanupContinuation;
+
+  /** Actor-owned cursor and liveness marker for the weak reader access scan snapshot. */
+  private int accessScanCursor;
+  private boolean accessScanActive;
 
   /** Incremented before the actor's final empty-source check for an idle park. */
 
@@ -288,7 +287,6 @@ public final class MaintenanceEventLoop
     }
     this.queueCapacity = queueCapacity;
     this.queue = new MpscArrayQueue<>(queueCapacity);
-    this.dirtyReaderQueue = new MpscArrayQueue<>(queueCapacity);
     int shardCount = 1;
     int requestedShards = Math.min(16, Math.max(1, queueCapacity / 1_024));
     while (shardCount < requestedShards) {
@@ -486,20 +484,9 @@ public final class MaintenanceEventLoop
 
   public void registerReader(ReaderSlot slot) {
     readers.register(slot);
-  }
-
-  /** Reader-side access publication is the only reader activity that needs to wake the actor. */
-  public void signalAccess(ReaderSlot slot) {
-    if (slot == null) {
-      throw new NullPointerException("slot");
-    }
-    if (!slot.markAccessPending()) {
-      return;
-    }
-    publishDirtyReader(slot);
-    if (accessHint.compareAndSet(false, true)) {
-      requestWork(WORK_ACCESS);
-    }
+    // Registration is cold relative to cache reads. It wakes the actor once so the actor can
+    // install the periodic scan state; subsequent access publication is ring-local only.
+    requestWork(WORK_ACCESS_SCAN);
   }
 
   /** ReaderGuard calls this only after an active read becomes quiescent during close. */
@@ -940,7 +927,7 @@ public final class MaintenanceEventLoop
         || pendingRemovalRetirement
         || weakValueCleanupContinuation
         || !queue.isEmpty()
-        || accessHint.get()
+        || (!stopping && accessScanActive)
         || repairNeeded.get()
         || allocationPressureRequested.get()
         || budgetPressureRequested.get()
@@ -960,7 +947,6 @@ public final class MaintenanceEventLoop
         || reclaimContinuation
         || pendingRemovalRetirement
         || !queue.isEmpty()
-        || accessHint.get()
         || repairNeeded.get()
         || allocationPressureRequested.get()
         || budgetPressureRequested.get()
@@ -978,7 +964,7 @@ public final class MaintenanceEventLoop
         || pendingRemovalRetirement
         || weakValueCleanupContinuation
         || !queue.isEmpty()
-        || accessHint.get()
+        || (!stopping && accessScanActive)
         || repairNeeded.get()
         || allocationPressureRequested.get()
         || budgetPressureRequested.get()
@@ -1009,7 +995,10 @@ public final class MaintenanceEventLoop
     plan.mutations = (plan.requested & WORK_MUTATION) != 0 || !queue.isEmpty();
     plan.repair = (plan.requested & WORK_MUTATION) != 0 || repairNeeded.get();
     plan.deferred = !deferredMutations.isEmpty() && deferredMutationWorkDue();
-    plan.access = (plan.requested & WORK_ACCESS) != 0 || accessHint.get();
+    plan.access =
+        (plan.requested & WORK_ACCESS_SCAN) != 0
+            || plan.flush
+            || (!stopping && accessScanActive);
     plan.ttl = ttlWorkDue() && (!stopping || plan.flush);
     plan.seal = (plan.requested & WORK_RETIREMENT) != 0 || retirements.hasReadyHint();
     plan.reclaim =
@@ -1067,7 +1056,7 @@ public final class MaintenanceEventLoop
     return requestedWork.get() != 0
         || allocationPressureRequested.get()
         || budgetPressureRequested.get()
-        || accessHint.get()
+        || (!stopping && accessScanActive)
         || repairNeeded.get()
         || reliableRemovals.hasCommittedHint()
         || retirements.hasReadyHint()
@@ -1157,7 +1146,7 @@ public final class MaintenanceEventLoop
           || sequenceAfter(request.sequence, asyncCompletedSequence)
           || allocationPressureRequested.get()
           || budgetPressureRequested.get()
-          || accessHint.get()
+          || hasPendingAccess()
           || retirements.hasReadyHint()
           || retirements.hasPendingReclaim()
           || reclaimContinuation
@@ -1683,62 +1672,68 @@ public final class MaintenanceEventLoop
   }
 
   private int drainAccesses(int limit) {
-    if (!accessHint.getAndSet(false)) {
+    if (limit <= 0) {
       return 0;
     }
+    readers.cleanupCollected(limit);
+    WeakReference<ReaderSlot>[] snapshot = readers.accessScanSnapshot();
+    int length = snapshot.length;
+    if (length == 0) {
+      accessScanCursor = 0;
+      accessScanActive = false;
+      return 0;
+    }
+    int start = accessScanCursor;
+    if (start >= length) {
+      start %= length;
+    }
     int work = 0;
-    int attempts = 0;
-    ReaderSlot slot;
-    while (attempts < limit) {
-      slot = dirtyReaderQueue.poll();
-      if (slot == null) {
-        slot = dirtyReaderOverflowQueue.poll();
-      }
-      if (slot == null) {
-        break;
-      }
-      attempts++;
-      AccessRing access = slot.access;
-      // Clear before reading the counters/ring. A producer racing after this point either
-      // publishes data into this drain or publishes a second queue token for the next pass.
-      slot.clearAccessPending();
-      long hitDelta = slot.publishedHits - slot.consumedHits;
-      long missDelta = slot.publishedMisses - slot.consumedMisses;
-      if (hitDelta != 0L) {
-        hits += hitDelta;
-        slot.consumedHits += hitDelta;
-      }
-      if (missDelta != 0L) {
-        misses += missDelta;
-        slot.consumedMisses += missDelta;
-      }
-      if (access != null) {
-        while (work < limit && access.poll(this)) {
-          work++;
+    int scanned = 0;
+    boolean liveReader = false;
+    while (scanned < length && work < limit) {
+      int index = (start + scanned) % length;
+      accessScanCursor = (index + 1) % length;
+      ReaderSlot slot = snapshot[index].get();
+      if (slot != null) {
+        liveReader = true;
+        long hitDelta = slot.publishedHits - slot.consumedHits;
+        long missDelta = slot.publishedMisses - slot.consumedMisses;
+        if (hitDelta != 0L) {
+          hits += hitDelta;
+          slot.consumedHits += hitDelta;
+        }
+        if (missDelta != 0L) {
+          misses += missDelta;
+          slot.consumedMisses += missDelta;
+        }
+        AccessRing access = slot.access;
+        if (access != null) {
+          while (work < limit && access.poll(this)) {
+            work++;
+          }
         }
       }
-      if (access != null && !access.isEmpty()) {
-        requeueDirtyReader(slot);
-        break;
-      }
+      scanned++;
     }
-    if (!dirtyReaderQueue.isEmpty() || !dirtyReaderOverflowQueue.isEmpty()) {
-      accessHint.set(true);
-    }
+    accessScanActive = scanned < length || liveReader;
     return work;
   }
 
-  private void requeueDirtyReader(ReaderSlot slot) {
-    if (slot.markAccessPending()) {
-      publishDirtyReader(slot);
+  private boolean hasPendingAccess() {
+    readers.cleanupCollected(4_096);
+    for (WeakReference<ReaderSlot> reference : readers.accessScanSnapshot()) {
+      ReaderSlot slot = reference.get();
+      if (slot == null) {
+        continue;
+      }
+      AccessRing access = slot.access;
+      if (slot.publishedHits != slot.consumedHits
+          || slot.publishedMisses != slot.consumedMisses
+          || (access != null && !access.isEmpty())) {
+        return true;
+      }
     }
-    accessHint.set(true);
-  }
-
-  private void publishDirtyReader(ReaderSlot slot) {
-    if (!dirtyReaderQueue.offer(slot)) {
-      dirtyReaderOverflowQueue.offer(slot);
-    }
+    return false;
   }
 
   @Override
@@ -2011,6 +2006,7 @@ public final class MaintenanceEventLoop
     while (hasActiveReaders()) {
       LockSupport.parkNanos(this, WINDOW_NANOS);
     }
+    drainAllAccesses();
     while (reliableRemovals.pollNext(removalRecord)) {
       releaseReliableRemovalRecord();
       removalRecord.clear();
@@ -2029,9 +2025,6 @@ public final class MaintenanceEventLoop
     }
     clearPendingMutationQueues();
     drainWeakValueReferences(Integer.MAX_VALUE);
-    dirtyReaderQueue.clear();
-    dirtyReaderOverflowQueue.clear();
-    accessHint.set(false);
     for (Entry entry : data.values()) {
       long value = Entry.rawValueAddress(entry.valueAddress);
       clearValue(entry);
@@ -2053,6 +2046,12 @@ public final class MaintenanceEventLoop
     }
     readers.clear();
     evictionNotifier = null;
+  }
+
+  private void drainAllAccesses() {
+    while (hasPendingAccess()) {
+      drainAccesses(Integer.MAX_VALUE);
+    }
   }
 
   private void releaseReliableRemovalRecord() {
