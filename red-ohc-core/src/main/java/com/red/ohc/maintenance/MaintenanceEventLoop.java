@@ -66,6 +66,11 @@ public final class MaintenanceEventLoop
   private static final int RUNNABLE_CHECK_WORK = 1;
   private static final int RUNNABLE_CHECK_READERS = 1 << 1;
   private static final int RUNNABLE_CHECK_ACTIVE_READERS = 1 << 2;
+  private enum AccessScanState {
+    NONE,
+    PENDING,
+    URGENT
+  }
   private static final AtomicLongFieldUpdater<MaintenanceEventLoop>
       ASYNC_COMPLETED_SEQUENCE_UPDATER =
           AtomicLongFieldUpdater.newUpdater(MaintenanceEventLoop.class, "asyncCompletedSequence");
@@ -1977,7 +1982,7 @@ public final class MaintenanceEventLoop
     boolean accessDeadlineDue = !isStopping() && accessDeadlineDue();
     boolean accessImmediate = !isStopping() && accessScanActive;
     if (!accessImmediate && (accessHintRequested || accessDeadlineDue)) {
-      accessImmediate = hasUrgentAccess();
+      accessImmediate = scanAccessState(true) == AccessScanState.URGENT;
     }
     boolean accessUrgent =
         !isStopping() && (accessImmediate || accessDeadlineDue);
@@ -2244,18 +2249,17 @@ public final class MaintenanceEventLoop
       return;
     }
     clearStaleWakeRequests();
-    boolean pendingAccess = hasPendingAccess();
-    if (pendingAccess) {
-      if (hasUrgentAccess()) {
-        // A high-watermark publication can follow the last scan while its notification is still
-        // coalesced. Hand it to the next turn; the wake gate alone cannot schedule a drain.
-        accessScanActive = true;
-        accessUrgentMode = true;
-        nextAccessWakeNanos = Long.MAX_VALUE;
-        wakeGate.requireProcessing();
-        idleBackoff.reset();
-        return;
-      }
+    AccessScanState accessState = scanAccessState(true);
+    if (accessState == AccessScanState.URGENT) {
+      // A high-watermark publication can follow the last scan while its notification is still
+      // coalesced. Hand it to the next turn; the wake gate alone cannot schedule a drain.
+      accessScanActive = true;
+      accessUrgentMode = true;
+      nextAccessWakeNanos = Long.MAX_VALUE;
+      wakeGate.requireProcessing();
+      idleBackoff.reset();
+      return;
+    } else if (accessState == AccessScanState.PENDING) {
       scheduleAccessWake();
     } else {
       nextAccessWakeNanos = Long.MAX_VALUE;
@@ -2355,9 +2359,10 @@ public final class MaintenanceEventLoop
         && nextAccessWakeNanos <= System.nanoTime();
   }
 
-  /** Checks only the urgent ring watermark; counters and low-watermark records stay advisory. */
-  private boolean hasUrgentAccess() {
+  /** Scans registered readers once and combines counter/ring pending state with ring urgency. */
+  private AccessScanState scanAccessState(boolean armNotifications) {
     ReaderRegistry.SlotTableSnapshot slots = readers.slotTableSnapshot();
+    AccessScanState state = AccessScanState.NONE;
     for (int chunkIndex = 0; chunkIndex < slots.slotChunkCount(); chunkIndex++) {
       long bits = slots.liveBitmap(chunkIndex);
       while (bits != 0L) {
@@ -2366,14 +2371,41 @@ public final class MaintenanceEventLoop
         ReaderSlot slot = slots.slotAt(index);
         if (slot != null) {
           AccessRing access = slot.access;
-          if (access != null && access.armNotificationAndCheckUrgentPending()) {
-            return true;
+          if (state == AccessScanState.URGENT) {
+            // The flush/access turn can drain every reader after this scan. Keep later rings armed
+            // so a subsequent producer cannot inherit a stale coalesced notification state.
+            if (armNotifications && access != null) {
+              access.armNotificationAndCheckPending();
+            }
+            bits &= bits - 1L;
+            continue;
+          }
+          boolean ringPending =
+              access != null
+                  && (armNotifications
+                      ? access.armNotificationAndCheckPending()
+                      : !access.isEmpty());
+          if (ringPending) {
+            if (armNotifications && access.size() >= AccessRing.HIGH_WATERMARK) {
+              state = AccessScanState.URGENT;
+            } else {
+              state = AccessScanState.PENDING;
+            }
+          }
+          if (state != AccessScanState.URGENT
+              && (slot.publishedHits != slots.consumedHits(index)
+                  || slot.publishedMisses != slots.consumedMisses(index))) {
+            state = AccessScanState.PENDING;
           }
         }
         bits &= bits - 1L;
       }
     }
-    return false;
+    return state;
+  }
+
+  private boolean hasPendingAccessReadOnly() {
+    return scanAccessState(false) != AccessScanState.NONE;
   }
 
   private void scheduleAccessWake() {
@@ -2492,7 +2524,7 @@ public final class MaintenanceEventLoop
         retirementJournal != null
             && !retirementJournal.watermarkComplete(request.retirementWatermark);
     boolean sequencePending = sequenceAfter(request.sequence, asyncCompletedSequence);
-    boolean accessPending = hasPendingAccess();
+    boolean accessPending = hasPendingAccessReadOnly();
     boolean ttlPending = ttlWorkDue();
     boolean capacityPending =
         logicalAdmission != null && logicalAdmission.isOverTarget();
@@ -2518,7 +2550,7 @@ public final class MaintenanceEventLoop
           || (retirementJournal != null
               && !retirementJournal.watermarkComplete(request.retirementWatermark))
           || sequenceAfter(request.sequence, asyncCompletedSequence)
-          || hasPendingAccess()
+          || hasPendingAccessReadOnly()
           || ttlWorkDue()
           || (logicalAdmission != null && logicalAdmission.isOverTarget())) {
         return;
@@ -3135,30 +3167,6 @@ public final class MaintenanceEventLoop
             : Long.MAX_VALUE;
   }
 
-  private boolean hasPendingAccess() {
-    ReaderRegistry.SlotTableSnapshot slots = readers.slotTableSnapshot();
-    for (int chunkIndex = 0; chunkIndex < slots.slotChunkCount(); chunkIndex++) {
-      long bits = slots.liveBitmap(chunkIndex);
-      while (bits != 0L) {
-        int offset = Long.numberOfTrailingZeros(bits);
-        int index = (chunkIndex << ReaderRegistry.SLOT_CHUNK_SHIFT) + offset;
-        ReaderSlot slot = slots.slotAt(index);
-        if (slot != null) {
-          AccessRing access = slot.access;
-          boolean ringPending =
-              access != null && access.armNotificationAndCheckPending();
-          if (slot.publishedHits != slots.consumedHits(index)
-              || slot.publishedMisses != slots.consumedMisses(index)
-              || ringPending) {
-            return true;
-          }
-        }
-        bits &= bits - 1L;
-      }
-    }
-    return false;
-  }
-
   /** Counts enough pending access work to choose immediate continuation versus the deadline path. */
   private int pendingAccessRecords(ReaderRegistry.SlotTableSnapshot slots) {
     int pending = 0;
@@ -3676,7 +3684,7 @@ public final class MaintenanceEventLoop
   }
 
   private void drainAllAccesses() {
-    while (hasPendingAccess()) {
+    while (hasPendingAccessReadOnly()) {
       drainAccesses(readers.slotTableSnapshot(), Integer.MAX_VALUE);
     }
   }

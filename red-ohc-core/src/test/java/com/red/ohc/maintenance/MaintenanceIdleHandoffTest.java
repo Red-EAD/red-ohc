@@ -50,6 +50,73 @@ public final class MaintenanceIdleHandoffTest {
   }
 
   @Test(timeOut = 5_000L)
+  public void accessScanReturnsUrgentWhenAnyReaderReachesHighWatermark() throws Exception {
+    try (Fixture fixture = new Fixture()) {
+      ReaderSlot pending = new ReaderSlot();
+      ReaderSlot urgent = new ReaderSlot();
+      fixture.loop.registerReader(pending);
+      fixture.loop.registerReader(urgent);
+      pending.access = new AccessRing();
+      urgent.access = new AccessRing();
+      Method scan =
+          MaintenanceEventLoop.class.getDeclaredMethod("scanAccessState", boolean.class);
+      scan.setAccessible(true);
+      assertEquals(((Enum<?>) scan.invoke(fixture.loop, true)).name(), "NONE");
+
+      assertTrue(pending.access.offer(fixture.entry, 0L, 0L, 0));
+      assertEquals(((Enum<?>) scan.invoke(fixture.loop, true)).name(), "PENDING");
+
+      for (int index = 0; index < AccessRing.HIGH_WATERMARK; index++) {
+        assertTrue(urgent.access.offer(fixture.entry, 0L, 0L, 0));
+      }
+
+      assertEquals(((Enum<?>) scan.invoke(fixture.loop, true)).name(), "URGENT");
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void urgentAccessScanArmsReadersAfterTheUrgentSlot() throws Exception {
+    try (Fixture fixture = new Fixture()) {
+      ReaderSlot urgent = new ReaderSlot();
+      ReaderSlot pending = new ReaderSlot();
+      fixture.loop.registerReader(urgent);
+      fixture.loop.registerReader(pending);
+      urgent.access = new AccessRing();
+      pending.access = new AccessRing();
+      for (int index = 0; index < AccessRing.HIGH_WATERMARK; index++) {
+        assertTrue(urgent.access.offer(fixture.entry, 0L, 0L, 0));
+      }
+      assertTrue(pending.access.offer(fixture.entry, 0L, 0L, 0));
+      assertTrue(
+          accessNotificationState(pending.access) != 0,
+          "the later ring must start signalled so the scan has to re-arm it");
+
+      Method scan =
+          MaintenanceEventLoop.class.getDeclaredMethod("scanAccessState", boolean.class);
+      scan.setAccessible(true);
+      assertEquals(((Enum<?>) scan.invoke(fixture.loop, true)).name(), "URGENT");
+      assertEquals(
+          accessNotificationState(pending.access),
+          0,
+          "an urgent result must not leave later reader notifications disarmed");
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void readOnlyAccessScanDoesNotArmRingNotification() throws Exception {
+    try (Fixture fixture = new Fixture()) {
+      assertTrue(fixture.slot.access.offer(fixture.entry, 0L, 0L, 0));
+      int notificationState = accessNotificationState(fixture.slot.access);
+
+      assertTrue((Boolean) call(fixture.loop, "hasPendingAccessReadOnly"));
+      assertEquals(
+          accessNotificationState(fixture.slot.access),
+          notificationState,
+          "read-only checks must not write the ring notification state");
+    }
+  }
+
+  @Test(timeOut = 5_000L)
   public void lowWatermarkAccessDeadlineUsesWallClockWithFrozenTicker() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     ReaderRegistry readers = new ReaderRegistry(memory);
@@ -229,6 +296,15 @@ public final class MaintenanceIdleHandoffTest {
     Method method = target.getClass().getDeclaredMethod(name);
     method.setAccessible(true);
     return method.invoke(target);
+  }
+
+  private static int accessNotificationState(AccessRing access) throws Exception {
+    Field consumer = AccessRing.class.getDeclaredField("consumer");
+    consumer.setAccessible(true);
+    Object control = consumer.get(access);
+    Field state = control.getClass().getDeclaredField("notifyState");
+    state.setAccessible(true);
+    return state.getInt(control);
   }
 
   private static final class FrozenTicker implements Ticker {

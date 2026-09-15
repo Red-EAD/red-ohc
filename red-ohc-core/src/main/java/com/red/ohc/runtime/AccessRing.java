@@ -125,12 +125,6 @@ public final class AccessRing {
     return !isEmpty();
   }
 
-  /** Arms the producer notification and reports only backlog at the urgent watermark. */
-  public boolean armNotificationAndCheckUrgentPending() {
-    consumer.notifyState = NOTIFY_ARMED;
-    return size() >= HIGH_WATERMARK;
-  }
-
   private static final class ProducerControl {
     private volatile int head;
     private int cachedTail;
