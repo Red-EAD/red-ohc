@@ -3,7 +3,6 @@ package com.red.ohc.index;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
-import org.testng.annotations.AfterSuite;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
@@ -11,11 +10,6 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
 
 public final class EntryNativeMetadataTest {
-  @AfterSuite(alwaysRun = true)
-  public void releaseEntryFixtures() {
-    EntryTestSupport.close();
-  }
-
   @Test
   public void allocatorReuseResetsEveryNativeMetadataWord() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);

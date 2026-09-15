@@ -1,8 +1,5 @@
 package com.red.ohc.index;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
@@ -10,7 +7,12 @@ import com.red.ohc.storage.WriterArena;
 /** Native-key fixture used by tests that exercise Entry metadata accessors. */
 public final class EntryTestSupport {
   private static final NativeMemory.Memory MEMORY = new NativeMemory.Memory(AllocatorType.JNA);
-  private static final List<Block> BLOCKS = new ArrayList<>();
+
+  // This fixture is shared across test classes; release it only when the test JVM exits.
+  static {
+    Runtime.getRuntime()
+        .addShutdownHook(new Thread(MEMORY::closeArenas, "ohc-entry-test-fixture-cleanup"));
+  }
 
   private EntryTestSupport() {}
 
@@ -20,9 +22,6 @@ public final class EntryTestSupport {
     NativeMemory.putLong(address, keyHash64);
     Entry entry = new Entry(address, keyLength, valueAddress);
     entry.initializeNativeMetadata();
-    synchronized (BLOCKS) {
-      BLOCKS.add(new Block(address, allocation));
-    }
     return entry;
   }
 
@@ -53,28 +52,9 @@ public final class EntryTestSupport {
     return entry(arena, keyLength, chmHash, chmHash & 0xffff_ffffL, valueAddress);
   }
 
-  public static void close() {
-    synchronized (BLOCKS) {
-      for (Block block : BLOCKS) {
-        MEMORY.releaseEntry(block.address, block.allocation);
-      }
-      BLOCKS.clear();
-    }
-    MEMORY.closeArenas();
-  }
-
   public static void maintenanceMeta(Entry entry, long value) {
     long metadata = entry.nativeKeyAddress - Entry.NATIVE_METADATA_BYTES;
     NativeMemory.putLong(metadata + 16L, value);
   }
 
-  private static final class Block {
-    private final long address;
-    private final long allocation;
-
-    private Block(long address, long allocation) {
-      this.address = address;
-      this.allocation = allocation;
-    }
-  }
 }

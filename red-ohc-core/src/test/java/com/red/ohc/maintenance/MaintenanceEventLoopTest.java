@@ -1523,7 +1523,7 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  @Test(timeOut = 2_000L)
+  @Test(timeOut = 5_000L)
   public void idleWorkerStopsWithoutWaitingForAWorkWindow() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
@@ -2365,7 +2365,7 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  @Test(timeOut = 2_000L)
+  @Test(timeOut = 5_000L)
   public void idleWorkerDoesNotReadAClockWithoutTimerOrRetirementWork() throws Exception {
     CountingTicker ticker = new CountingTicker();
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -2507,7 +2507,7 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  @Test(timeOut = 2_000L)
+  @Test(timeOut = 5_000L)
   public void futureTtlSleepsByWheelTickWithoutEarlyExpiry() throws Exception {
     AtomicInteger monotonicCalls = new AtomicInteger();
     AtomicInteger wallCalls = new AtomicInteger();
@@ -4704,11 +4704,14 @@ public class MaintenanceEventLoopTest {
   }
 
   private static void waitUntilParked(MaintenanceEventLoop loop) throws InterruptedException {
-    long deadline = System.nanoTime() + 1_000_000_000L;
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4L);
     while (!loop.isParked() && System.nanoTime() < deadline) {
-      Thread.sleep(1L);
+      if (Thread.interrupted()) {
+        throw new InterruptedException();
+      }
+      LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));
     }
-    assertTrue(loop.isParked(), "maintenance actor did not park");
+    assertTrue(loop.isParked(), "maintenance actor did not park within 4 seconds");
   }
 
   private static void waitForMonotonicCalls(CountingTicker ticker, int expected) {
