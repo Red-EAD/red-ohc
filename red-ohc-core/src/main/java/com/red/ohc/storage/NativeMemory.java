@@ -105,6 +105,49 @@ public final class NativeMemory {
       return address;
     }
 
+    /** Allocates a stable aligned range while charging the complete allocator-owned block. */
+    public long allocateAligned(long bytes, long alignment) {
+      long rawBytes = alignedAllocationBytes(bytes, alignment);
+      long rawAddress = allocateRaw(rawBytes);
+      try {
+        long candidate = Math.addExact(rawAddress, Long.BYTES);
+        long alignedAddress =
+            Math.addExact(candidate, alignment - 1L) & ~(alignment - 1L);
+        U.putLong(alignedAddress - Long.BYTES, rawAddress);
+        return alignedAddress;
+      } catch (Throwable failure) {
+        free(rawAddress, rawBytes);
+        throw failure;
+      }
+    }
+
+    /** Frees a range returned by {@link #allocateAligned(long, long)}. */
+    public void freeAligned(long address, long bytes, long alignment) {
+      if (address == 0L) {
+        return;
+      }
+      long rawBytes = alignedAllocationBytes(bytes, alignment);
+      long rawAddress = U.getLong(address - Long.BYTES);
+      if (rawAddress == 0L) {
+        throw new IllegalStateException("aligned allocation has no raw base");
+      }
+      free(rawAddress, rawBytes);
+    }
+
+    private static long alignedAllocationBytes(long bytes, long alignment) {
+      if (bytes <= 0L) {
+        throw new IllegalArgumentException("bytes must be positive");
+      }
+      if (alignment <= 0L || (alignment & (alignment - 1L)) != 0L) {
+        throw new IllegalArgumentException("alignment must be a positive power of two");
+      }
+      try {
+        return Math.addExact(Math.addExact(bytes, alignment), Long.BYTES);
+      } catch (ArithmeticException overflow) {
+        throw new IllegalArgumentException("aligned allocation is too large", overflow);
+      }
+    }
+
     public long allocateRaw(long bytes) {
       if (bytes <= 0L) {
         throw new IllegalArgumentException("bytes must be positive");
@@ -1000,6 +1043,10 @@ public final class NativeMemory {
 
   public static void putLongRelease(long address, long value) {
     U.putOrderedLong(null, address, value);
+  }
+
+  public static void putLongVolatile(long address, long value) {
+    U.putLongVolatile(null, address, value);
   }
 
   public static int getInt(long address) {

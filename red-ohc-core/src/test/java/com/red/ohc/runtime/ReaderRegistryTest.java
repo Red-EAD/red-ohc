@@ -21,9 +21,35 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
+import com.red.ohc.api.AllocatorType;
+import com.red.ohc.storage.NativeMemory;
+
 public final class ReaderRegistryTest {
+  private static final NativeMemory.Memory TEST_MEMORY =
+      new NativeMemory.Memory(AllocatorType.UNSAFE);
+  private static final List<ReaderRegistry> OPEN_REGISTRIES = new ArrayList<>();
+
+  private static synchronized ReaderRegistry newRegistry() {
+    ReaderRegistry registry = new ReaderRegistry(TEST_MEMORY);
+    OPEN_REGISTRIES.add(registry);
+    return registry;
+  }
+
+  @AfterClass(alwaysRun = true)
+  public void closeRegistries() {
+    synchronized (ReaderRegistryTest.class) {
+      for (ReaderRegistry registry : OPEN_REGISTRIES) {
+        registry.clear();
+        registry.close();
+      }
+      OPEN_REGISTRIES.clear();
+    }
+    TEST_MEMORY.closeArenas();
+  }
+
   @Test
   public void epochScansDoNotDependOnAPreemptibleStorageMutationVersion() {
     assertFalse(
@@ -34,14 +60,15 @@ public final class ReaderRegistryTest {
   @Test
   public void qsbrUsesOneUnifiedPaddedStateAndStrongChunkMetadata() throws Exception {
     assertTrue(hasField("storage", nestedClass("SlotStorage")));
-    assertTrue(hasNestedField("SlotStorage", "stateWordChunks", long[][].class));
+    assertTrue(hasNestedField("SlotStorage", "stateChunkAddresses", long[].class));
+    assertFalse(hasNestedField("SlotStorage", "stateWordChunks", long[][].class));
     assertTrue(hasNestedField("SlotStorage", "slotChunks", ReaderSlot[][].class));
     assertTrue(hasNestedField("SlotStorage", "liveBitmaps", long[].class));
     assertFalse(hasNestedField("SlotStorage", "writerWordChunks", long[][].class));
     assertFalse(hasField("weakSlots", Object.class));
     assertFalse(hasField("collectedReaders", Object.class));
 
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     int index = registry.register(new ReaderSlot());
     registry.setEpoch(index, 7L);
     registry.setValueEpoch(index, 7L);
@@ -66,7 +93,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void readerStateRejectsSentinelEpochAndAllowsIndependentWriterAdmission() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     int index = registry.register(new ReaderSlot());
 
     registry.setReaderState(
@@ -95,7 +122,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void readerStatePublicationDoesNotTouchWriterAdmission() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     registry.register(slot);
 
@@ -111,7 +138,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void readerNotificationRequiresAnActorMarkAndResetsWithTheSlot() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     int index = registry.register(slot);
 
@@ -128,7 +155,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void registrationPublishesStrongMetadataThroughTheLiveBitmap() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
 
     int index = registry.register(slot);
@@ -143,7 +170,7 @@ public final class ReaderRegistryTest {
 
   @Test(timeOut = 5_000L)
   public void terminatedOwnerIsRemovedAndItsIndexIsReusedByTheActor() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     AtomicReference<ReaderSlot> slotReference = new AtomicReference<>();
     AtomicReference<Integer> indexReference = new AtomicReference<>();
     Thread owner =
@@ -177,7 +204,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void bitmapScansSkipReleasedHoles() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot first = terminatedSlot(registry);
     int firstIndex = first.registryIndex;
     ReaderSlot second = terminatedSlot(registry);
@@ -193,7 +220,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void minimumActiveEpochIsSharedByEveryRetirementLane() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot older = new ReaderSlot();
     ReaderSlot newer = new ReaderSlot();
     int olderIndex = registry.register(older);
@@ -212,7 +239,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void minimumEpochSnapshotReturnsLookupAndValueEpochsInOnePass() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot lookupOnly = new ReaderSlot();
     ReaderSlot valueReader = new ReaderSlot();
     int lookupIndex = registry.register(lookupOnly);
@@ -229,7 +256,7 @@ public final class ReaderRegistryTest {
 
   @Test(timeOut = 5_000L)
   public void minimumEpochsDoNotWaitForRegistrationLock() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     int index = registry.register(slot);
     registry.setEpoch(index, 7L);
@@ -249,7 +276,7 @@ public final class ReaderRegistryTest {
 
   @Test(timeOut = 5_000L)
   public void epochPublicationDoesNotWaitForRegistrationLock() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     Field lockField = ReaderRegistry.class.getDeclaredField("registrationLock");
     lockField.setAccessible(true);
@@ -269,7 +296,7 @@ public final class ReaderRegistryTest {
 
   @Test(timeOut = 10_000L)
   public void registrationAndBitmapPublicationRemainStableDuringExpansion() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ExecutorService executor = Executors.newFixedThreadPool(5);
     List<Callable<Void>> tasks = new ArrayList<>();
     for (int worker = 0; worker < 4; worker++) {
@@ -309,13 +336,13 @@ public final class ReaderRegistryTest {
 
   @Test
   public void statePublicationSurvivesSlotTableExpansion() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot first = new ReaderSlot();
     int firstIndex = registry.register(first);
     registry.setEpoch(firstIndex, 7L);
     registry.setValueEpoch(firstIndex, 7L);
     registry.setWriterActive(firstIndex, true);
-    long[][] stateChunksBefore = wordChunks(registry);
+    long[] stateChunksBefore = wordChunkAddresses(registry);
 
     List<ReaderSlot> retainedSlots = new ArrayList<>();
     for (int index = 0; index < 64; index++) {
@@ -323,10 +350,11 @@ public final class ReaderRegistryTest {
       registry.register(retainedSlots.get(index));
     }
 
-    long[][] stateChunksAfter = wordChunks(registry);
-    assertSame(stateChunksAfter[0], stateChunksBefore[0]);
-    assertSame(first.readerStateChunk, stateChunksBefore[0]);
-    assertEquals(first.readerStateOffset, 0);
+    long[] stateChunksAfter = wordChunkAddresses(registry);
+    assertEquals(stateChunksAfter[0], stateChunksBefore[0]);
+    assertEquals(first.readerStateAddress, stateChunksBefore[0]);
+    assertEquals(first.readerStateAddress & 63L, 0L);
+    assertEquals(stateChunksAfter.length, 2);
     assertEquals(registry.minActiveEpoch(), 7L);
     assertEquals(registry.minActiveValueEpoch(), 7L);
     assertTrue(registry.hasActiveWriter());
@@ -335,7 +363,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void consumedCountersShareExistingChunksAcrossSlotTableExpansion() throws Exception {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot first = new ReaderSlot();
     int firstIndex = registry.register(first);
     ReaderRegistry.SlotTableSnapshot snapshotBefore = registry.slotTableSnapshot();
@@ -363,19 +391,62 @@ public final class ReaderRegistryTest {
 
   @Test(expectedExceptions = IllegalStateException.class)
   public void closedRegistryRejectsNewStrongSlot() {
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     registry.clear();
     registry.register(new ReaderSlot());
+  }
+
+  @Test(expectedExceptions = IllegalStateException.class)
+  public void closeRequiresAllReaderSlotsToBeCleared() {
+    ReaderRegistry registry = newRegistry();
+    registry.register(new ReaderSlot());
+    registry.close();
+  }
+
+  @Test(timeOut = 5_000L)
+  public void clearWaitsForAnInFlightNativePublicationBeforeUnbindingTheSlot() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry registry = new ReaderRegistry(memory);
+    ReaderSlot slot = new ReaderSlot();
+    registry.register(slot);
+    CountDownLatch clearStarted = new CountDownLatch(1);
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread clearer =
+        new Thread(
+            () -> {
+              clearStarted.countDown();
+              try {
+                registry.clear();
+              } catch (Throwable unexpected) {
+                failure.compareAndSet(null, unexpected);
+              }
+            });
+    slot.nativePublicationInFlight = true;
+    clearer.start();
+    try {
+      assertTrue(clearStarted.await(1L, TimeUnit.SECONDS));
+      LockSupport.parkNanos(1_000_000L);
+      assertTrue(clearer.isAlive(), "clear must wait for an in-flight native publication");
+      assertSame(slot.registry, registry, "the slot must remain bound while publication is active");
+    } finally {
+      slot.nativePublicationInFlight = false;
+      clearer.join(1_000L);
+      assertFalse(clearer.isAlive(), "clear did not finish after publication completed");
+      assertNull(failure.get());
+      assertNull(slot.registry);
+      registry.close();
+      memory.closeArenas();
+    }
   }
 
   @Test
   public void ownerAssertionAllowsCloseAfterSlotValidation() throws Exception {
     assertTrue(ReaderRegistry.class.desiredAssertionStatus(), "owner checks require -ea");
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     registry.register(slot);
     assertSame(slot.registry, registry);
-    assertTrue(slot.readerStateChunk != null);
+    assertTrue(slot.readerStateAddress != 0L);
     Method checkOwner = ReaderRegistry.class.getDeclaredMethod("assertOwner", ReaderSlot.class);
     checkOwner.setAccessible(true);
 
@@ -393,7 +464,7 @@ public final class ReaderRegistryTest {
   public void statePublicationDuringRegistryClearRemainsAReaderRejection() throws Exception {
     AtomicReference<Throwable> unexpected = new AtomicReference<>();
     for (int round = 0; round < 200 && unexpected.get() == null; round++) {
-      ReaderRegistry registry = new ReaderRegistry();
+      ReaderRegistry registry = newRegistry();
       AtomicReference<ReaderSlot> slotReference = new AtomicReference<>();
       CountDownLatch started = new CountDownLatch(1);
       Thread publisher =
@@ -428,7 +499,7 @@ public final class ReaderRegistryTest {
   @Test
   public void ownerAssertionAllowsCloseAfterStorageSnapshot() throws Exception {
     assertTrue(ReaderRegistry.class.desiredAssertionStatus(), "owner checks require -ea");
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     int index = registry.register(new ReaderSlot());
     Field storageField = ReaderRegistry.class.getDeclaredField("storage");
     storageField.setAccessible(true);
@@ -446,7 +517,7 @@ public final class ReaderRegistryTest {
   @Test
   public void statePublicationStillRejectsAnotherLiveOwner() throws Exception {
     assertTrue(ReaderRegistry.class.desiredAssertionStatus(), "owner checks require -ea");
-    ReaderRegistry registry = new ReaderRegistry();
+    ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     int index = registry.register(slot);
     registry.setReaderState(slot, ReaderRegistry.VALUE_PROTECTION_BIT | 7L);
@@ -475,6 +546,25 @@ public final class ReaderRegistryTest {
       executor.shutdownNow();
       registry.clear();
     }
+  }
+
+  @Test
+  public void clearKeepsNativeChunksUntilAnIdempotentClose() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry registry = new ReaderRegistry(memory);
+    long allocated = memory.allocated();
+    ReaderSlot slot = new ReaderSlot();
+    registry.register(slot);
+
+    registry.clear();
+    assertEquals(memory.allocated(), allocated);
+    assertEquals(slot.readerStateAddress, 0L);
+
+    registry.close();
+    assertEquals(memory.allocated(), 0L);
+    registry.close();
+    assertEquals(memory.allocated(), 0L);
+    memory.closeArenas();
   }
 
   private static ReaderSlot terminatedSlot(ReaderRegistry registry) throws Exception {
@@ -518,13 +608,13 @@ public final class ReaderRegistryTest {
     throw new AssertionError("missing nested class: " + name);
   }
 
-  private static long[][] wordChunks(ReaderRegistry registry) throws Exception {
+  private static long[] wordChunkAddresses(ReaderRegistry registry) throws Exception {
     Field storageField = ReaderRegistry.class.getDeclaredField("storage");
     storageField.setAccessible(true);
     Object storage = storageField.get(registry);
-    Field field = storage.getClass().getDeclaredField("stateWordChunks");
+    Field field = storage.getClass().getDeclaredField("stateChunkAddresses");
     field.setAccessible(true);
-    return (long[][]) field.get(storage);
+    return (long[]) field.get(storage);
   }
 
   private static long[][] counterChunks(ReaderRegistry registry, String fieldName)

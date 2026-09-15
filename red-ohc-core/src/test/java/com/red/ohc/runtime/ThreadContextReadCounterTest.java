@@ -111,7 +111,10 @@ public final class ThreadContextReadCounterTest {
 
     assertTrue(ring.armNotificationAndCheckPending());
     assertTrue(ring.offer(null, 5L, 6L, Entry.POLICY_NONE));
-    assertEquals(signals.get(), 2, "the next actor scan must re-arm one notification");
+    assertEquals(
+        signals.get(),
+        1,
+        "a low-watermark ring must not wake the actor for every additional record");
   }
 
   @Test(timeOut = 5_000L)
@@ -199,7 +202,7 @@ public final class ThreadContextReadCounterTest {
   }
 
   @Test
-  public void accessRingSignalsAfterAConsumerFreesASlotFromAFullRing() {
+  public void accessRingDoesNotSignalWhenBacklogIsAlreadyAboveTheHighWatermark() {
     AtomicInteger signals = new AtomicInteger();
     AccessRing ring = new AccessRing(signals::incrementAndGet);
     for (int index = 0; index < 8_192; index++) {
@@ -210,7 +213,31 @@ public final class ThreadContextReadCounterTest {
     assertTrue(ring.armNotificationAndCheckPending());
     assertTrue(ring.poll((ignored, address, generation, policyState) -> {}));
     assertTrue(ring.offer(null, 8_193L, 8_293L, Entry.POLICY_NONE));
-    assertEquals(signals.get(), 1, "the freed full-ring slot must preserve the armed wakeup");
+    assertEquals(
+        signals.get(),
+        0,
+        "a ring already above the high watermark must not wake the actor for every record");
+  }
+
+  @Test
+  public void accessRingSignalsWhenBacklogCrossesTheHighWatermark() {
+    AtomicInteger signals = new AtomicInteger();
+    AccessRing ring = new AccessRing(signals::incrementAndGet);
+    for (int index = 0; index < AccessRing.HIGH_WATERMARK - 1; index++) {
+      assertTrue(ring.offer(null, index + 1L, index + 1L, Entry.POLICY_NONE));
+    }
+
+    signals.set(0);
+    assertTrue(ring.armNotificationAndCheckPending());
+    assertTrue(
+        ring.offer(
+            null,
+            AccessRing.HIGH_WATERMARK,
+            AccessRing.HIGH_WATERMARK,
+            Entry.POLICY_NONE));
+    assertEquals(signals.get(), 1, "crossing the high watermark must wake the actor");
+    assertTrue(ring.offer(null, 0L, 0L, Entry.POLICY_NONE));
+    assertEquals(signals.get(), 1, "high-watermark wakeups must remain coalesced");
   }
 
   @Test

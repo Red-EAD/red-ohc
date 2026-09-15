@@ -153,6 +153,10 @@ public final class MaintenanceEventLoop
   /** Actor-owned cursor and pending-work marker for the bitmap-backed reader access scan. */
   private int accessScanCursor;
   private boolean accessScanActive;
+  /** Keeps a high-watermark drain running until its backlog falls back to the low watermark. */
+  private boolean accessUrgentMode;
+  /** Actor-clock deadline for low-watermark access/counter work. */
+  private long nextAccessWakeNanos = Long.MAX_VALUE;
   private int readerLifecycleCursor;
   private int readerLifecycleStart;
   private long nextReaderLifecycleCheckNanos = Long.MAX_VALUE;
@@ -730,7 +734,17 @@ public final class MaintenanceEventLoop
   }
 
   private void requestAccessWork() {
-    requestWork(WORK_ACCESS_SCAN);
+    // AccessRing is an advisory side queue. Publishing its coalesced bit is enough to make the
+    // actor rescan it; putting a marker into the MPSC mailbox would let a read thread allocate a
+    // mailbox chunk when the actor and producer cross at a queue boundary.
+    for (;;) {
+      int current = requestedWork.get();
+      if ((current & WORK_ACCESS_SCAN) != 0
+          || requestedWork.compareAndSet(current, current | WORK_ACCESS_SCAN)) {
+        break;
+      }
+    }
+    signal();
   }
 
   /** ReaderGuard calls this after a marked reader becomes quiescent or drops value protection. */
@@ -1457,6 +1471,10 @@ public final class MaintenanceEventLoop
     turn.accessSlots = null;
     prepareMaintenanceQuotas(plan, turn);
     int work = 0;
+    if (plan.accessUrgent) {
+      accessUrgentMode = true;
+      nextAccessWakeNanos = Long.MAX_VALUE;
+    }
     boolean policyChanged = plan.hasAdvisoryPolicyMutations();
     if (policyChanged) {
       policy.beginWriteBatch();
@@ -1521,9 +1539,23 @@ public final class MaintenanceEventLoop
       completeFlushIfIdle();
     }
     if (plan.access) {
-      accessScanActive = plan.accessQuota < turn.accessRecords;
-      if (accessScanActive) {
-        requestWork(WORK_ACCESS_SCAN);
+      if (plan.flush) {
+        accessScanActive = false;
+        accessUrgentMode = false;
+        nextAccessWakeNanos = Long.MAX_VALUE;
+      } else {
+        int pendingAccess = pendingAccessRecords(readers.slotTableSnapshot());
+        if (pendingAccess == 0) {
+          accessScanActive = false;
+          accessUrgentMode = false;
+          nextAccessWakeNanos = Long.MAX_VALUE;
+        } else if (accessUrgentMode && pendingAccess > AccessRing.LOW_WATERMARK) {
+          accessScanActive = true;
+          nextAccessWakeNanos = Long.MAX_VALUE;
+          requestWork(WORK_ACCESS_SCAN);
+        } else {
+          scheduleAccessWake();
+        }
       }
     }
     if (plan.ttl && plan.ttlQuota < TTL_MAX_PER_TURN && ttlWorkDue()) {
@@ -1942,8 +1974,17 @@ public final class MaintenanceEventLoop
         writerResources != null && writerResources.hasRetirementWork();
     decision.ghostRehash = policy.ghostRehashPending();
     boolean accessHintRequested = (decision.requested & WORK_ACCESS_SCAN) != 0;
+    boolean accessDeadlineDue = !isStopping() && accessDeadlineDue();
+    boolean accessImmediate = !isStopping() && accessScanActive;
+    if (!accessImmediate && (accessHintRequested || accessDeadlineDue)) {
+      accessImmediate = hasUrgentAccess();
+    }
+    boolean accessUrgent =
+        !isStopping() && (accessImmediate || accessDeadlineDue);
+    decision.accessImmediate = accessImmediate;
+    decision.accessUrgent = accessUrgent;
     decision.accessScanActive =
-        !isStopping() && (accessScanActive || accessHintRequested);
+        accessUrgent;
     decision.readerLifecycleWork =
         readerLifecycleWork(
             (decision.requested & WORK_READER_LIFECYCLE) != 0
@@ -1970,6 +2011,7 @@ public final class MaintenanceEventLoop
     plan.mutations = (plan.requested & WORK_MUTATION) != 0;
     plan.ghostRehash = decision.ghostRehash;
     plan.access = plan.flush || (!isStopping() && decision.accessScanActive);
+    plan.accessUrgent = decision.accessImmediate;
     plan.readerLifecycle =
         (plan.requested & WORK_READER_LIFECYCLE) != 0
             || plan.flush
@@ -2202,13 +2244,21 @@ public final class MaintenanceEventLoop
       return;
     }
     clearStaleWakeRequests();
-    if (hasPendingAccess()) {
-      // A publication can follow the last scan while its notification is still coalesced.
-      // Hand the observed work to the next turn; the wake gate alone cannot schedule a drain.
-      accessScanActive = true;
-      wakeGate.requireProcessing();
-      idleBackoff.reset();
-      return;
+    boolean pendingAccess = hasPendingAccess();
+    if (pendingAccess) {
+      if (hasUrgentAccess()) {
+        // A high-watermark publication can follow the last scan while its notification is still
+        // coalesced. Hand it to the next turn; the wake gate alone cannot schedule a drain.
+        accessScanActive = true;
+        accessUrgentMode = true;
+        nextAccessWakeNanos = Long.MAX_VALUE;
+        wakeGate.requireProcessing();
+        idleBackoff.reset();
+        return;
+      }
+      scheduleAccessWake();
+    } else {
+      nextAccessWakeNanos = Long.MAX_VALUE;
     }
     WorkDecision decision = captureWorkDecision(false);
     if (cutIdleRetirementRecords(decision.retirementState)) {
@@ -2226,7 +2276,11 @@ public final class MaintenanceEventLoop
     long retryWakeNanos =
         nextRetryDeadlineNanos(decision.retirementState, decision.runnableCheck);
     long readerLifecycleWakeNanos = nextReaderLifecycleWakeNanos();
-    long wakeNanos = Math.min(Math.min(ttlWakeNanos, retryWakeNanos), readerLifecycleWakeNanos);
+    long accessWakeNanos = nextAccessWakeWallClockNanos();
+    long wakeNanos =
+        Math.min(
+            Math.min(Math.min(ttlWakeNanos, retryWakeNanos), readerLifecycleWakeNanos),
+            accessWakeNanos);
     if (wakeNanos == Long.MAX_VALUE) {
       while (idleBackoff.takeSpinTurn()) {
         Thread.onSpinWait();
@@ -2294,6 +2348,51 @@ public final class MaintenanceEventLoop
         return;
       }
     } while (!requestedWork.compareAndSet(current, current & ~stale));
+  }
+
+  private boolean accessDeadlineDue() {
+    return nextAccessWakeNanos != Long.MAX_VALUE
+        && nextAccessWakeNanos <= System.nanoTime();
+  }
+
+  /** Checks only the urgent ring watermark; counters and low-watermark records stay advisory. */
+  private boolean hasUrgentAccess() {
+    ReaderRegistry.SlotTableSnapshot slots = readers.slotTableSnapshot();
+    for (int chunkIndex = 0; chunkIndex < slots.slotChunkCount(); chunkIndex++) {
+      long bits = slots.liveBitmap(chunkIndex);
+      while (bits != 0L) {
+        int offset = Long.numberOfTrailingZeros(bits);
+        int index = (chunkIndex << ReaderRegistry.SLOT_CHUNK_SHIFT) + offset;
+        ReaderSlot slot = slots.slotAt(index);
+        if (slot != null) {
+          AccessRing access = slot.access;
+          if (access != null && access.armNotificationAndCheckUrgentPending()) {
+            return true;
+          }
+        }
+        bits &= bits - 1L;
+      }
+    }
+    return false;
+  }
+
+  private void scheduleAccessWake() {
+    long deadline = saturatingAdd(System.nanoTime(), MAX_IDLE_PARK_NANOS);
+    if (nextAccessWakeNanos == Long.MAX_VALUE || deadline < nextAccessWakeNanos) {
+      nextAccessWakeNanos = deadline;
+    }
+    accessScanActive = false;
+    accessUrgentMode = false;
+  }
+
+  private long nextAccessWakeWallClockNanos() {
+    if (accessUrgentMode) {
+      return System.nanoTime();
+    }
+    if (nextAccessWakeNanos == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
+    }
+    return nextAccessWakeNanos;
   }
 
   private boolean ttlWorkDue() {
@@ -3060,6 +3159,43 @@ public final class MaintenanceEventLoop
     return false;
   }
 
+  /** Counts enough pending access work to choose immediate continuation versus the deadline path. */
+  private int pendingAccessRecords(ReaderRegistry.SlotTableSnapshot slots) {
+    int pending = 0;
+    for (int chunkIndex = 0; chunkIndex < slots.slotChunkCount(); chunkIndex++) {
+      long bits = slots.liveBitmap(chunkIndex);
+      while (bits != 0L) {
+        int offset = Long.numberOfTrailingZeros(bits);
+        int index = (chunkIndex << ReaderRegistry.SLOT_CHUNK_SHIFT) + offset;
+        ReaderSlot slot = slots.slotAt(index);
+        if (slot != null) {
+          pending =
+              cappedAccessCount(
+                  pending, boundedWorkCount(slot.publishedHits - slots.consumedHits(index)));
+          pending =
+              cappedAccessCount(
+                  pending, boundedWorkCount(slot.publishedMisses - slots.consumedMisses(index)));
+          AccessRing access = slot.access;
+          if (access != null) {
+            pending = cappedAccessCount(pending, access.size());
+          }
+          if (pending > AccessRing.LOW_WATERMARK) {
+            return pending;
+          }
+        }
+        bits &= bits - 1L;
+      }
+    }
+    return pending;
+  }
+
+  private static int cappedAccessCount(int current, int addition) {
+    if (addition <= 0) {
+      return current;
+    }
+    return Math.min(AccessRing.LOW_WATERMARK + 1, saturatingIntAdd(current, addition));
+  }
+
   @Override
   public void accept(
       Entry entry,
@@ -3472,17 +3608,21 @@ public final class MaintenanceEventLoop
       failure = appendShutdownFailure(failure, cleanupFailure);
     }
     try {
-      memory.closeArenas();
+      readers.clear();
     } catch (Throwable cleanupFailure) {
       failure = appendShutdownFailure(failure, cleanupFailure);
     }
     try {
-      readers.clear();
+      readers.close();
     } catch (Throwable cleanupFailure) {
       failure = appendShutdownFailure(failure, cleanupFailure);
-    } finally {
-      evictionNotifier = null;
     }
+    try {
+      memory.closeArenas();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    evictionNotifier = null;
     if (failure != null) {
       recordTerminalFailure(failure);
     }
@@ -3756,7 +3896,6 @@ public final class MaintenanceEventLoop
     turn.accessRecords = pendingRecords;
     turn.accessDropped = dropped;
     accessRingDroppedCount = turn.accessDropped;
-    accessScanActive = pendingRecords != 0;
   }
 
   private static int boundedWorkCount(long count) {
@@ -3809,6 +3948,8 @@ public final class MaintenanceEventLoop
     private boolean writerLifecycleWork;
     private boolean writerResourceWork;
     private boolean ghostRehash;
+    private boolean accessImmediate;
+    private boolean accessUrgent;
     private boolean accessScanActive;
     private boolean readerLifecycleWork;
     private boolean readerNotificationWork;
@@ -3834,6 +3975,7 @@ public final class MaintenanceEventLoop
     private boolean mutations;
     private boolean capacity;
     private boolean access;
+    private boolean accessUrgent;
     private boolean readerLifecycle;
     private boolean ttl;
     private boolean seal;
@@ -3858,6 +4000,7 @@ public final class MaintenanceEventLoop
       mutations = false;
       capacity = false;
       access = false;
+      accessUrgent = false;
       readerLifecycle = false;
       ttl = false;
       seal = false;

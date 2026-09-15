@@ -337,7 +337,7 @@ public final class RetirementJournalWakeTest {
   public void lookupOnlyWriterDoesNotPinValueRetirement() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
     RetirementJournal journal = new RetirementJournal(memory);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot lookupOnly = new ReaderSlot();
     int lookupIndex = readers.register(lookupOnly);
     readers.setEpoch(lookupIndex, 1L);
@@ -353,6 +353,8 @@ public final class RetirementJournalWakeTest {
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 1);
     } finally {
       readers.setEpoch(lookupIndex, 0L);
+      readers.clear();
+      readers.close();
       journal.close();
       memory.closeArenas();
     }
@@ -362,7 +364,7 @@ public final class RetirementJournalWakeTest {
   public void lookupOnlyWriterStillPinsStructuralRetirement() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
     RetirementJournal journal = new RetirementJournal(memory);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot lookupOnly = new ReaderSlot();
     int lookupIndex = readers.register(lookupOnly);
     readers.setEpoch(lookupIndex, 1L);
@@ -380,6 +382,8 @@ public final class RetirementJournalWakeTest {
           journal.publishSafe(readers.minActiveEpoch(), readers.minActiveValueEpoch()), 1);
     } finally {
       readers.setEpoch(lookupIndex, 0L);
+      readers.clear();
+      readers.close();
       journal.close();
       memory.closeArenas();
     }

@@ -3,6 +3,9 @@ package com.red.ohc.runtime;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.Arrays;
+import java.util.Objects;
+
+import com.red.ohc.storage.NativeMemory;
 
 /** Cache-local QSBR slot table with strong ownership and actor-driven lifecycle cleanup. */
 public final class ReaderRegistry {
@@ -21,6 +24,8 @@ public final class ReaderRegistry {
   /** Writer admission uses the second word and never shares the reader state RMW path. */
   private static final int WRITER_WORD_OFFSET = 1;
   private static final int WORDS_PER_CHUNK = SLOT_CHUNK_SIZE * SLOT_STRIDE_WORDS;
+  private static final int SLOT_CHUNK_BYTES = WORDS_PER_CHUNK * Long.BYTES;
+  private static final int SLOT_ALIGNMENT_BYTES = 64;
   private static final VarHandle LONG_ARRAY_HANDLE =
       MethodHandles.arrayElementVarHandle(long[].class);
   private static final VarHandle READER_NOTIFICATION_HANDLE;
@@ -34,15 +39,22 @@ public final class ReaderRegistry {
     }
   }
 
+  private final NativeMemory.Memory memory;
   private final Object registrationLock = new Object();
   /** Volatile root; growth copies only the root directories and appends new chunks. */
-  private volatile SlotStorage storage = SlotStorage.initial();
+  private volatile SlotStorage storage;
   /** Primitive free-index stack. Only registration and actor lifecycle cleanup mutate it. */
   private int[] freeSlotStack = new int[INITIAL_SLOT_CAPACITY];
   private int freeSlotCount;
   private int nextSlot;
   private volatile int registeredCount;
-  private boolean closed;
+  private volatile boolean closed;
+  private boolean nativeClosed;
+
+  public ReaderRegistry(NativeMemory.Memory memory) {
+    this.memory = Objects.requireNonNull(memory, "memory");
+    this.storage = SlotStorage.initial(memory);
+  }
 
   public int register(ReaderSlot slot) {
     if (slot == null) {
@@ -77,10 +89,9 @@ public final class ReaderRegistry {
       SlotStorage current = storage;
       int chunkIndex = index >> SLOT_CHUNK_SHIFT;
       int offset = index & SLOT_CHUNK_MASK;
-      long[] stateChunk = current.stateWordChunks[chunkIndex];
-      int stateOffset = offset * SLOT_STRIDE_WORDS;
-      setWordVolatile(stateChunk, stateOffset, 0L);
-      setWordVolatile(stateChunk, stateOffset + WRITER_WORD_OFFSET, 0L);
+      long stateAddress = stateAddress(current, index);
+      setWordVolatile(stateAddress, 0L);
+      setWordVolatile(stateAddress + WRITER_WORD_OFFSET * Long.BYTES, 0L);
       READER_NOTIFICATION_HANDLE.setVolatile(slot, 0);
       current.consumedHitChunks[chunkIndex][offset] = 0L;
       current.consumedMissChunks[chunkIndex][offset] = 0L;
@@ -88,8 +99,8 @@ public final class ReaderRegistry {
 
       slot.owner = Thread.currentThread();
       slot.writerResource = null;
-      slot.readerStateChunk = stateChunk;
-      slot.readerStateOffset = stateOffset;
+      slot.nativePublicationInFlight = false;
+      slot.readerStateAddress = stateAddress;
       slot.registryIndex = index;
       slot.registry = this;
       setLiveBitRelease(current.liveBitmaps, chunkIndex, offset, true);
@@ -210,9 +221,9 @@ public final class ReaderRegistry {
         return null;
       }
       WriterResource resource = slot.writerResource;
-      setWordVolatile(slot.readerStateChunk, slot.readerStateOffset, 0L);
-      setWordVolatile(
-          slot.readerStateChunk, slot.readerStateOffset + WRITER_WORD_OFFSET, 0L);
+      long stateAddress = slot.readerStateAddress;
+      setWordVolatile(stateAddress, 0L);
+      setWordVolatile(stateAddress + WRITER_WORD_OFFSET * Long.BYTES, 0L);
       READER_NOTIFICATION_HANDLE.setVolatile(slot, 0);
       current.consumedHitChunks[chunkIndex][offset] = 0L;
       current.consumedMissChunks[chunkIndex][offset] = 0L;
@@ -220,8 +231,7 @@ public final class ReaderRegistry {
       slot.setAccessSignal(null);
       slot.registry = null;
       slot.registryIndex = -1;
-      slot.readerStateChunk = null;
-      slot.readerStateOffset = -1;
+      slot.readerStateAddress = 0L;
       slot.owner = null;
       slot.writerResource = null;
       current.slotChunks[chunkIndex][offset] = null;
@@ -235,44 +245,73 @@ public final class ReaderRegistry {
   public void setEpoch(int index, long epoch) {
     validateEpoch(epoch);
     SlotStorage current = storage;
-    assertOwner(current, index);
-    setEpoch(current.stateWordChunks[index >> SLOT_CHUNK_SHIFT], slotOffset(index), epoch);
+    ReaderSlot slot = beginNativePublication(current, index);
+    try {
+      assertOwner(slot);
+      setEpoch(stateAddress(current, index), epoch);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   public void setEpoch(ReaderSlot slot, long epoch) {
-    requireRegistered(slot);
-    assertOwner(slot);
     validateEpoch(epoch);
-    setEpoch(slot.readerStateChunk, slot.readerStateOffset, epoch);
+    long stateAddress = slot == null ? 0L : slot.readerStateAddress;
+    beginNativePublication(slot, stateAddress);
+    try {
+      assertOwner(slot);
+      setEpoch(stateAddress, epoch);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   /** Publishes the value-protection bit in the one reader QSBR state word. */
   public void setValueEpoch(int index, long epoch) {
     validateEpoch(epoch);
     SlotStorage current = storage;
-    assertOwner(current, index);
-    setValueEpoch(current.stateWordChunks[index >> SLOT_CHUNK_SHIFT], slotOffset(index), epoch);
+    ReaderSlot slot = beginNativePublication(current, index);
+    try {
+      assertOwner(slot);
+      setValueEpoch(stateAddress(current, index), epoch);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   public void setValueEpoch(ReaderSlot slot, long epoch) {
-    requireRegistered(slot);
-    assertOwner(slot);
     validateEpoch(epoch);
-    setValueEpoch(slot.readerStateChunk, slot.readerStateOffset, epoch);
+    long stateAddress = slot == null ? 0L : slot.readerStateAddress;
+    beginNativePublication(slot, stateAddress);
+    try {
+      assertOwner(slot);
+      setValueEpoch(stateAddress, epoch);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   /** Publishes writer admission in its own word in the reader's cache-line lane. */
   public void setWriterActive(int index, boolean active) {
     SlotStorage current = storage;
-    assertOwner(current, index);
-    setWriterAdmission(
-        current.stateWordChunks[index >> SLOT_CHUNK_SHIFT], slotOffset(index), active);
+    ReaderSlot slot = beginNativePublication(current, index);
+    try {
+      assertOwner(slot);
+      setWriterAdmission(stateAddress(current, index), active);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   public void setWriterAdmission(ReaderSlot slot, boolean active) {
-    requireRegistered(slot);
-    assertOwner(slot);
-    setWriterAdmission(slot.readerStateChunk, slot.readerStateOffset, active);
+    long stateAddress = slot == null ? 0L : slot.readerStateAddress;
+    beginNativePublication(slot, stateAddress);
+    try {
+      assertOwner(slot);
+      setWriterAdmission(stateAddress, active);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   public long epoch(int index) {
@@ -282,40 +321,59 @@ public final class ReaderRegistry {
   /** Returns the one volatile-loaded reader word: epoch plus value protection only. */
   public long readerState(int index) {
     SlotStorage current = storage;
-    return getWordVolatile(current.stateWordChunks[index >> SLOT_CHUNK_SHIFT], slotOffset(index));
+    ReaderSlot slot = beginNativePublication(current, index);
+    try {
+      return getWordVolatile(stateAddress(current, index));
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   public long readerState(ReaderSlot slot) {
-    long[] stateChunk = slot == null ? null : slot.readerStateChunk;
-    int stateOffset = slot == null ? -1 : slot.readerStateOffset;
-    requireRegistered(slot, stateChunk, stateOffset);
-    return getWordVolatileTrusted(stateChunk, stateOffset);
+    long stateAddress = slot == null ? 0L : slot.readerStateAddress;
+    beginNativePublication(slot, stateAddress);
+    try {
+      return getWordVolatileTrusted(stateAddress);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   /** Publishes an active reader with StoreLoad ordering and a clear with release ordering. */
   public void setReaderState(int index, long state) {
     validateReaderState(state);
     SlotStorage current = storage;
-    assertOwner(current, index);
-    setReaderBits(current.stateWordChunks[index >> SLOT_CHUNK_SHIFT], slotOffset(index), state);
+    ReaderSlot slot = beginNativePublication(current, index);
+    try {
+      assertOwner(slot);
+      setReaderBits(stateAddress(current, index), state);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   public void setReaderState(ReaderSlot slot, long state) {
-    long[] stateChunk = slot == null ? null : slot.readerStateChunk;
-    int stateOffset = slot == null ? -1 : slot.readerStateOffset;
-    requireRegistered(slot, stateChunk, stateOffset);
-    assertOwner(slot);
+    long stateAddress = slot == null ? 0L : slot.readerStateAddress;
     validateReaderState(state);
-    setReaderBitsTrusted(stateChunk, stateOffset, state);
+    beginNativePublication(slot, stateAddress);
+    try {
+      assertOwner(slot);
+      setReaderBitsTrusted(stateAddress, state);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   /** Publishes a validated reader state without touching writer admission. */
   public void setReaderStateKnownEpoch(ReaderSlot slot, long state) {
-    long[] stateChunk = slot == null ? null : slot.readerStateChunk;
-    int stateOffset = slot == null ? -1 : slot.readerStateOffset;
-    requireRegistered(slot, stateChunk, stateOffset);
-    assertOwner(slot);
-    setReaderBitsTrusted(stateChunk, stateOffset, state);
+    long stateAddress = slot == null ? 0L : slot.readerStateAddress;
+    beginNativePublication(slot, stateAddress);
+    try {
+      assertOwner(slot);
+      setReaderBitsTrusted(stateAddress, state);
+    } finally {
+      endNativePublication(slot);
+    }
   }
 
   /** Clears a reader state when shutdown may have concurrently unbound the slot. */
@@ -324,10 +382,10 @@ public final class ReaderRegistry {
       return false;
     }
     synchronized (registrationLock) {
-      if (slot.registry != this || slot.readerStateChunk == null) {
+      if (slot.registry != this || slot.readerStateAddress == 0L) {
         return false;
       }
-      setReaderBits(slot.readerStateChunk, slot.readerStateOffset, 0L);
+      setReaderBits(slot.readerStateAddress, 0L);
       return true;
     }
   }
@@ -348,24 +406,8 @@ public final class ReaderRegistry {
     }
   }
 
-  private void requireRegistered(ReaderSlot slot) {
-    if (slot == null || slot.registry != this || slot.readerStateChunk == null) {
-      throw new IllegalArgumentException("reader slot is not registered with this registry");
-    }
-  }
-
-  private void requireRegistered(ReaderSlot slot, long[] stateChunk, int stateOffset) {
-    if (slot == null
-        || slot.registry != this
-        || stateChunk == null
-        || stateOffset < 0
-        || stateOffset >= stateChunk.length) {
-      throw new IllegalArgumentException("reader slot is not registered with this registry");
-    }
-  }
-
   private void requireRegisteredLocked(ReaderSlot slot) {
-    if (slot.registry != this || slot.readerStateChunk == null) {
+    if (slot.registry != this || slot.readerStateAddress == 0L) {
       throw new IllegalArgumentException("reader slot is not registered with this registry");
     }
   }
@@ -385,7 +427,7 @@ public final class ReaderRegistry {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
-        long state = getWordVolatile(current.stateWordChunks[chunkIndex], slotOffset(offset));
+        long state = getWordVolatile(stateAddress(current, chunkIndex, offset));
         if ((state & EPOCH_MASK) != 0L) {
           return true;
         }
@@ -410,7 +452,7 @@ public final class ReaderRegistry {
         int offset = Long.numberOfTrailingZeros(bits);
         ReaderSlot slot = current.slotChunks[chunkIndex][offset];
         if (slot != null) {
-          long state = getWordVolatile(current.stateWordChunks[chunkIndex], slotOffset(offset));
+          long state = getWordVolatile(stateAddress(current, chunkIndex, offset));
           long readerEpoch = state & EPOCH_MASK;
           if (readerEpoch != 0L && readerEpoch < epochExclusive) {
             READER_NOTIFICATION_HANDLE.setRelease(slot, 1);
@@ -447,7 +489,7 @@ public final class ReaderRegistry {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
-        long state = getWordVolatile(current.stateWordChunks[chunkIndex], slotOffset(offset));
+        long state = getWordVolatile(stateAddress(current, chunkIndex, offset));
         if ((state & EPOCH_MASK) != 0L) {
           active++;
         }
@@ -479,7 +521,7 @@ public final class ReaderRegistry {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
-        long state = getWordVolatile(current.stateWordChunks[chunkIndex], slotOffset(offset));
+        long state = getWordVolatile(stateAddress(current, chunkIndex, offset));
         long lookupEpoch = state & EPOCH_MASK;
         if (lookupEpoch != 0L && lookupEpoch < minimumLookup) {
           minimumLookup = lookupEpoch;
@@ -501,7 +543,7 @@ public final class ReaderRegistry {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
-        long state = getWordVolatile(current.stateWordChunks[chunkIndex], slotOffset(offset));
+        long state = getWordVolatile(stateAddress(current, chunkIndex, offset));
         long epoch = state & EPOCH_MASK;
         if ((!values || (state & VALUE_PROTECTION_BIT) != 0L)
             && epoch != 0L
@@ -520,8 +562,8 @@ public final class ReaderRegistry {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
-        if (getWordAcquire(
-                current.stateWordChunks[chunkIndex], slotOffset(offset) + WRITER_WORD_OFFSET)
+        if (getWordVolatile(
+                stateAddress(current, chunkIndex, offset) + WRITER_WORD_OFFSET * Long.BYTES)
             != 0L) {
           return true;
         }
@@ -538,8 +580,8 @@ public final class ReaderRegistry {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
-        if (getWordAcquire(
-                current.stateWordChunks[chunkIndex], slotOffset(offset) + WRITER_WORD_OFFSET)
+        if (getWordVolatile(
+                stateAddress(current, chunkIndex, offset) + WRITER_WORD_OFFSET * Long.BYTES)
             != 0L) {
           count++;
         }
@@ -553,28 +595,25 @@ public final class ReaderRegistry {
     synchronized (registrationLock) {
       closed = true;
       SlotStorage current = storage;
+      awaitNativePublishers(current);
       for (int chunkIndex = 0; chunkIndex < current.slotChunks.length; chunkIndex++) {
         long bits = liveBits(current.liveBitmaps, chunkIndex);
         while (bits != 0L) {
           int offset = Long.numberOfTrailingZeros(bits);
-          int index = (chunkIndex << SLOT_CHUNK_SHIFT) + offset;
           ReaderSlot slot = current.slotChunks[chunkIndex][offset];
           if (slot != null) {
             slot.setAccessSignal(null);
             slot.registry = null;
             slot.registryIndex = -1;
-            slot.readerStateChunk = null;
-            slot.readerStateOffset = -1;
+            slot.readerStateAddress = 0L;
             slot.owner = null;
             slot.writerResource = null;
             READER_NOTIFICATION_HANDLE.setVolatile(slot, 0);
             current.slotChunks[chunkIndex][offset] = null;
           }
-          setWordVolatile(current.stateWordChunks[chunkIndex], slotOffset(offset), 0L);
-          setWordVolatile(
-              current.stateWordChunks[chunkIndex],
-              slotOffset(offset) + WRITER_WORD_OFFSET,
-              0L);
+          long stateAddress = stateAddress(current, chunkIndex, offset);
+          setWordVolatile(stateAddress, 0L);
+          setWordVolatile(stateAddress + WRITER_WORD_OFFSET * Long.BYTES, 0L);
           current.consumedHitChunks[chunkIndex][offset] = 0L;
           current.consumedMissChunks[chunkIndex][offset] = 0L;
           bits &= bits - 1L;
@@ -584,7 +623,21 @@ public final class ReaderRegistry {
       registeredCount = 0;
       nextSlot = 0;
       freeSlotCount = 0;
-      storage = SlotStorage.initial();
+    }
+  }
+
+  /** Releases the append-only native slot chunks after the actor and all publishers have stopped. */
+  public void close() {
+    synchronized (registrationLock) {
+      if (nativeClosed) {
+        return;
+      }
+      if (registeredCount != 0) {
+        throw new IllegalStateException("reader registry still has registered slots");
+      }
+      closed = true;
+      storage.close(memory);
+      nativeClosed = true;
     }
   }
 
@@ -615,36 +668,88 @@ public final class ReaderRegistry {
 
   private void growLocked() {
     int newCapacity = storage.slotCapacity << 1;
-    storage = storage.grow(newCapacity);
+    storage = storage.grow(memory, newCapacity);
   }
 
-  private static void setEpoch(long[] chunk, int offset, long epoch) {
-    long current = getWordVolatile(chunk, offset);
+  /**
+   * Closes the publication gate before unlinking slots. The volatile flag and closed bit form a
+   * two-sided handshake: a publisher that can still store is visible to this scan, while a
+   * publisher arriving after the scan observes the closed gate before touching native memory.
+   */
+  private void awaitNativePublishers(SlotStorage current) {
+    for (;;) {
+      boolean pending = false;
+      for (int chunkIndex = 0; chunkIndex < current.slotChunks.length; chunkIndex++) {
+        long bits = liveBits(current.liveBitmaps, chunkIndex);
+        while (bits != 0L) {
+          int offset = Long.numberOfTrailingZeros(bits);
+          ReaderSlot slot = current.slotChunks[chunkIndex][offset];
+          if (slot != null && slot.nativePublicationInFlight) {
+            pending = true;
+            break;
+          }
+          bits &= bits - 1L;
+        }
+        if (pending) {
+          break;
+        }
+      }
+      if (!pending) {
+        return;
+      }
+      Thread.onSpinWait();
+    }
+  }
+
+  private ReaderSlot beginNativePublication(SlotStorage current, int index) {
+    long stateAddress = stateAddress(current, index);
+    ReaderSlot slot = current.slotChunks[index >> SLOT_CHUNK_SHIFT][index & SLOT_CHUNK_MASK];
+    beginNativePublication(slot, stateAddress);
+    return slot;
+  }
+
+  private void beginNativePublication(ReaderSlot slot, long stateAddress) {
+    if (slot == null) {
+      throw new IllegalArgumentException("reader slot is not registered with this registry");
+    }
+    slot.nativePublicationInFlight = true;
+    if (closed || slot.registry != this || slot.readerStateAddress != stateAddress) {
+      slot.nativePublicationInFlight = false;
+      throw new IllegalArgumentException("reader slot is not registered with this registry");
+    }
+  }
+
+  private static void endNativePublication(ReaderSlot slot) {
+    slot.nativePublicationInFlight = false;
+  }
+
+  private static void setEpoch(long address, long epoch) {
+    long current = getWordVolatile(address);
     long readerState = epoch == 0L ? 0L : (current & VALUE_PROTECTION_BIT) | epoch;
-    setReaderPublication(chunk, offset, readerState);
+    setReaderPublication(address, readerState);
   }
 
-  private static void setValueEpoch(long[] chunk, int offset, long epoch) {
-    long current = getWordVolatile(chunk, offset);
+  private static void setValueEpoch(long address, long epoch) {
+    long current = getWordVolatile(address);
     long readerState = epoch == 0L ? current & EPOCH_MASK : VALUE_PROTECTION_BIT | epoch;
-    setReaderPublication(chunk, offset, readerState);
+    setReaderPublication(address, readerState);
   }
 
-  private static void setReaderBits(long[] chunk, int offset, long state) {
-    setReaderPublication(chunk, offset, state);
+  private static void setReaderBits(long address, long state) {
+    setReaderPublication(address, state);
   }
 
   /** Same publication protocol for a slot whose registration fields were already validated. */
-  private static void setReaderBitsTrusted(long[] chunk, int offset, long state) {
-    setReaderPublicationTrusted(chunk, offset, state);
+  private static void setReaderBitsTrusted(long address, long state) {
+    setReaderPublicationTrusted(address, state);
   }
 
-  private static void setWriterAdmission(long[] chunk, int offset, boolean active) {
-    int writerOffset = offset + WRITER_WORD_OFFSET;
+  private static void setWriterAdmission(long address, boolean active) {
+    long writerAddress = address + WRITER_WORD_OFFSET * Long.BYTES;
     if (active) {
-      setWordVolatile(chunk, writerOffset, 1L);
+      setWordVolatile(writerAddress, 1L);
     } else {
-      setWordRelease(chunk, writerOffset, 0L);
+      setWordRelease(writerAddress, 0L);
     }
   }
 
@@ -652,19 +757,19 @@ public final class ReaderRegistry {
    * Entry publication must order the following close/epoch load after the state becomes visible.
    * Quiescent exits only need release ordering, so they stay on the cheaper store path.
    */
-  private static void setReaderPublication(long[] chunk, int offset, long state) {
+  private static void setReaderPublication(long address, long state) {
     if (state == 0L) {
-      setWordRelease(chunk, offset, state);
+      setWordRelease(address, state);
     } else {
-      setWordVolatile(chunk, offset, state);
+      setWordVolatile(address, state);
     }
   }
 
-  private static void setReaderPublicationTrusted(long[] chunk, int offset, long state) {
+  private static void setReaderPublicationTrusted(long address, long state) {
     if (state == 0L) {
-      setWordReleaseTrusted(chunk, offset, state);
+      setWordReleaseTrusted(address, state);
     } else {
-      setWordVolatileTrusted(chunk, offset, state);
+      setWordVolatileTrusted(address, state);
     }
   }
 
@@ -683,52 +788,58 @@ public final class ReaderRegistry {
     return owner == null || owner == Thread.currentThread();
   }
 
-  private static int slotOffset(int index) {
-    return (index & SLOT_CHUNK_MASK) * SLOT_STRIDE_WORDS;
+  private static long stateAddress(SlotStorage storage, int index) {
+    if (index < 0 || index >= storage.slotCapacity) {
+      throw new IndexOutOfBoundsException("reader slot index: " + index);
+    }
+    return stateAddress(storage, index >> SLOT_CHUNK_SHIFT, index & SLOT_CHUNK_MASK);
   }
 
-  private static void setWordVolatile(long[] chunk, int offset, long value) {
-    if (chunk == null || offset < 0 || offset >= chunk.length) {
+  private static long stateAddress(SlotStorage storage, int chunkIndex, int offset) {
+    if (chunkIndex < 0
+        || chunkIndex >= storage.stateChunkAddresses.length
+        || offset < 0
+        || offset >= SLOT_CHUNK_SIZE) {
       throw new IllegalArgumentException("invalid reader slot word");
     }
-    LONG_ARRAY_HANDLE.setVolatile(chunk, offset, value);
+    return storage.stateChunkAddresses[chunkIndex] + (long) offset * SLOT_STRIDE_WORDS * Long.BYTES;
   }
 
-  private static void setWordVolatileTrusted(long[] chunk, int offset, long value) {
-    LONG_ARRAY_HANDLE.setVolatile(chunk, offset, value);
+  private static void setWordVolatile(long address, long value) {
+    validateAddress(address);
+    NativeMemory.putLongVolatile(address, value);
   }
 
-  private static void setWordRelease(long[] chunk, int offset, long value) {
-    if (chunk == null || offset < 0 || offset >= chunk.length) {
+  private static void setWordVolatileTrusted(long address, long value) {
+    NativeMemory.putLongVolatile(address, value);
+  }
+
+  private static void setWordRelease(long address, long value) {
+    validateAddress(address);
+    NativeMemory.putLongRelease(address, value);
+  }
+
+  private static void setWordReleaseTrusted(long address, long value) {
+    NativeMemory.putLongRelease(address, value);
+  }
+
+  private static long getWordVolatile(long address) {
+    validateAddress(address);
+    return NativeMemory.getLongVolatile(address);
+  }
+
+  private static long getWordVolatileTrusted(long address) {
+    return NativeMemory.getLongVolatile(address);
+  }
+
+  private static void validateAddress(long address) {
+    if (address == 0L) {
       throw new IllegalArgumentException("invalid reader slot word");
     }
-    LONG_ARRAY_HANDLE.setRelease(chunk, offset, value);
-  }
-
-  private static void setWordReleaseTrusted(long[] chunk, int offset, long value) {
-    LONG_ARRAY_HANDLE.setRelease(chunk, offset, value);
-  }
-
-  private static long getWordVolatile(long[] chunk, int offset) {
-    if (chunk == null || offset < 0 || offset >= chunk.length) {
-      throw new IllegalArgumentException("invalid reader slot word");
-    }
-    return (long) LONG_ARRAY_HANDLE.getVolatile(chunk, offset);
-  }
-
-  private static long getWordVolatileTrusted(long[] chunk, int offset) {
-    return (long) LONG_ARRAY_HANDLE.getVolatile(chunk, offset);
-  }
-
-  private static long getWordAcquire(long[] chunk, int offset) {
-    if (chunk == null || offset < 0 || offset >= chunk.length) {
-      throw new IllegalArgumentException("invalid reader slot word");
-    }
-    return (long) LONG_ARRAY_HANDLE.getAcquire(chunk, offset);
   }
 
   private static final class SlotStorage {
-    private final long[][] stateWordChunks;
+    private final long[] stateChunkAddresses;
     private final ReaderSlot[][] slotChunks;
     private final long[] liveBitmaps;
     private final long[][] consumedHitChunks;
@@ -737,13 +848,13 @@ public final class ReaderRegistry {
     private final SlotTableSnapshot snapshot;
 
     private SlotStorage(
-        long[][] stateWordChunks,
+        long[] stateChunkAddresses,
         ReaderSlot[][] slotChunks,
         long[] liveBitmaps,
         long[][] consumedHitChunks,
         long[][] consumedMissChunks,
         int slotCapacity) {
-      this.stateWordChunks = stateWordChunks;
+      this.stateChunkAddresses = stateChunkAddresses;
       this.slotChunks = slotChunks;
       this.liveBitmaps = liveBitmaps;
       this.consumedHitChunks = consumedHitChunks;
@@ -752,9 +863,9 @@ public final class ReaderRegistry {
       this.snapshot = new SlotTableSnapshot(this);
     }
 
-    private static SlotStorage initial() {
+    private static SlotStorage initial(NativeMemory.Memory memory) {
       return new SlotStorage(
-          new long[][] {new long[WORDS_PER_CHUNK]},
+          new long[] {allocateChunk(memory)},
           new ReaderSlot[][] {new ReaderSlot[SLOT_CHUNK_SIZE]},
           new long[1],
           new long[][] {new long[SLOT_CHUNK_SIZE]},
@@ -762,18 +873,32 @@ public final class ReaderRegistry {
           INITIAL_SLOT_CAPACITY);
     }
 
-    private SlotStorage grow(int newSlotCapacity) {
+    private static long allocateChunk(NativeMemory.Memory memory) {
+      return memory.allocateAligned(SLOT_CHUNK_BYTES, SLOT_ALIGNMENT_BYTES);
+    }
+
+    private SlotStorage grow(NativeMemory.Memory memory, int newSlotCapacity) {
       int requiredChunks =
           (newSlotCapacity + SLOT_CHUNK_SIZE - 1) >> SLOT_CHUNK_SHIFT;
-      long[][] expandedState = Arrays.copyOf(stateWordChunks, requiredChunks);
+      long[] expandedState = Arrays.copyOf(stateChunkAddresses, requiredChunks);
       ReaderSlot[][] expandedSlots = Arrays.copyOf(slotChunks, requiredChunks);
       long[][] expandedHitChunks = Arrays.copyOf(consumedHitChunks, requiredChunks);
       long[][] expandedMissChunks = Arrays.copyOf(consumedMissChunks, requiredChunks);
-      for (int index = stateWordChunks.length; index < requiredChunks; index++) {
-        expandedState[index] = new long[WORDS_PER_CHUNK];
-        expandedSlots[index] = new ReaderSlot[SLOT_CHUNK_SIZE];
-        expandedHitChunks[index] = new long[SLOT_CHUNK_SIZE];
-        expandedMissChunks[index] = new long[SLOT_CHUNK_SIZE];
+      int firstNewChunk = stateChunkAddresses.length;
+      int allocatedChunks = 0;
+      try {
+        for (int index = firstNewChunk; index < requiredChunks; index++) {
+          expandedState[index] = allocateChunk(memory);
+          allocatedChunks++;
+          expandedSlots[index] = new ReaderSlot[SLOT_CHUNK_SIZE];
+          expandedHitChunks[index] = new long[SLOT_CHUNK_SIZE];
+          expandedMissChunks[index] = new long[SLOT_CHUNK_SIZE];
+        }
+      } catch (Throwable failure) {
+        for (int index = firstNewChunk; index < firstNewChunk + allocatedChunks; index++) {
+          memory.freeAligned(expandedState[index], SLOT_CHUNK_BYTES, SLOT_ALIGNMENT_BYTES);
+        }
+        throw failure;
       }
       return new SlotStorage(
           expandedState,
@@ -782,6 +907,16 @@ public final class ReaderRegistry {
           expandedHitChunks,
           expandedMissChunks,
           newSlotCapacity);
+    }
+
+    private void close(NativeMemory.Memory memory) {
+      for (int index = 0; index < stateChunkAddresses.length; index++) {
+        long address = stateChunkAddresses[index];
+        if (address != 0L) {
+          memory.freeAligned(address, SLOT_CHUNK_BYTES, SLOT_ALIGNMENT_BYTES);
+          stateChunkAddresses[index] = 0L;
+        }
+      }
     }
   }
 

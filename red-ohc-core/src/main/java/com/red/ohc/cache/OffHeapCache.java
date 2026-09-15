@@ -90,7 +90,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final RetirementJournal retirementJournal;
   private final WriterResourceRegistry writerResources;
   private final NativeMemory.Memory memory;
-  private final ReaderRegistry readers = new ReaderRegistry();
+  private final ReaderRegistry readers;
   private final ThreadLocal<ThreadContext> contexts;
   private final ThreadContext evictionContexts;
   private final MaintenanceEventLoop worker;
@@ -145,6 +145,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.data = new ConcurrentHashMap<>(initialCapacity, 0.75f, 1);
     this.writerLifecycleJournal = new WriterLifecycleJournal();
     this.memory = new NativeMemory.Memory(allocatorType);
+    this.readers = new ReaderRegistry(this.memory);
     EntryLinks links = new EntryLinks(memory);
     this.logicalAdmission = new LogicalAdmission(limit, countBounded);
     this.retirementJournal = new RetirementJournal(memory);

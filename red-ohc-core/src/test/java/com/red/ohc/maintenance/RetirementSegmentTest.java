@@ -544,7 +544,7 @@ public final class RetirementSegmentTest {
   @Test
   public void activeReaderPinsSealedSegmentUntilEpochIsQuiescent() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot active = new ReaderSlot();
     readers.register(active);
     readers.setValueEpoch(active, 7L);
@@ -562,6 +562,8 @@ public final class RetirementSegmentTest {
       assertEquals(journal.queuedRecords(), 0L);
     } finally {
       readers.setEpoch(active, 0L);
+      readers.clear();
+      readers.close();
       journal.close();
       memory.closeArenas();
     }
@@ -570,7 +572,7 @@ public final class RetirementSegmentTest {
   @Test
   public void pinnedSealedSegmentIsNotActorRunnableUntilReaderQuiesces() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot active = new ReaderSlot();
     readers.register(active);
     readers.setEpoch(active, 7L);
@@ -587,6 +589,8 @@ public final class RetirementSegmentTest {
           "a sealed segment pinned by a reader must wait for reclaim retry or quiescence");
     } finally {
       readers.setEpoch(active, 0L);
+      readers.clear();
+      readers.close();
       journal.close();
       memory.closeArenas();
     }

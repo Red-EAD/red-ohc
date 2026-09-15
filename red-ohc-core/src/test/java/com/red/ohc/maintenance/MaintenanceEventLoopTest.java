@@ -25,6 +25,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import org.jctools.queues.MpscUnboundedArrayQueue;
 import org.jctools.util.PaddedAtomicLong;
+import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
@@ -47,6 +48,29 @@ import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
 public class MaintenanceEventLoopTest {
+  private final List<ReaderRegistry> testReaders = new ArrayList<>();
+
+  private ReaderRegistry newReaderRegistry(NativeMemory.Memory memory) {
+    ReaderRegistry readers = new ReaderRegistry(memory);
+    synchronized (testReaders) {
+      testReaders.add(readers);
+    }
+    return readers;
+  }
+
+  @AfterMethod(alwaysRun = true)
+  public void closeTestReaderRegistries() {
+    List<ReaderRegistry> readers;
+    synchronized (testReaders) {
+      readers = new ArrayList<>(testReaders);
+      testReaders.clear();
+    }
+    for (ReaderRegistry registry : readers) {
+      registry.clear();
+      registry.close();
+    }
+  }
+
   @Test
   public void sourceCutsAreReusableAndDoNotExposeRecordBudgets() throws Exception {
     assertMissingField(MaintenanceEventLoop.class, "LIFECYCLE_BUDGET");
@@ -79,7 +103,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void shutdownReaderExitSignalsKeepStopAndWaiterBitsIndependent() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
     readers.setValueEpoch(reader, 1L);
@@ -125,7 +149,7 @@ public class MaintenanceEventLoopTest {
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(2);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
       WriterLifecycleLane first = lifecycle.lane(0);
@@ -162,7 +186,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
@@ -214,7 +238,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       assertMissingField(MaintenanceEventLoop.class, "maintenanceBatchFactor");
       assertMissingField(MaintenanceEventLoop.class, "maintenancePressurePermille");
@@ -232,7 +256,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void lifecycleTurnCleansTerminatedReaderSlotsWithoutAccessRecords() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     Thread owner =
         new Thread(
             () -> {
@@ -260,7 +284,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void lifecycleScanCountsInspectedReadersAsMaintenanceProgress() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     readers.register(new ReaderSlot());
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -313,7 +337,7 @@ public class MaintenanceEventLoopTest {
             4_000_000L,
             10L);
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     RetirementJournal journal = new RetirementJournal(memory);
     EntryLinks links = new EntryLinks(memory);
     MaintenanceEventLoop loop =
@@ -368,7 +392,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       MaintenanceEventLoop.Snapshot snapshot = loop.snapshot();
       assertEquals(snapshot.maintenanceActiveNanosTotal, 0L);
@@ -395,7 +419,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             journal, Long.MAX_VALUE);
     ThreadContext context = writerContext(memory, journal);
     try {
@@ -427,7 +451,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             journal,
             Long.MAX_VALUE);
     boolean started = false;
@@ -478,7 +502,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             journal,
             Long.MAX_VALUE);
     boolean started = false;
@@ -521,7 +545,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void blockedRetirementIsNotRunnable() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -564,7 +588,7 @@ public class MaintenanceEventLoopTest {
           }
         };
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -617,7 +641,7 @@ public class MaintenanceEventLoopTest {
   public void idleRetryDeadlineReusesTheRunnableReaderSnapshot() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
     RetirementJournal journal = new RetirementJournal(memory);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     int readerIndex = readers.register(reader);
     MaintenanceEventLoop loop =
@@ -679,7 +703,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             journal,
             Long.MAX_VALUE);
     try {
@@ -720,7 +744,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void flushDoesNotBusyLoopWhileReaderRetirementIsPinned() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -754,7 +778,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void closingFlushKeepsAccessInMaintenancePlan() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot slot = new ReaderSlot();
     slot.access = new AccessRing();
     slot.access.offer(
@@ -789,7 +813,7 @@ public class MaintenanceEventLoopTest {
   public void flushDoesNotRestartACompletedReaderLifecycleSweepWhileQsbrIsBlocked()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -823,7 +847,7 @@ public class MaintenanceEventLoopTest {
   public void newerFlushMustReceiveAReaderLifecycleSweepStartedAfterItsPublication()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     readers.register(new ReaderSlot());
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -858,7 +882,7 @@ public class MaintenanceEventLoopTest {
   public void readerAdmittedAfterRetirementCutDoesNotArmAReclaimNotification()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot oldReader = new ReaderSlot();
     readers.register(oldReader);
     readers.setValueEpoch(oldReader, 1L);
@@ -901,7 +925,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void flushCannotCompleteBeforeItsReaderLifecycleSweepIsObserved() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     AtomicReference<ReaderSlot> slotReference = new AtomicReference<>();
     Thread owner =
         new Thread(
@@ -943,7 +967,7 @@ public class MaintenanceEventLoopTest {
             ticker,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     ticker.reset();
     int taskCount = 2_049;
     List<Integer> executed = new ArrayList<>(taskCount);
@@ -983,7 +1007,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     int producerCount = 16;
     int mutationsPerProducer = 512;
@@ -1039,7 +1063,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     ExecutorService producers = Executors.newFixedThreadPool(2);
     CountDownLatch firstSequenceAllocated = new CountDownLatch(1);
     CountDownLatch releaseFirst = new CountDownLatch(1);
@@ -1097,7 +1121,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             journal,
             Long.MAX_VALUE);
     ExecutorService callers = Executors.newFixedThreadPool(2);
@@ -1192,7 +1216,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     ExecutorService callers = Executors.newFixedThreadPool(12);
     try {
@@ -1237,7 +1261,7 @@ public class MaintenanceEventLoopTest {
     RetirementJournal journal = new RetirementJournal(memory, 4);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), journal, Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), journal, Long.MAX_VALUE);
     try {
       RetirementJournal.Lane fullLane = journal.lane(0);
       for (int index = 0; index < 2_048; index++) {
@@ -1267,7 +1291,7 @@ public class MaintenanceEventLoopTest {
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), journal, Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), journal, Long.MAX_VALUE);
     RetirementSegment.Reservation postFlush = new RetirementSegment.Reservation();
     try {
       RetirementJournal.Lane lane = journal.lane(0);
@@ -1308,7 +1332,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
       CompletableFuture<Void> flush = loop.flush();
@@ -1337,7 +1361,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     long preFlushSequence = -1L;
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
@@ -1367,7 +1391,7 @@ public class MaintenanceEventLoopTest {
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), journal, Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), journal, Long.MAX_VALUE);
     try {
       RetirementJournal.Lane lane = journal.lane(0);
       RetirementSegment.Reservation first = new RetirementSegment.Reservation();
@@ -1400,7 +1424,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     int pendingCount = 2_049;
     CountDownLatch firstStarted = new CountDownLatch(1);
     CountDownLatch releaseFirst = new CountDownLatch(1);
@@ -1447,7 +1471,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.beginClosing();
       assertFalse(loop.submitAsyncMutation(() -> {}, failure -> {}));
@@ -1468,7 +1492,7 @@ public class MaintenanceEventLoopTest {
             ticker,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     ticker.reset();
     int taskCount = 2_049;
     AtomicInteger executed = new AtomicInteger();
@@ -1509,7 +1533,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.start();
       waitUntilParked(loop);
@@ -1529,14 +1553,15 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void asyncDepthReportsPhysicalQueueSize() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
-            new NativeMemory.Memory(AllocatorType.JNA),
+            memory,
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     CountDownLatch started = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     try {
@@ -1572,7 +1597,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       assertTrue(
           getField(loop, "mailbox") instanceof MpscUnboundedArrayQueue,
@@ -1591,7 +1616,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       assertTrue(loop.submitAsyncMutation(() -> {}, Throwable::printStackTrace));
       loop.start();
@@ -1620,7 +1645,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     AtomicInteger executed = new AtomicInteger();
     AtomicReference<Runnable> resubmitting = new AtomicReference<>();
     resubmitting.set(
@@ -1647,7 +1672,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     AtomicInteger completed = new AtomicInteger();
     try {
       ((WakeGate) getField(loop, "wakeGate")).requireProcessing();
@@ -1695,7 +1720,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     boolean started = false;
     try {
       for (int index = 0; index < 1_025; index++) {
@@ -1732,7 +1757,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     CompletableFuture<Void> rejected = new CompletableFuture<>();
     try {
       assertTrue(loop.submitAsyncMutation(() -> {}, rejected::completeExceptionally));
@@ -1759,7 +1784,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     CompletableFuture<Void> later = new CompletableFuture<>();
     try {
       assertTrue(
@@ -1792,7 +1817,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     AtomicBoolean executed = new AtomicBoolean();
     CompletableFuture<Void> rejected = new CompletableFuture<>();
     try {
@@ -1822,7 +1847,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       assertTrue(
           loop.submitAsyncMutation(
@@ -1852,7 +1877,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     AtomicLong submitted = (AtomicLong) getField(loop, "asyncSubmitted");
     submitted.set(Long.MAX_VALUE - 1L);
     setLongField(loop, "asyncCompletedSequence", Long.MAX_VALUE - 1L);
@@ -1893,7 +1918,7 @@ public class MaintenanceEventLoopTest {
             (entry, address, cause) ->
                 observedPayload.set(
                     NativeMemory.getByte(ValueBlock.payloadAddress(address)) & 0xff),
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(8);
     long valueAllocation = ValueBlock.allocationLength(8);
     try {
@@ -1940,7 +1965,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       Field queue = MaintenanceEventLoop.class.getDeclaredField("mailbox");
       queue.setAccessible(true);
@@ -1961,7 +1986,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     List<Entry> entries = new ArrayList<>(4_097);
     try {
       for (int index = 0; index < 4_097; index++) {
@@ -2006,7 +2031,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1_000L, Eviction.S3_FIFO,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 90, 0L);
     ((MaintenancePolicy) getField(loop, "policy")).add(entry);
     try {
@@ -2033,7 +2058,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 4_000L, Eviction.S3_FIFO,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 91, 0L);
     MaintenancePolicy policy = (MaintenancePolicy) getField(loop, "policy");
     policy.add(entry);
@@ -2063,7 +2088,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void accessScanDrainsMultipleReaderRingsAndRotatesAfterTheBatchLimit() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -2098,7 +2123,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.registerReader(new ReaderSlot());
       Field requestedWork = MaintenanceEventLoop.class.getDeclaredField("requestedWork");
@@ -2115,7 +2140,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       Field workMutation = MaintenanceEventLoop.class.getDeclaredField("WORK_MUTATION");
       workMutation.setAccessible(true);
@@ -2131,22 +2156,18 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void staleAccessHintCostsAtMostOneEmptyTurn() throws Exception {
+  public void staleAccessHintDoesNotMakeTheActorRunnable() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       AtomicInteger requestedWork = (AtomicInteger) getField(loop, "requestedWork");
       requestedWork.set(intField(MaintenanceEventLoop.class, "WORK_ACCESS_SCAN"));
 
-      assertTrue(
-          invokeBooleanMethod(loop, "hasRunnableWork"),
-          "an advisory access hint must enter the next turn without a confirmation scan");
-      invokeMaintenancePass(loop);
       assertFalse(
           invokeBooleanMethod(loop, "hasRunnableWork"),
-          "the exact turn scan must retire a stale hint after one empty turn");
+          "a low-watermark access hint must remain advisory instead of making the actor runnable");
     } finally {
       memory.closeArenas();
     }
@@ -2156,7 +2177,7 @@ public class MaintenanceEventLoopTest {
   public void continuationCounterAdvancesWhenTheNextCapturedAccessTurnActuallyStarts()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -2196,7 +2217,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       ReaderSlot slot = new ReaderSlot();
       loop.registerReader(slot);
@@ -2219,7 +2240,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     ReaderSlot slot = new ReaderSlot();
     try {
       loop.registerReader(slot);
@@ -2243,7 +2264,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     loop.bindLogicalAdmission(new LogicalAdmission(1 << 20, false));
     try {
@@ -2275,7 +2296,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     try {
       ((MaintenancePolicy) getField(loop, "policy")).add(entry);
@@ -2299,7 +2320,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     ThreadContext context = new ThreadContext(null);
     try {
       loop.registerReader(context.slot);
@@ -2320,11 +2341,11 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void publishedReadCountersSignalTheActorWithoutPeriodicScan() throws Exception {
+  public void publishedReadCountersRemainAdvisoryUntilTheIdleDeadline() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     ThreadContext context = new ThreadContext(null);
     try {
       loop.registerReader(context.slot);
@@ -2336,9 +2357,9 @@ public class MaintenanceEventLoopTest {
         context.finishRead(sequence);
       }
 
-      assertTrue(
+      assertFalse(
           requestedWork.get() != 0,
-          "a published read-counter delta after an idle scan must wake the maintenance actor");
+          "a counter publication must not force an actor wake for every read batch");
     } finally {
       memory.closeArenas();
     }
@@ -2355,7 +2376,7 @@ public class MaintenanceEventLoopTest {
             ticker,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     int constructorCalls = ticker.calls();
     loop.start();
     try {
@@ -2388,7 +2409,7 @@ public class MaintenanceEventLoopTest {
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, ticker, 1L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, ticker, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       invokeApplyEntry(loop, entry);
       assertTrue(entry.claimWriter());
@@ -2435,7 +2456,7 @@ public class MaintenanceEventLoopTest {
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, ticker, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       invokeApplyEntry(loop, entry);
       monotonicNow.set(TimerWheel.TICK_NANOS);
@@ -2471,7 +2492,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, ticker, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       for (int pass = 0; pass < 17; pass++) {
         invokeMaintenancePass(loop);
@@ -2516,7 +2537,7 @@ public class MaintenanceEventLoopTest {
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, ticker, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       invokeApplyEntry(loop, entry);
       monotonicCalls.set(0);
@@ -2546,7 +2567,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void realPassCleansQueuedReaderRegistrationsWithoutCreatingWork() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     Thread owner =
         new Thread(
             () -> {
@@ -2578,7 +2599,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     Entry[] entries = new Entry[4];
     try {
       for (int i = 0; i < entries.length; i++) {
@@ -2607,7 +2628,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void actorAccessScanDrainsCountersWithoutReaderSideSignal() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -2633,7 +2654,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void accessCounterConsumptionUsesModularDeltasAcrossSignedWrap() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -2645,6 +2666,7 @@ public class MaintenanceEventLoopTest {
     slot.publishedHits = Long.MIN_VALUE + 1L;
     slot.publishedMisses = Long.MIN_VALUE + 2L;
     try {
+      setLongField(loop, "nextAccessWakeNanos", 0L);
       invokeMaintenancePass(loop);
       assertEquals(loop.snapshot().hits, 4L);
       assertEquals(loop.snapshot().misses, 7L);
@@ -2658,7 +2680,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void flushWaitsForEveryRegisteredReaderRingToDrain() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -2688,7 +2710,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void closeFinalDrainConsumesPublishedReaderRingData() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -2729,7 +2751,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.publishMutation(entry, Entry.PENDING_UPDATE);
       // This is the deterministic version of the interleaving: the actor has taken the
@@ -2760,7 +2782,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.publishMutation(entry, Entry.PENDING_UPDATE);
       assertTrue(entry.claimWriter());
@@ -2807,7 +2829,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     try {
       loop.publishMutation(entry, Entry.PENDING_ADD);
@@ -2866,7 +2888,7 @@ public class MaintenanceEventLoopTest {
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     WriterLifecycleLane lane = new WriterLifecycleLane(2);
     try {
       assertTrue(entry.claimWriter());
@@ -2909,7 +2931,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     WriterArena arena = memory.newWriterArena();
     Entry stale = EntryTestSupport.entry(arena, 0, 177, 0L);
     long allocation = stale.nativeKeyAllocationLength();
@@ -2959,7 +2981,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.publishMutation(entry, Entry.PENDING_UPDATE);
       assertTrue(entry.claimWriter());
@@ -3004,7 +3026,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     CountDownLatch writerClaimed = new CountDownLatch(1);
     CountDownLatch allowPublication = new CountDownLatch(1);
     AtomicReference<Throwable> writerFailure = new AtomicReference<>();
@@ -3087,7 +3109,7 @@ public class MaintenanceEventLoopTest {
     data.put(two, two);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, new FrozenTicker(), logicalWeight, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, new FrozenTicker(), logicalWeight, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.publishMutation(one, Entry.PENDING_ADD);
       loop.publishMutation(two, Entry.PENDING_ADD);
@@ -3119,7 +3141,7 @@ public class MaintenanceEventLoopTest {
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, ticker, 1L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, ticker, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       invokeApplyEntry(loop, entry);
       invokeMaintenancePass(loop);
@@ -3157,7 +3179,7 @@ public class MaintenanceEventLoopTest {
     data.put(two, two);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, new FrozenTicker(), 0L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, new FrozenTicker(), 0L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       invokeApplyEntry(loop, one);
       invokeApplyEntry(loop, two);
@@ -3176,7 +3198,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, new FrozenTicker(), 1L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, new FrozenTicker(), 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       invokeMaintenancePass(loop);
       assertEquals(data.size(), 0);
@@ -3191,7 +3213,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, Ticker.DEFAULT, 1 << 20, Eviction.S3_FIFO, new ReaderRegistry(), Long.MAX_VALUE);
+            data, memory, Ticker.DEFAULT, 1 << 20, Eviction.S3_FIFO, newReaderRegistry(memory), Long.MAX_VALUE);
     long valueAllocation = ValueBlock.allocationLength(1);
     long valueAddress = memory.newWriterArena().allocate(valueAllocation);
     ValueBlock.initialize(valueAddress, 0L, 1, 0L);
@@ -3236,7 +3258,7 @@ public class MaintenanceEventLoopTest {
           };
       MaintenanceEventLoop loop =
           new MaintenanceEventLoop(
-              data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+              data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
       long allocation = ValueBlock.allocationLength(1);
       long weight =
           countBounded
@@ -3296,7 +3318,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     LogicalAdmission admission = new LogicalAdmission(1L, false);
     assertTrue(admission.tryChargeDelta(2L));
     loop.bindLogicalAdmission(admission);
@@ -3318,7 +3340,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     Entry blocked = EntryTestSupport.entry(0, 201, 0L);
     Entry unrelated = EntryTestSupport.entry(0, 202, 0L);
     try {
@@ -3355,7 +3377,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, new FrozenTicker(), 1L, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, new FrozenTicker(), 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     LogicalAdmission admission = new LogicalAdmission(1L, false);
     assertTrue(admission.tryChargeDelta(2L));
     loop.bindLogicalAdmission(admission);
@@ -3395,7 +3417,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       Method sample = MaintenanceEventLoop.class.getDeclaredMethod("updateMaintenanceBudget", long.class);
       sample.setAccessible(true);
@@ -3443,7 +3465,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
-        data, memory, ticker, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+        data, memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       for (int index = 0; index < 2; index++) {
         long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
@@ -3480,11 +3502,11 @@ public class MaintenanceEventLoopTest {
     assertResourceSweepContinuation(true);
   }
 
-  private static void assertResourceSweepContinuation(boolean blockedHead) throws Exception {
+  private void assertResourceSweepContinuation(boolean blockedHead) throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        new ReaderRegistry(), Long.MAX_VALUE);
+        newReaderRegistry(memory), Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -3557,7 +3579,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        new ReaderRegistry(), Long.MAX_VALUE);
+        newReaderRegistry(memory), Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -3598,7 +3620,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        new ReaderRegistry(), Long.MAX_VALUE);
+        newReaderRegistry(memory), Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -3640,11 +3662,11 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  private static void assertLifecycleProgressRescansResources(boolean mailboxOwned) throws Exception {
+  private void assertLifecycleProgressRescansResources(boolean mailboxOwned) throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        new ReaderRegistry(), Long.MAX_VALUE);
+        newReaderRegistry(memory), Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -3684,7 +3706,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void safeReclaimRevisitsResourcesAlreadyCheckedByAPartialSweep() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
     readers.setValueEpoch(reader, 1L);
@@ -3746,7 +3768,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       Class<?> workPlanType =
           Class.forName(
@@ -3812,7 +3834,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     loop.start();
     try {
       long deadline = System.nanoTime() + 1_000_000_000L;
@@ -3837,7 +3859,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     loop.start();
     try {
       loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
@@ -3872,7 +3894,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     CountDownLatch parkEntered = new CountDownLatch(1);
     CountDownLatch parkReturned = new CountDownLatch(1);
@@ -3906,7 +3928,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void failedActorRemovalCancelsTheUnusedActorRetirementBatch() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -3941,7 +3963,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     CountDownLatch firstStarted = new CountDownLatch(1);
     CountDownLatch releaseFirst = new CountDownLatch(1);
     CountDownLatch releaseSecond = new CountDownLatch(1);
@@ -3983,7 +4005,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void flushFenceDefersPostFenceAsyncWhileRetirementIsPinned() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -4029,7 +4051,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void flushWaitsForRetirementReclaimWhileAReaderIsActive() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -4060,7 +4082,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void flushDoesNotChaseRetirementPublishedAfterItsCapturedWatermark() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -4099,7 +4121,7 @@ public class MaintenanceEventLoopTest {
           }
         };
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -4138,7 +4160,7 @@ public class MaintenanceEventLoopTest {
           }
         };
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     ReaderGuard guard = new ReaderGuard(loop);
@@ -4207,7 +4229,7 @@ public class MaintenanceEventLoopTest {
           }
         };
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     ReaderGuard guard = new ReaderGuard(loop);
@@ -4251,7 +4273,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     CountDownLatch firstStarted = new CountDownLatch(1);
     CountDownLatch releaseFirst = new CountDownLatch(1);
     CompletableFuture<Void> pending = new CompletableFuture<>();
@@ -4296,7 +4318,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             Long.MAX_VALUE);
     CountDownLatch firstStarted = new CountDownLatch(1);
     CountDownLatch releaseFirst = new CountDownLatch(1);
@@ -4348,7 +4370,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            newReaderRegistry(memory), Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 128, 0L);
     try {
       loop.publishMutation(entry, Entry.PENDING_ADD);
@@ -4372,7 +4394,7 @@ public class MaintenanceEventLoopTest {
   public void eachRetirementCutAdvancesTheReaderEpoch() throws Exception {
     Ticker ticker = new FrozenTicker();
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -4418,7 +4440,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, ticker, 1 << 20, Eviction.S3_FIFO, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, ticker, 1 << 20, Eviction.S3_FIFO, newReaderRegistry(memory), Long.MAX_VALUE);
     RetirementJournal journal = loop.retirementJournal();
     try {
       for (int record = 0; record < 33 * RetirementSegment.CAPACITY; record++) {
@@ -4453,7 +4475,7 @@ public class MaintenanceEventLoopTest {
   public void ordinaryReaderQuiescenceUsesTheEpochDeadlineInsteadOfAnImmediateWake()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
     readers.setValueEpoch(reader, 1L);
@@ -4481,7 +4503,7 @@ public class MaintenanceEventLoopTest {
   public void fullRetirementRingDoesNotBlockWriterAndLaterReclaimsAfterReaderQuiesces()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
     readers.setValueEpoch(activeReader, 1L);
@@ -4511,7 +4533,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 16L << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 16L << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     long allocation = ValueBlock.allocationLength(1);
     int recordCount = 2_048;
     try {
@@ -4547,7 +4569,7 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, new ReaderRegistry(), Long.MAX_VALUE);
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       loop.start();
       waitUntilParked(loop);
@@ -4584,7 +4606,7 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            newReaderRegistry(memory),
             journal,
             Long.MAX_VALUE);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();

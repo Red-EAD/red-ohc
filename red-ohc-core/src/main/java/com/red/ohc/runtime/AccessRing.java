@@ -6,7 +6,9 @@ import com.red.ohc.index.Entry;
 
 /** Fixed-capacity SPSC access sampler: the business thread publishes, the worker consumes. */
 public final class AccessRing {
-  private static final int CAPACITY = 8_192;
+  static final int CAPACITY = 8_192;
+  public static final int HIGH_WATERMARK = CAPACITY / 2;
+  public static final int LOW_WATERMARK = HIGH_WATERMARK / 2;
   private static final int MASK = CAPACITY - 1;
   private final Entry[] entries = new Entry[CAPACITY];
   private final long[] valueAddresses = new long[CAPACITY];
@@ -45,13 +47,20 @@ public final class AccessRing {
         return false;
       }
     }
+    int observedTail = consumer.tail;
+    int depthBeforePublish = current - observedTail;
     int slot = current & MASK;
     entries[slot] = entry;
     valueAddresses[slot] = observedValueAddress;
     generations[slot] = observedGeneration;
     policyStates[slot] = observedPolicyState;
     HEAD_UPDATER.lazySet(producer, current + 1);
-    if (consumer.notifyState == NOTIFY_ARMED
+    boolean wake =
+        depthBeforePublish == 0
+            || (depthBeforePublish < HIGH_WATERMARK
+                && depthBeforePublish + 1 >= HIGH_WATERMARK);
+    if (wake
+        && consumer.notifyState == NOTIFY_ARMED
         && NOTIFY_STATE_UPDATER.compareAndSet(consumer, NOTIFY_ARMED, NOTIFY_SIGNALED)
         && nonEmptySignal != null) {
       nonEmptySignal.run();
@@ -114,6 +123,12 @@ public final class AccessRing {
   public boolean armNotificationAndCheckPending() {
     consumer.notifyState = NOTIFY_ARMED;
     return !isEmpty();
+  }
+
+  /** Arms the producer notification and reports only backlog at the urgent watermark. */
+  public boolean armNotificationAndCheckUrgentPending() {
+    consumer.notifyState = NOTIFY_ARMED;
+    return size() >= HIGH_WATERMARK;
   }
 
   private static final class ProducerControl {

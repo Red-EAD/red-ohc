@@ -38,7 +38,7 @@ public final class MaintenanceIdleHandoffTest {
 
       assertTrue(
           (Boolean) call(fixture.loop, "hasRunnableWork"),
-          "the idle check must schedule the observed source, not just keep the wake gate running");
+          "the real-time access deadline must schedule the observed source");
       call(fixture.loop, "maintenancePass");
       assertTrue(fixture.slot.access.isEmpty(), "the next turn must drain the observed ring");
       ReaderRegistry.SlotTableSnapshot slots = fixture.readers.slotTableSnapshot();
@@ -46,6 +46,42 @@ public final class MaintenanceIdleHandoffTest {
       assertEquals(slots.consumedHits(index), fixture.slot.publishedHits);
       assertEquals(slots.consumedMisses(index), fixture.slot.publishedMisses);
       assertFalse((Boolean) call(fixture.loop, "hasRunnableWork"));
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void lowWatermarkAccessDeadlineUsesWallClockWithFrozenTicker() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry readers = new ReaderRegistry(memory);
+    ReaderSlot slot = new ReaderSlot();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            new ConcurrentHashMap<>(),
+            memory,
+            new FrozenTicker(),
+            1 << 20,
+            Eviction.LRU,
+            readers,
+            Long.MAX_VALUE);
+    Entry entry = EntryTestSupport.entry(memory, 0, 1, 0L);
+    try {
+      loop.registerReader(slot);
+      slot.access = new AccessRing(slot::signalAccess);
+      assertTrue(slot.access.offer(entry, 0L, 0L, 0));
+      loop.start();
+
+      long deadline = System.nanoTime() + 1_000_000_000L;
+      while (!slot.access.isEmpty() && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
+      assertTrue(
+          slot.access.isEmpty(),
+          "a low-watermark access record must drain after the real-time idle deadline");
+    } finally {
+      loop.stop();
+      loop.join(2_000L);
+      assertFalse(loop.isAlive());
+      memory.closeArenas();
     }
   }
 
@@ -101,7 +137,7 @@ public final class MaintenanceIdleHandoffTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(),
+            new ReaderRegistry(memory),
             Long.MAX_VALUE);
     try {
       loop.start();
@@ -128,7 +164,7 @@ public final class MaintenanceIdleHandoffTest {
 
   static final class Fixture implements AutoCloseable {
     final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    final ReaderRegistry readers = new ReaderRegistry();
+    final ReaderRegistry readers = new ReaderRegistry(memory);
     final ReaderSlot slot = new ReaderSlot();
     final MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -143,6 +179,10 @@ public final class MaintenanceIdleHandoffTest {
       Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainMailbox", int.class);
       drain.setAccessible(true);
       drain.invoke(loop, Integer.MAX_VALUE);
+      Field accessDeadline =
+          MaintenanceEventLoop.class.getDeclaredField("nextAccessWakeNanos");
+      accessDeadline.setAccessible(true);
+      accessDeadline.setLong(loop, 0L);
       call(loop, "maintenancePass");
       assertTrue(slot.access.isEmpty());
       assertEquals(((AtomicInteger) field(loop, "requestedWork")).get(), 0);
@@ -162,7 +202,9 @@ public final class MaintenanceIdleHandoffTest {
       } else {
         slot.publishedMisses++;
       }
-      assertEquals(((AtomicInteger) field(loop, "requestedWork")).get(), 0);
+      if (!source.equals("ring")) {
+        assertEquals(((AtomicInteger) field(loop, "requestedWork")).get(), 0);
+      }
     }
 
     @Override
@@ -187,5 +229,17 @@ public final class MaintenanceIdleHandoffTest {
     Method method = target.getClass().getDeclaredMethod(name);
     method.setAccessible(true);
     return method.invoke(target);
+  }
+
+  private static final class FrozenTicker implements Ticker {
+    @Override
+    public long nanos() {
+      return 0L;
+    }
+
+    @Override
+    public long currentTimeMillis() {
+      return 0L;
+    }
   }
 }

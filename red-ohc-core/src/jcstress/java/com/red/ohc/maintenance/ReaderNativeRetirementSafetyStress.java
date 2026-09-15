@@ -28,7 +28,7 @@ public class ReaderNativeRetirementSafetyStress {
 
   private final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
   private final WriterArena arena = memory.newWriterArena();
-  private final ReaderRegistry readers = new ReaderRegistry();
+  private final ReaderRegistry readers = new ReaderRegistry(memory);
   private final ReaderSlot slot = new ReaderSlot();
   private final int slotIndex = readers.register(slot);
   private final RetirementJournal journal = new RetirementJournal(memory);
@@ -71,6 +71,8 @@ public class ReaderNativeRetirementSafetyStress {
     readers.setEpoch(slotIndex, 0L);
     journal.publishSafe(Long.MAX_VALUE, Long.MAX_VALUE);
     journal.reclaimActorResult(memory, Integer.MAX_VALUE);
+    readers.clear();
+    readers.close();
     journal.close();
     arena.detach();
   }

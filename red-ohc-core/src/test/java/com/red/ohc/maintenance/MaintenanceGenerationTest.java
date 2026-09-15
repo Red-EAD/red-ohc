@@ -29,6 +29,7 @@ public class MaintenanceGenerationTest {
     Entry entry = EntryTestSupport.entry(memory, 0, 7, oldValue);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop worker =
         new MaintenanceEventLoop(
             data,
@@ -36,19 +37,23 @@ public class MaintenanceGenerationTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            readers, Long.MAX_VALUE);
+    try {
+      long generation = entry.generation();
+      assertTrue(entry.claimWriter());
+      entry.valueAddress = newValue;
+      entry.finishWriter();
 
-    long generation = entry.generation();
-    assertTrue(entry.claimWriter());
-    entry.valueAddress = newValue;
-    entry.finishWriter();
-
-    assertFalse(worker.removeFromMap(entry, false, generation, oldValue));
-    assertSame(data.get(entry), entry);
-    assertEquals(entry.valueAddress, newValue);
-
-    memory.free(oldValue, ValueBlock.allocationLength(1));
-    memory.free(newValue, ValueBlock.allocationLength(1));
+      assertFalse(worker.removeFromMap(entry, false, generation, oldValue));
+      assertSame(data.get(entry), entry);
+      assertEquals(entry.valueAddress, newValue);
+    } finally {
+      readers.clear();
+      readers.close();
+      memory.free(oldValue, ValueBlock.allocationLength(1));
+      memory.free(newValue, ValueBlock.allocationLength(1));
+      memory.closeArenas();
+    }
   }
 
   @Test
@@ -57,6 +62,7 @@ public class MaintenanceGenerationTest {
     Entry entry = EntryTestSupport.entry(memory, 0, 7, 0L);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop worker =
         new MaintenanceEventLoop(
             data,
@@ -64,12 +70,17 @@ public class MaintenanceGenerationTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            readers, Long.MAX_VALUE);
 
-    assertFalse(worker.removeFromMap(entry, false, entry.generation(), 0L));
-    assertSame(data.get(entry), entry);
-    data.clear();
-    memory.closeArenas();
+    try {
+      assertFalse(worker.removeFromMap(entry, false, entry.generation(), 0L));
+      assertSame(data.get(entry), entry);
+      data.clear();
+    } finally {
+      readers.clear();
+      readers.close();
+      memory.closeArenas();
+    }
   }
 
   @Test
@@ -95,6 +106,7 @@ public class MaintenanceGenerationTest {
     Entry entry = EntryTestSupport.entry(memory, 0, 9, value);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop worker =
         new MaintenanceEventLoop(
             data,
@@ -102,7 +114,7 @@ public class MaintenanceGenerationTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            readers, Long.MAX_VALUE);
     try {
       assertTrue(entry.claimWriter());
       assertFalse(worker.removeFromMap(entry, true, entry.generation(), entry.valueAddress));
@@ -111,6 +123,8 @@ public class MaintenanceGenerationTest {
       entry.finishWriter();
       data.clear();
       memory.free(value, ValueBlock.allocationLength(1));
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }

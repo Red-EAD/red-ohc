@@ -17,6 +17,7 @@ import com.red.ohc.storage.WriterArena;
 public final class ThreadContext {
   static final int READER_EXITED_LOOKUP = 1;
   static final int READER_EXITED_VALUES = 1 << 1;
+  static final long ACCESS_SAMPLE_MASK = 15L;
   private static final long NO_WRITE_TIMESTAMP = Long.MIN_VALUE;
   public static final int RESIDENCE_SAMPLE_INTERVAL = 1_024;
   private static final int MAX_REUSABLE_BULK_KEYS = 4_096;
@@ -693,7 +694,7 @@ public final class ThreadContext {
   public void bulkHit(Entry entry) {
     slot.localHits++;
     readSequence++;
-    if ((++accessSequence & 15L) == 0L) {
+    if ((++accessSequence & ACCESS_SAMPLE_MASK) == 0L) {
       long observedValueAddress = entry.valueAddress;
       long observedGeneration = entry.generation();
       int observedPolicyState = entry.policyState();
@@ -729,7 +730,7 @@ public final class ThreadContext {
 
   /** Delivers a sampled hit with the value token observed by the lookup. */
   public void access(Entry entry, long observedValueAddress) {
-    if ((++accessSequence & 15L) != 0L) {
+    if ((++accessSequence & ACCESS_SAMPLE_MASK) != 0L) {
       return;
     }
     publishSampledAccess(entry, observedValueAddress);
@@ -760,7 +761,6 @@ public final class ThreadContext {
   public void publish() {
     slot.publishedHits = slot.localHits;
     slot.publishedMisses = slot.localMisses;
-    slot.signalAccess();
   }
 
   private AccessRing accessRing() {

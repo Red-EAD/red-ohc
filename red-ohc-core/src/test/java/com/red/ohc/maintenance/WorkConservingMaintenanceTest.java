@@ -66,6 +66,7 @@ public final class WorkConservingMaintenanceTest {
   @Test
   public void reservationHoleIsNotReportedAsRunnableActorWork() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<Entry, Entry>(),
@@ -73,7 +74,7 @@ public final class WorkConservingMaintenanceTest {
             Ticker.DEFAULT,
             1L << 20,
             Eviction.LRU,
-            new ReaderRegistry(), Long.MAX_VALUE);
+            readers, Long.MAX_VALUE);
     WriterLifecycleJournal journal = new WriterLifecycleJournal(1);
     try {
       loop.bindWriterLifecycleJournal(journal);
@@ -87,6 +88,8 @@ public final class WorkConservingMaintenanceTest {
       method.setAccessible(true);
       assertTrue(!(Boolean) method.invoke(loop), "a reservation hole must not cause actor spin");
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }

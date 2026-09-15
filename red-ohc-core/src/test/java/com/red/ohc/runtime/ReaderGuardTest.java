@@ -20,7 +20,7 @@ public class ReaderGuardTest {
   @Test
   public void enterPublishesAnEpochAndExitQuiescesTheReader() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -42,6 +42,8 @@ public class ReaderGuardTest {
       assertEquals(context.readerPublishedEpoch(), 0L);
       assertEquals(readers.readerState(context.readerSlotIndex()), 0L);
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
@@ -49,7 +51,7 @@ public class ReaderGuardTest {
   @Test
   public void admittedReaderUsesTheSamePublishedEpochAndQuiescesOnExit() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -71,6 +73,8 @@ public class ReaderGuardTest {
       guard.exit(context);
       assertEquals(readers.readerState(context.readerSlotIndex()), 0L);
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
@@ -78,7 +82,7 @@ public class ReaderGuardTest {
   @Test
   public void closeRacingAfterEpochPublicationRejectsTheReaderBeforeItCanDereferenceNativeMemory() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -98,6 +102,8 @@ public class ReaderGuardTest {
       assertEquals(context.readerPublishedEpoch(), 0L);
       assertEquals(readers.readerState(context.readerSlotIndex()), 0L);
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
@@ -105,7 +111,7 @@ public class ReaderGuardTest {
   @Test
   public void firstReadRacingRegistryCloseReturnsMissInsteadOfLeakingAnInternalException() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -133,6 +139,8 @@ public class ReaderGuardTest {
       assertFalse(context.isRegistered());
       assertEquals(context.readerPublishedEpoch(), 0L);
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
@@ -140,7 +148,7 @@ public class ReaderGuardTest {
   @Test
   public void nestedReadersReuseOneEpochAndExitOnlyAtTheOuterBoundary() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -161,6 +169,8 @@ public class ReaderGuardTest {
       guard.exit(context);
       assertEquals(context.readerPublishedEpoch(), 0L);
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
@@ -168,7 +178,7 @@ public class ReaderGuardTest {
   @Test
   public void nestedValueGuardUpgradesAndThenRestoresLookupOnlyProtection() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -196,6 +206,8 @@ public class ReaderGuardTest {
       guard.exit(context);
       assertEquals(context.readerPublishedEpoch(), 0L);
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
@@ -203,7 +215,7 @@ public class ReaderGuardTest {
   @Test
   public void readerExitSignalsAReclaimBlockedActor() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    ReaderRegistry readers = new ReaderRegistry();
+    ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -226,6 +238,8 @@ public class ReaderGuardTest {
           requestedWork.get() != 0,
           "marked reader exit must publish one reclaim wake without reclaiming on the reader thread");
     } finally {
+      readers.clear();
+      readers.close();
       memory.closeArenas();
     }
   }
