@@ -2,9 +2,10 @@ package com.red.ohc.storage;
 
 /** Native value block. Metadata is kept beside the serialized value, never in Entry. */
 public final class ValueBlock {
-  static final int EXPIRE_AT = 0;
+  static final int DEADLINE_NANOS = 0;
   static final int LENGTH = 8;
   static final int HEADER = 16;
+  private static final long NO_DEADLINE = Long.MIN_VALUE;
   private static final long MILLIS_PER_SECOND = 1_000L;
 
   private ValueBlock() {}
@@ -14,17 +15,17 @@ public final class ValueBlock {
   }
 
   public static void initialize(
-      long address, long expireAtMillis, int valueLength, long createdAtMillis) {
-    NativeMemory.putLong(address + EXPIRE_AT, expireAtMillis);
+      long address, long deadlineNanos, int valueLength, long createdAtMillis) {
+    NativeMemory.putLong(address + DEADLINE_NANOS, deadlineNanos);
     NativeMemory.putInt(address + LENGTH, valueLength);
     NativeMemory.putInt(
         address + 12L,
         createdAtMillis <= 0L ? 0 : (int) (createdAtMillis / MILLIS_PER_SECOND));
   }
 
-  /** Expiry is immutable after publication; Entry.valueAddress publishes the native block. */
-  public static long expireAtMillis(long address) {
-    return NativeMemory.getLong(address + EXPIRE_AT);
+  /** The deadline is immutable after publication; Entry.valueAddress publishes the native block. */
+  public static long deadlineNanos(long address) {
+    return NativeMemory.getLong(address + DEADLINE_NANOS);
   }
 
   public static int length(long address) {
@@ -40,8 +41,8 @@ public final class ValueBlock {
     return address + HEADER;
   }
 
-  public static boolean expired(long address, long nowMillis) {
-    long expire = expireAtMillis(address);
-    return expire > 0L && expire <= nowMillis;
+  public static boolean expired(long address, long nowNanos) {
+    long deadlineNanos = deadlineNanos(address);
+    return deadlineNanos != NO_DEADLINE && deadlineNanos <= nowNanos;
   }
 }

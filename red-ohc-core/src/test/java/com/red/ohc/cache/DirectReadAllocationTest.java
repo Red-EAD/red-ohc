@@ -43,7 +43,7 @@ public class DirectReadAllocationTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .build()) {
-      assertTrue(cache.put(key, value));
+      cache.put(key, value);
 
       assertTrue(
           cache.getDirect(
@@ -73,7 +73,7 @@ public class DirectReadAllocationTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .build()) {
-      assertTrue(cache.put(key, value));
+      cache.put(key, value);
       cache.flushAsync().join();
       DirectValueConsumer consumer =
           view -> {

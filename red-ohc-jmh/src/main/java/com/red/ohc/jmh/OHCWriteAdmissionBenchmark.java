@@ -25,7 +25,7 @@ import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
 
-/** Measures producer admission only: no serializer and no periodic flush. */
+/** Measures producer write throughput without periodic flush. */
 @BenchmarkMode(Mode.SingleShotTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @Warmup(iterations = 10)
@@ -69,9 +69,7 @@ public class OHCWriteAdmissionBenchmark {
     for (int i = 0; i < KEY_COUNT; i++) {
       keys[i] = bytes(keyBytes, i);
       values[i] = bytes(valueBytes, i * 31 + 7);
-      if (!cache.put(keys[i], values[i])) {
-        throw new IllegalStateException("OHC preload rejected");
-      }
+      cache.put(keys[i], values[i]);
     }
     cache.flushAsync().join();
     assertHealthyAndDrained();
@@ -90,21 +88,30 @@ public class OHCWriteAdmissionBenchmark {
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(WriteCursor cursor, WriteResults results) {
+  public void oneThread(
+      WriteCursor cursor, WriteResults results, BenchmarkWindowResults window) {
     write(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(WriteCursor cursor, WriteResults results) {
+  public void cpuThreads(
+      WriteCursor cursor, WriteResults results, BenchmarkWindowResults window) {
     write(cursor, results);
   }
 
   void write(WriteCursor cursor, WriteResults results) {
     for (int i = 0; i < BATCH_SIZE; i++) {
       int index = cursor.next();
-      results.record(cache.put(keys[index], values[index]));
+      results.attempt();
+      try {
+        cache.put(keys[index], values[index]);
+        results.accepted++;
+      } catch (RuntimeException | Error failure) {
+        results.recordFailure();
+        throw failure;
+      }
     }
   }
 

@@ -44,18 +44,4 @@ public final class ChmSizing {
     return table;
   }
 
-  /** Bounded advisory mutation transport capacity. */
-  public static int maintenanceQueueCapacity(long entryEstimate, long capacity) {
-    long planned =
-        entryEstimate > 0L
-            ? plannedEntries(entryEstimate)
-            : initialCapacity(entryEstimate, capacity);
-    long requested = Math.max(1_024L, planned / 64L);
-    long bounded = Math.min(1L << 20, requested);
-    int result = 1;
-    while (result < bounded) {
-      result <<= 1;
-    }
-    return result;
-  }
 }

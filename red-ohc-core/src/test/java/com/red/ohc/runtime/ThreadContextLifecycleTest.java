@@ -8,7 +8,6 @@ import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 
 import org.testng.annotations.Test;
 
@@ -63,9 +62,36 @@ public final class ThreadContextLifecycleTest {
   }
 
   @Test
+  public void readerNestingUsesOnlyDepthCounters() throws Exception {
+    ThreadContext context = new ThreadContext(null);
+
+    assertNoField("readerValueModes");
+    assertNotNull(field("valueProtectionDepth"));
+    assertTrue(!context.enterReader(false));
+    assertEquals(context.readerDepth(), 1);
+    assertEquals(field("valueProtectionDepth").getInt(context), 0);
+
+    assertEquals(context.exitReader(), ThreadContext.READER_EXITED_LOOKUP);
+    assertEquals(context.readerDepth(), 0);
+  }
+
+  @Test
+  public void lookupNestedInsideValueProtectionKeepsTheValueBitUntilTheOuterValueExit() {
+    ThreadContext context = new ThreadContext(null);
+
+    assertTrue(context.enterReader(false) == false);
+    assertTrue(context.enterReader(true));
+    assertTrue(context.enterReader(false) == false);
+    assertEquals(context.exitReader(), 0);
+    assertEquals(context.exitReader(), ThreadContext.READER_EXITED_VALUES);
+    assertEquals(context.exitReader(), ThreadContext.READER_EXITED_LOOKUP);
+  }
+
+  @Test
   public void optionalScratchArraysAreCreatedByTheirFirstConsumer() throws Exception {
     ThreadContext context = new ThreadContext(null);
 
+    assertNull(field("topLevelDirectView").get(context));
     assertNull(field("directViews").get(context));
     assertNull(field("readOnlyValueBuffers").get(context));
     assertNull(field("bulkEntrySets").get(context));
@@ -74,6 +100,9 @@ public final class ThreadContextLifecycleTest {
     context.releaseReadOnlyValueBuffer();
     assertNotNull(buffer);
     assertNotNull(field("readOnlyValueBuffers").get(context));
+    ByteBuffer rebound = context.readOnlyValueBuffer(0L, 0);
+    context.releaseReadOnlyValueBuffer();
+    assertSame(rebound, buffer);
 
     DirectValueView view = context.pushDirectView(0L, 0);
     assertEquals(
@@ -82,28 +111,71 @@ public final class ThreadContextLifecycleTest {
         "primitive direct access must not materialize a ByteBuffer shell");
     assertEquals(view.length(), 0);
     assertNotNull(view.asReadOnlyByteBuffer());
-    context.popDirectView();
     assertNotNull(view);
+    assertNotNull(field("topLevelDirectView").get(context));
+    assertNull(field("directViews").get(context));
+
+    DirectValueView nested = context.pushDirectView(0L, 0);
+    assertNotNull(nested);
     assertNotNull(field("directViews").get(context));
+    context.popDirectView();
+    context.popDirectView();
 
     context.releaseBulkEntries(context.acquireBulkEntries(1));
     assertNotNull(field("bulkEntrySets").get(context));
   }
 
   @Test
-  public void fingerprintScratchIsLazyReusableAndNested() {
+  public void releasePageMemoIsLazyBoundedAndClearedAtScopeEnd() throws Exception {
     ThreadContext context = new ThreadContext(null);
+    Object firstPage = new Object();
+    Object collidingPage = new Object();
+    long firstKey = 1L;
+    long collidingKey = 257L;
 
-    assertNull(readField("fingerprintScratches", context));
-    ByteBuffer outer = context.enterFingerprintScratch(256);
-    outer.put("outer".getBytes(StandardCharsets.UTF_8));
-    ByteBuffer inner = context.enterFingerprintScratch(257);
-    inner.put("inner".getBytes(StandardCharsets.UTF_8));
-    context.exitFingerprintScratch();
-    context.exitFingerprintScratch();
+    assertNull(field("releasePageMemo").get(context));
+    assertNull(context.releasePageMemoLookup(firstKey));
+    context.releasePageMemoRemember(firstKey, firstPage);
+    assertNull(field("releasePageMemo").get(context), "non-actor callers must not allocate a memo");
 
-    assertNotNull(readField("fingerprintScratches", context));
-    assertEquals(((Integer) readField("fingerprintScratchDepth", context)).intValue(), 0);
+    context.beginReleasePageMemo();
+    Object memo = field("releasePageMemo").get(context);
+    assertNotNull(memo);
+    Field pages = memo.getClass().getDeclaredField("pages");
+    pages.setAccessible(true);
+    assertEquals(((Object[]) pages.get(memo)).length, 256);
+
+    context.releasePageMemoRemember(firstKey, firstPage);
+    assertSame(context.releasePageMemoLookup(firstKey), firstPage);
+    context.releasePageMemoRemember(collidingKey, collidingPage);
+    assertNull(context.releasePageMemoLookup(firstKey), "a direct-map collision must overwrite");
+    assertSame(context.releasePageMemoLookup(collidingKey), collidingPage);
+    context.releasePageMemoInvalidate(collidingKey, firstPage);
+    assertSame(context.releasePageMemoLookup(collidingKey), collidingPage);
+    context.releasePageMemoInvalidate(collidingKey, collidingPage);
+    assertNull(context.releasePageMemoLookup(collidingKey));
+
+    long[] retainedKeys = new long[256];
+    Object[] retainedPages = new Object[256];
+    for (long key = 1L; key <= 300L; key++) {
+      Object page = new Object();
+      int slot = Long.hashCode(key) & 255;
+      retainedKeys[slot] = key;
+      retainedPages[slot] = page;
+      context.releasePageMemoRemember(key, page);
+    }
+    for (int slot = 0; slot < retainedKeys.length; slot++) {
+      if (retainedKeys[slot] != 0L) {
+        assertSame(context.releasePageMemoLookup(retainedKeys[slot]), retainedPages[slot]);
+      }
+    }
+
+    context.releasePageMemoRemember(firstKey, firstPage);
+    context.endReleasePageMemo();
+    assertNull(context.releasePageMemoLookup(firstKey));
+    for (Object retained : (Object[]) pages.get(memo)) {
+      assertNull(retained, "scope cleanup must release every touched descriptor");
+    }
   }
 
   private static Field field(String name) throws Exception {
@@ -112,11 +184,13 @@ public final class ThreadContextLifecycleTest {
     return field;
   }
 
-  private static Object readField(String name, Object target) {
+  private static void assertNoField(String name) {
     try {
-      return field(name).get(target);
-    } catch (Exception failure) {
-      throw new AssertionError(failure);
+      ThreadContext.class.getDeclaredField(name);
+      throw new AssertionError("obsolete field remains: " + name);
+    } catch (NoSuchFieldException expected) {
+      // Expected.
     }
   }
+
 }

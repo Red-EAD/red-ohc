@@ -8,8 +8,9 @@ import com.red.ohc.storage.ValueBlock;
  * skip empty ticks while preserving each cascade boundary. A stale node is harmless because
  * generation and value pointer are checked by the maintenance consumer.
  */
-public final class TimerWheel {
-  private static final long TICK_MILLIS = 64L;
+public final class TimerWheel implements AutoCloseable {
+  static final long TICK_NANOS = 64_000_000L;
+  private static final long NO_DEADLINE = Long.MIN_VALUE;
   private static final int L0_SIZE = 1024;
   private static final int L1_SIZE = 64;
   private static final int L2_SIZE = 64;
@@ -18,12 +19,18 @@ public final class TimerWheel {
   private static final long L1_SPAN = L0_SPAN * L1_SIZE;
   private static final long L2_SPAN = L1_SPAN * L2_SIZE;
   private static final long L3_SPAN = L2_SPAN * L3_SIZE;
+  private static final int TIMER_UNSCHEDULED = -1;
+  private static final int TIMER_HEAP_BASE = -2;
+  private static final int TIMER_SLOT_BITS = 10;
+  private static final int TIMER_SLOT_MASK = (1 << TIMER_SLOT_BITS) - 1;
 
   private final Entry[] level0 = new Entry[L0_SIZE];
   private final Entry[] level1 = new Entry[L1_SIZE];
   private final Entry[] level2 = new Entry[L2_SIZE];
   private final Entry[] level3 = new Entry[L3_SIZE];
   private final long[] level0Occupied = new long[L0_SIZE >>> 6];
+  private final EntryLinks links;
+  private final boolean ownsLinks;
   private long level1Occupied;
   private long level2Occupied;
   private int level3Occupied;
@@ -35,8 +42,28 @@ public final class TimerWheel {
   /** A bucket that exceeded the caller's expiry budget. It is resumed before advancing time. */
   private int pendingExpirySlot = -1;
 
-  public TimerWheel(long nowMillis) {
-    tick = Math.max(0L, nowMillis / TICK_MILLIS);
+  public TimerWheel(long nowNanos) {
+    this(nowNanos, new EntryLinks(), true);
+  }
+
+  TimerWheel(long nowNanos, EntryLinks links) {
+    this(nowNanos, links, false);
+  }
+
+  private TimerWheel(long nowNanos, EntryLinks links, boolean ownsLinks) {
+    if (links == null) {
+      throw new NullPointerException("links");
+    }
+    this.links = links;
+    this.ownsLinks = ownsLinks;
+    tick = Math.max(0L, nowNanos / TICK_NANOS);
+  }
+
+  @Override
+  public void close() {
+    if (ownsLinks) {
+      links.close();
+    }
   }
 
   long bytes() {
@@ -60,45 +87,84 @@ public final class TimerWheel {
     return pendingExpirySlot >= 0;
   }
 
-  public void add(Entry entry, long expireAtMillis) {
-    if (expireAtMillis <= 0L || entry.timerScheduled()) {
+  /**
+   * Returns whether an already-installed timer can represent the supplied live deadline.
+   * Callers must separately prove that the old deadline is still live and only being extended.
+   */
+  boolean hasSameScheduledSlot(Entry entry, long deadlineNanos) {
+    return deadlineNanos != NO_DEADLINE
+        && entry.timerScheduled()
+        && entry.timerDeadlineTick() == ceilTick(deadlineNanos);
+  }
+
+  public void add(Entry entry, long deadlineNanos) {
+    add(entry, deadlineNanos, entry.policyLinkId());
+  }
+
+  void add(Entry entry, long deadlineNanos, int linkId) {
+    if (deadlineNanos == NO_DEADLINE || entry.timerScheduled()) {
       return;
     }
-    long target = ceilTick(expireAtMillis);
-    if (target <= tick) {
-      target = tick + 1L;
-    }
+    long target = targetTick(deadlineNanos);
     entry.timerDeadlineTick(target);
-    link(entry, target);
+    link(entry, target, linkId);
     scheduled++;
   }
 
-  void reschedule(Entry entry, long expireAtMillis) {
-    remove(entry);
-    add(entry, expireAtMillis);
+  void reschedule(Entry entry, long deadlineNanos) {
+    reschedule(entry, deadlineNanos, entry.policyLinkId());
+  }
+
+  void reschedule(Entry entry, long deadlineNanos, int linkId) {
+    long target = deadlineNanos == NO_DEADLINE ? NO_DEADLINE : targetTick(deadlineNanos);
+    if (deadlineNanos != NO_DEADLINE
+        && entry.timerScheduled()
+        && entry.timerDeadlineTick() == target) {
+      return;
+    }
+    remove(entry, linkId);
+    // Removing the last maintenance link may release its record. Refresh the id before a new
+    // timer link is installed; an applyEntry call that still owns policy state keeps the same id.
+    add(entry, deadlineNanos, entry.policyLinkId(), target);
+  }
+
+  private void add(Entry entry, long deadlineNanos, int linkId, long target) {
+    if (deadlineNanos == NO_DEADLINE || entry.timerScheduled()) {
+      return;
+    }
+    entry.timerDeadlineTick(target);
+    link(entry, target, linkId);
+    scheduled++;
   }
 
   void remove(Entry entry) {
-    if (!entry.timerScheduled()) {
+    remove(entry, entry.policyLinkId());
+  }
+
+  void remove(Entry entry, int linkId) {
+    int location = entry.timerLocation();
+    if (location == TIMER_UNSCHEDULED) {
       return;
     }
-    if (entry.timerInOverflowHeap()) {
+    if (location <= TIMER_HEAP_BASE) {
       heapRemove(entry);
-      entry.timerScheduled(false);
+      entry.timerLocation(TIMER_UNSCHEDULED);
+      links.maybeRelease(entry);
       if (scheduled > 0L) {
         scheduled--;
       }
       return;
     }
-    unlink(entry.timerLevel(), entry.timerSlot(), entry);
-    entry.timerScheduled(false);
+    unlink(location >>> TIMER_SLOT_BITS, location & TIMER_SLOT_MASK, entry, linkId);
+    entry.timerLocation(TIMER_UNSCHEDULED);
+    links.maybeRelease(entry);
     if (scheduled > 0L) {
       scheduled--;
     }
   }
 
-  public int advance(long nowMillis, TimerConsumer consumer) {
-    return advance(nowMillis, Integer.MAX_VALUE, consumer);
+  public int advance(long nowNanos, TimerConsumer consumer) {
+    return advance(nowNanos, Integer.MAX_VALUE, consumer);
   }
 
   /**
@@ -106,18 +172,18 @@ public final class TimerWheel {
    * bucket is resumed on the next actor pass instead of monopolising the event loop or waiting for
    * the bucket to wrap around again.
    */
-  public int advance(long nowMillis, int expiryLimit, TimerConsumer consumer) {
+  public int advance(long nowNanos, int expiryLimit, TimerConsumer consumer) {
     if (expiryLimit <= 0) {
       return 0;
     }
-    long target = Math.max(tick, nowMillis / TICK_MILLIS);
+    long target = Math.max(tick, nowNanos / TICK_NANOS);
     if (pendingExpirySlot < 0 && target == tick) {
       return 0;
     }
     promoteOverflow();
     int work = 0;
     if (pendingExpirySlot >= 0) {
-      work += expireLevel0(pendingExpirySlot, nowMillis, expiryLimit, consumer);
+      work += expireLevel0(pendingExpirySlot, nowNanos, expiryLimit, consumer);
       if (pendingExpirySlot >= 0 || work == expiryLimit) {
         return work;
       }
@@ -139,7 +205,7 @@ public final class TimerWheel {
         cascade(3, (int) ((tick >>> 22) & (L3_SIZE - 1)));
       }
       promoteOverflow();
-      work += expireLevel0((int) tick & (L0_SIZE - 1), nowMillis, expiryLimit - work, consumer);
+      work += expireLevel0((int) tick & (L0_SIZE - 1), nowNanos, expiryLimit - work, consumer);
       if (pendingExpirySlot >= 0) {
         break;
       }
@@ -150,19 +216,20 @@ public final class TimerWheel {
   private void cascade(int level, int slot) {
     Entry entry = detach(level, slot);
     while (entry != null) {
-      Entry next = entry.timerNext;
-      clearLinks(entry);
+      int linkId = entry.policyLinkId();
+      Entry next = links.timerNextEntry(linkId);
+      clearLinks(entry, linkId);
       entry.timerScheduled(false);
       if (scheduled > 0L) {
         scheduled--;
       }
-      link(entry, entry.timerDeadlineTick());
+      link(entry, entry.timerDeadlineTick(), linkId);
       scheduled++;
       entry = next;
     }
   }
 
-  private int expireLevel0(int slot, long nowMillis, int limit, TimerConsumer consumer) {
+  private int expireLevel0(int slot, long nowNanos, int limit, TimerConsumer consumer) {
     int work = 0;
     while (work < limit) {
       Entry entry = level0[slot];
@@ -170,22 +237,28 @@ public final class TimerWheel {
         pendingExpirySlot = -1;
         return work;
       }
-      unlink(0, slot, entry);
+      int linkId = entry.policyLinkId();
+      unlink(0, slot, entry, linkId);
       entry.timerScheduled(false);
       if (scheduled > 0L) {
         scheduled--;
       }
       long taggedAddress = entry.valueAddress;
+      if (!entry.isAlive()) {
+        // The lifecycle tag is heap-resident and remains readable after a stale timer sample.
+        // Do not load the native generation or value header for a retired/recycled Entry.
+        work++;
+        continue;
+      }
       long address = Entry.rawValueAddress(taggedAddress);
       long generation = entry.generation();
-      if (entry.isAlive()
-          && address != 0L
+      if (address != 0L
           && Entry.hasTtl(taggedAddress)
-          && ValueBlock.expired(address, nowMillis)) {
+          && ValueBlock.expired(address, nowNanos)) {
         consumer.expire(entry, generation, taggedAddress);
       } else {
-        if (entry.isAlive() && address != 0L && Entry.hasTtl(taggedAddress)) {
-          add(entry, ValueBlock.expireAtMillis(address));
+        if (address != 0L && Entry.hasTtl(taggedAddress)) {
+          add(entry, ValueBlock.deadlineNanos(address), linkId);
         }
       }
       work++;
@@ -205,30 +278,30 @@ public final class TimerWheel {
       if (scheduled > 0L) {
         scheduled--;
       }
-      link(entry, entry.timerDeadlineTick());
+      link(entry, entry.timerDeadlineTick(), entry.policyLinkId());
       scheduled++;
     }
   }
 
-  private void link(Entry entry, long target) {
+  private void link(Entry entry, long target, int linkId) {
     long distance = target - tick;
     if (distance < L0_SPAN) {
-      link(0, (int) target & (L0_SIZE - 1), entry);
+      link(0, (int) target & (L0_SIZE - 1), entry, linkId);
     } else {
       if (distance < L1_SPAN) {
-        link(1, (int) (target >>> 10) & (L1_SIZE - 1), entry);
+        link(1, (int) (target >>> 10) & (L1_SIZE - 1), entry, linkId);
       } else {
         if (distance < L2_SPAN) {
-          link(2, (int) (target >>> 16) & (L2_SIZE - 1), entry);
+          link(2, (int) (target >>> 16) & (L2_SIZE - 1), entry, linkId);
         } else {
           if (distance < L3_SPAN) {
-            link(3, (int) (target >>> 22) & (L3_SIZE - 1), entry);
+            link(3, (int) (target >>> 22) & (L3_SIZE - 1), entry, linkId);
           } else {
+            if (linkId == 0) {
+              linkId = links.ensure(entry);
+            }
             entry.timerHeapIndex(-1);
-            entry.timerSlot(0);
-            entry.timerPrev = null;
-            entry.timerNext = null;
-            entry.timerScheduled(true);
+            clearLinks(entry, linkId);
             heapOffer(entry);
           }
         }
@@ -236,34 +309,32 @@ public final class TimerWheel {
     }
   }
 
-  private void link(int level, int slot, Entry entry) {
+  private void link(int level, int slot, Entry entry, int linkId) {
     Entry[] heads = heads(level);
     Entry head = heads[slot];
-    entry.timerLevel(level);
-    entry.timerSlot(slot);
-    entry.timerPrev = null;
-    entry.timerNext = head;
-    if (head != null) {
-      head.timerPrev = entry;
+    if (linkId == 0) {
+      linkId = links.ensure(entry);
     }
+    entry.timerLocation(level, slot);
+    links.linkHead(
+        linkId,
+        head,
+        EntryLinks.TIMER_PREVIOUS_OFFSET,
+        EntryLinks.TIMER_NEXT_OFFSET);
     heads[slot] = entry;
-    entry.timerScheduled(true);
     setOccupied(level, slot);
   }
 
-  private void unlink(int level, int slot, Entry entry) {
+  private void unlink(int level, int slot, Entry entry, int linkId) {
     Entry[] heads = heads(level);
-    Entry previous = entry.timerPrev;
-    Entry next = entry.timerNext;
-    if (previous == null) {
-      heads[slot] = next;
-    } else {
-      previous.timerNext = next;
+    long neighbors =
+        links.unlink(
+            linkId,
+            EntryLinks.TIMER_PREVIOUS_OFFSET,
+            EntryLinks.TIMER_NEXT_OFFSET);
+    if ((int) (neighbors >>> 32) == 0) {
+      heads[slot] = links.entry((int) neighbors);
     }
-    if (next != null) {
-      next.timerPrev = previous;
-    }
-    clearLinks(entry);
     if (heads[slot] == null) {
       clearOccupied(level, slot);
     }
@@ -374,25 +445,35 @@ public final class TimerWheel {
     return tick + 1L + offset;
   }
 
-  private static long nextCascade(long occupied, long cycle, int shift, int size) {
-    for (int offset = 1; offset <= size; offset++) {
-      int slot = (int) (cycle + offset) & (size - 1);
-      if ((occupied & (1L << slot)) != 0L) {
-        return (cycle + offset) << shift;
-      }
+  static long nextCascade(long occupied, long cycle, int shift, int size) {
+    if (occupied == 0L) {
+      return Long.MAX_VALUE;
     }
-    return Long.MAX_VALUE;
+    int firstSlot = (int) (cycle + 1L) & (size - 1);
+    int distance;
+    if (size == Long.SIZE) {
+      distance = Long.numberOfTrailingZeros(Long.rotateRight(occupied, firstSlot));
+    } else if (size == Integer.SIZE) {
+      distance =
+          Integer.numberOfTrailingZeros(Integer.rotateRight((int) occupied, firstSlot));
+    } else {
+      throw new IllegalArgumentException("unsupported cascade size: " + size);
+    }
+    return (cycle + 1L + distance) << shift;
   }
 
-  private static long ceilTick(long millis) {
-    long quotient = millis / TICK_MILLIS;
-    return millis % TICK_MILLIS == 0L ? quotient : quotient + 1L;
+  private static long ceilTick(long nanos) {
+    long quotient = nanos / TICK_NANOS;
+    return nanos % TICK_NANOS == 0L ? quotient : quotient + 1L;
   }
 
-  private static void clearLinks(Entry entry) {
-    entry.timerPrev = null;
-    entry.timerNext = null;
-    entry.timerSlot(0);
+  private long targetTick(long deadlineNanos) {
+    long target = ceilTick(deadlineNanos);
+    return target <= tick ? tick + 1L : target;
+  }
+
+  private void clearLinks(Entry entry, int linkId) {
+    links.clear(linkId, EntryLinks.TIMER_PREVIOUS_OFFSET, EntryLinks.TIMER_NEXT_OFFSET);
   }
 
   private void heapOffer(Entry entry) {

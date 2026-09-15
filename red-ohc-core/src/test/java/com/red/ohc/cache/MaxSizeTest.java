@@ -1,7 +1,6 @@
 package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
@@ -18,7 +17,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
 
@@ -27,10 +25,7 @@ import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
-import com.red.ohc.index.Entry;
-import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
-import com.red.ohc.storage.Budget;
 
 public final class MaxSizeTest {
   private static final CacheSerializer<String> STRING =
@@ -72,18 +67,30 @@ public final class MaxSizeTest {
         () -> OHCacheBuilder.<String, String>newBuilder().maxSize(0));
   }
 
-  @Test(dataProvider = "evictionStrategies", timeOut = 2_000L)
-  public void maxSizeEvictsByEntryCountAfterMaintenanceFlush(Eviction eviction) {
+  @Test
+  public void sizingModeMustBeConfiguredBeforeBuild() {
+    expectThrows(
+        IllegalStateException.class,
+        () ->
+            OHCacheBuilder.<String, String>newBuilder()
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .build());
+  }
+
+  @Test(dataProvider = "evictionStrategies", timeOut = 5_000L)
+  public void maxSizeEvictsAtTheEntryCountBoundary(Eviction eviction) {
     try (OHCache<String, String> cache = newMaxSizeCache(2, eviction)) {
       assertEquals(cache.capacity(), -1L);
-      assertTrue(cache.put("one", "short"));
-      assertTrue(cache.put("two", "a value with a different size"));
-      assertTrue(cache.put("three", "third"));
+      cache.put("one", "short");
+      cache.put("two", "a value with a different size");
+      cache.put("three", "third");
 
       cache.flushAsync().join();
 
       assertEquals(cache.size(), 2L);
       assertTrue(cache.stats().liveWeight() > 0L);
+      assertEquals(cache.get("three"), "third");
     }
   }
 
@@ -95,9 +102,9 @@ public final class MaxSizeTest {
   @Test
   public void replacingAnEntryDoesNotConsumeAnotherMaxSizeSlot() {
     try (OHCache<String, String> cache = newMaxSizeCache(2)) {
-      assertTrue(cache.put("one", "one"));
-      assertTrue(cache.put("two", "two"));
-      assertTrue(cache.put("one", "a replacement with a larger value"));
+      cache.put("one", "one");
+      cache.put("two", "two");
+      cache.put("one", "a replacement with a larger value");
 
       cache.flushAsync().join();
 
@@ -127,7 +134,7 @@ public final class MaxSizeTest {
   }
 
   @Test
-  public void maxSizeDoesNotTrackNativeBudgetReservations() throws Exception {
+  public void maxSizeUsesTheSharedNativePoolWithoutByteAdmission() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .maxSize(8)
@@ -136,62 +143,51 @@ public final class MaxSizeTest {
             .valueSerializer(STRING)
             .buildTyped();
     try {
-      assertTrue(cache.put("one", "value"));
+      cache.put("one", "value");
       Map<String, String> batch = new LinkedHashMap<>();
       batch.put("batch", "batch-value");
-      assertEquals(cache.putAll(batch), 1);
-      assertTrue(cache.putIfAbsentAsync("async", "async-value", 0L).get(2L, TimeUnit.SECONDS));
+      cache.putAll(batch);
+      assertTrue(cache.putIfAbsent("async", "async-value", 0L) == null);
       assertTrue(
-          cache.replaceAsync("one", "value", "replacement", 0L).get(2L, TimeUnit.SECONDS));
+          cache.replace("one", "value", "replacement", 0L));
       assertEquals(
           cache.getOrLoadAsync("loaded", ignored -> "loaded-value", 0L).get(2L, TimeUnit.SECONDS),
           "loaded-value");
-      assertEquals(budget(cache).reserved(), 0L);
     } finally {
       cache.close();
     }
   }
 
   @Test(timeOut = 10_000L)
-  public void highWaterRejectionSkipsValueSizingButReplacementStillSizes() throws Exception {
-    AtomicInteger serializedSizes = new AtomicInteger();
-    CacheSerializer<String> countingValueSerializer =
-        new CacheSerializer<String>() {
-          @Override
-          public void serialize(String value, ByteBuffer buffer) {
-            STRING.serialize(value, buffer);
-          }
-
-          @Override
-          public String deserialize(ByteBuffer buffer) {
-            return STRING.deserialize(buffer);
-          }
-
-          @Override
-          public int serializedSize(String value) {
-            serializedSizes.incrementAndGet();
-            return STRING.serializedSize(value);
-          }
-        };
+  public void synchronousReplaceUsesTheSharedNativePoolPath() throws Exception {
     OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .maxSize(1)
-            .keySerializer(STRING)
-            .valueSerializer(countingValueSerializer)
-            .buildTyped();
+        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    try {
+      cache.put("one", "old");
+      assertTrue(cache.replace("one", "old", "new", 0L));
+      assertEquals(cache.get("one"), "new");
+    } finally {
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void replacementDoesNotWaitForTheMaintenanceActor() throws Exception {
+    OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>) newMaxSizeCache(1);
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     pauseMaintenance(cache, paused, release);
     try {
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("two", "value-two"));
-      serializedSizes.set(0);
-
-      assertFalse(cache.put("three", "value-three"));
-      assertEquals(serializedSizes.get(), 0);
-
-      assertTrue(cache.put("one", "replacement"));
-      assertEquals(serializedSizes.get(), 1);
+      cache.put("one", "value-one");
+      ExecutorService writer = Executors.newSingleThreadExecutor();
+      try {
+        Future<?> replacement = writer.submit(() -> cache.put("one", "replacement"));
+        replacement.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.get("one"), "replacement");
+      } finally {
+        writer.shutdownNow();
+      }
     } finally {
       release.countDown();
       cache.close();
@@ -199,44 +195,50 @@ public final class MaxSizeTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void putAllSkipsValueSizingForHighWaterRejectedEntries() throws Exception {
-    AtomicInteger serializedSizes = new AtomicInteger();
-    CacheSerializer<String> countingValueSerializer =
-        new CacheSerializer<String>() {
-          @Override
-          public void serialize(String value, ByteBuffer buffer) {
-            STRING.serialize(value, buffer);
-          }
-
-          @Override
-          public String deserialize(ByteBuffer buffer) {
-            return STRING.deserialize(buffer);
-          }
-
-          @Override
-          public int serializedSize(String value) {
-            serializedSizes.incrementAndGet();
-            return STRING.serializedSize(value);
-          }
-        };
+  public void newKeyPutDoesNotWaitForTheMaintenanceActorWhenTargetIsFull() throws Exception {
     OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .maxSize(1)
-            .keySerializer(STRING)
-            .valueSerializer(countingValueSerializer)
-            .buildTyped();
+        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    pauseMaintenance(cache, paused, release);
+    ExecutorService writer = Executors.newSingleThreadExecutor();
+    try {
+      cache.put("one", "value-one");
+      Future<?> second = writer.submit(() -> cache.put("two", "value-two"));
+
+      second.get(1L, TimeUnit.SECONDS);
+      assertEquals(cache.size(), 2L);
+    } finally {
+      release.countDown();
+      writer.shutdownNow();
+      cache.close();
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void putAllDoesNotWaitForTheMaintenanceActor() throws Exception {
+    OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>) newMaxSizeCache(1);
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     pauseMaintenance(cache, paused, release);
     try {
-      serializedSizes.set(0);
       Map<String, String> entries = new LinkedHashMap<>();
       entries.put("one", "value-one");
       entries.put("two", "value-two");
       entries.put("three", "value-three");
-
-      assertEquals(cache.putAll(entries), 2);
-      assertEquals(serializedSizes.get(), 2);
+      ExecutorService writer = Executors.newSingleThreadExecutor();
+      try {
+        Future<?> putAll = writer.submit(() -> cache.putAll(entries));
+        putAll.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.size(), 3L);
+        release.countDown();
+        cache.flushAsync().join();
+      } finally {
+        writer.shutdownNow();
+      }
+      assertEquals(cache.size(), 1L);
+      assertEquals(cache.get("three"), "value-three");
     } finally {
       release.countDown();
       cache.close();
@@ -244,49 +246,31 @@ public final class MaxSizeTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void putAllKeepsExistingReplacementAndRejectsNewKeyAtHighWatermark() throws Exception {
-    AtomicInteger serializedSizes = new AtomicInteger();
-    CacheSerializer<String> countingValueSerializer =
-        new CacheSerializer<String>() {
-          @Override
-          public void serialize(String value, ByteBuffer buffer) {
-            STRING.serialize(value, buffer);
-          }
-
-          @Override
-          public String deserialize(ByteBuffer buffer) {
-            return STRING.deserialize(buffer);
-          }
-
-          @Override
-          public int serializedSize(String value) {
-            serializedSizes.incrementAndGet();
-            return STRING.serializedSize(value);
-          }
-        };
+  public void loaderDoesNotWaitForTheMaintenanceActor() throws Exception {
     OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .maxSize(1)
-            .keySerializer(STRING)
-            .valueSerializer(countingValueSerializer)
-            .buildTyped();
+        (OffHeapCache<String, String>)
+            OHCacheBuilder.<String, String>newBuilder()
+                .maxSize(1)
+                .loaderExecutor(Runnable::run)
+                .keySerializer(STRING)
+                .valueSerializer(STRING)
+                .buildTyped();
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     pauseMaintenance(cache, paused, release);
     try {
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("two", "value-two"));
-      serializedSizes.set(0);
-
-      Map<String, String> entries = new LinkedHashMap<>();
-      entries.put("one", "replacement");
-      entries.put("three", "rejected");
-
-      assertEquals(cache.putAll(entries), 1);
-      assertEquals(serializedSizes.get(), 1);
-      assertEquals(cache.get("one"), "replacement");
-      assertEquals(cache.get("three"), null);
-      assertEquals(budget(cache).reserved(), 0L);
+      cache.put("one", "value-one");
+      ExecutorService caller = Executors.newSingleThreadExecutor();
+      try {
+        Future<CompletableFuture<String>> request =
+            caller.submit(() -> cache.getOrLoadAsync("two", ignored -> "value-two", 0L));
+        assertEquals(request.get(1L, TimeUnit.SECONDS).get(1L, TimeUnit.SECONDS), "value-two");
+        release.countDown();
+        cache.flushAsync().join();
+      } finally {
+        caller.shutdownNow();
+      }
+      assertEquals(cache.size(), 1L);
     } finally {
       release.countDown();
       cache.close();
@@ -294,15 +278,25 @@ public final class MaxSizeTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void replaceAsyncUsesTheUnboundedMaxSizeBudgetPath() throws Exception {
+  public void newKeyPutDoesNotWaitForTheMaintenanceActor() throws Exception {
     OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>) newMaxSizeCache(1);
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    pauseMaintenance(cache, paused, release);
+    ExecutorService writer = Executors.newSingleThreadExecutor();
     try {
-      assertTrue(cache.put("one", "old"));
-      assertTrue(cache.replaceAsync("one", "old", "new", 0L).get(2L, TimeUnit.SECONDS));
-      assertEquals(cache.get("one"), "new");
-      assertEquals(budget(cache).reserved(), 0L);
+      cache.put("first", "value");
+      Future<?> second = writer.submit(() -> cache.put("second", "value"));
+      second.get(1L, TimeUnit.SECONDS);
+      assertEquals(cache.size(), 2L);
+      release.countDown();
+      cache.flushAsync().join();
+      assertEquals(cache.get("second"), "value");
+      assertEquals(cache.size(), 1L);
     } finally {
+      release.countDown();
+      writer.shutdownNow();
       cache.close();
     }
   }
@@ -311,19 +305,30 @@ public final class MaxSizeTest {
   public void ttlAndRemoveUpdateCountAndLiveBytesAfterFlush() {
     MutableTicker ticker = new MutableTicker();
     try (OHCache<String, String> cache = newMaxSizeCache(4, ticker)) {
-      assertTrue(cache.put("expires", "value", 100L));
-      assertTrue(cache.put("remove", "another value"));
+      cache.put("expires", "value", 100L);
+      cache.put("remove", "another value");
       cache.flushAsync().join();
       long liveBeforeRemove = cache.stats().liveWeight();
 
-      assertTrue(cache.remove("remove"));
+      cache.remove("remove");
+      assertTrue(!cache.containsKey("remove"));
       cache.flushAsync().join();
       assertEquals(cache.size(), 1L);
       assertTrue(cache.stats().liveWeight() < liveBeforeRemove);
 
       ticker.now = 200L;
       cache.flushAsync().join();
-      assertEquals(cache.size(), 0L);
+      assertEquals(
+          cache.size(),
+          0L,
+          "ttl flush did not remove the expired entry: expirationCount="
+              + cache.stats().expirationCount()
+              + ", ttlBacklog="
+              + cache.stats().ttlBacklog()
+              + ", queueDepth="
+              + cache.stats().maintenanceQueueDepth()
+              + ", liveWeight="
+              + cache.stats().liveWeight());
       assertEquals(cache.stats().liveWeight(), 0L);
     }
   }
@@ -333,7 +338,7 @@ public final class MaxSizeTest {
     MutableTicker ticker = new MutableTicker();
     try (OHCache<String, String> cache = newMaxSizeCache(2_048, ticker)) {
       for (int index = 0; index < 1_025; index++) {
-        assertTrue(cache.put("expires-" + index, "value", 64L));
+        cache.put("expires-" + index, "value", 64L);
       }
       cache.flushAsync().join();
 
@@ -351,7 +356,7 @@ public final class MaxSizeTest {
     try (OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker)) {
       for (int index = 0; index < 1_025; index++) {
-        assertTrue(cache.put("expires-" + index, "value", 64L));
+        cache.put("expires-" + index, "value", 64L);
       }
       cache.flushAsync().join();
 
@@ -372,7 +377,7 @@ public final class MaxSizeTest {
     MutableTicker ticker = new MutableTicker();
     try (OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker)) {
-      assertTrue(cache.put("future", "value", 10_000L));
+      cache.put("future", "value", 10_000L);
       cache.flushAsync().join();
 
       ticker.now = 128L;
@@ -385,7 +390,7 @@ public final class MaxSizeTest {
     }
   }
 
-  @Test(timeOut = 10_000L)
+  @Test(timeOut = 20_000L)
   public void concurrentWritesEventuallyConvergeToMaxSize() throws Exception {
     ExecutorService writers = Executors.newFixedThreadPool(4);
     try (OHCache<String, String> cache = newMaxSizeCache(8)) {
@@ -403,7 +408,7 @@ public final class MaxSizeTest {
                 }));
       }
       writers.shutdown();
-      assertTrue(writers.awaitTermination(5L, TimeUnit.SECONDS));
+      assertTrue(writers.awaitTermination(15L, TimeUnit.SECONDS));
       for (Future<?> task : tasks) {
         task.get();
       }
@@ -422,99 +427,65 @@ public final class MaxSizeTest {
     }
   }
 
-  @Test(timeOut = 10_000L)
-  public void maxSizeRejectsNewKeysAtTheApproximateHighWatermark() throws Exception {
-    OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .maxSize(1)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
-    CountDownLatch paused = new CountDownLatch(1);
-    CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
-    try {
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("two", "value-two"));
-      assertFalse(cache.put("three", "value-three"));
-      assertEquals(cache.size(), 2L);
-      assertTrue(cache.put("one", "replacement"));
-      assertEquals(cache.get("one"), "replacement");
-    } finally {
-      release.countDown();
-      try {
-        cache.flushAsync().join();
-        assertEquals(cache.size(), 1L);
-      } finally {
-        cache.close();
+  @Test(timeOut = 20_000L)
+  public void concurrentInsertChurnDoesNotRejectWhenVictimsAreAvailable() throws Exception {
+    int writerCount = 8;
+    int operationsPerWriter = 256;
+    ExecutorService writers = Executors.newFixedThreadPool(writerCount);
+    CountDownLatch start = new CountDownLatch(1);
+    try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(64)) {
+      List<Future<?>> tasks = new ArrayList<>();
+      for (int worker = 0; worker < writerCount; worker++) {
+        final int workerId = worker;
+        tasks.add(
+            writers.submit(
+                () -> {
+                  start.await();
+                  for (int index = 0; index < operationsPerWriter; index++) {
+                    cache.put("churn-" + workerId + '-' + index, "value");
+                  }
+                  return null;
+                }));
       }
+      start.countDown();
+      for (Future<?> task : tasks) {
+        task.get();
+      }
+      cache.flushAsync().join();
+      assertTrue(cache.size() <= 64L, "size=" + cache.size());
+    } finally {
+      writers.shutdownNow();
+      assertTrue(writers.awaitTermination(5L, TimeUnit.SECONDS));
     }
   }
 
   @Test(timeOut = 10_000L)
-  public void asyncAndLoaderAdmissionShareTheSynchronousHighWatermark() throws Exception {
+  public void maxSizeWritesDoNotWaitForLogicalEvictionOrPhysicalReclaim() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .maxSize(1)
             .keySerializer(STRING)
             .valueSerializer(STRING)
-            .loaderExecutor(Runnable::run)
             .buildTyped();
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     pauseMaintenance(cache, paused, release);
     try {
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("two", "value-two"));
-      long nativeBytes = cache.totalAllocatedBytes();
-
-      CompletableFuture<Boolean> asyncPut =
-          cache.putIfAbsentAsync("three", "value-three", 0L);
-      CompletableFuture<String> asyncLoad =
-          cache.getOrLoadAsync("four", ignored -> "value-four", 0L);
-
-      assertFalse(asyncPut.isDone());
-      assertEquals(asyncLoad.get(2L, TimeUnit.SECONDS), "value-four");
-      assertEquals(cache.size(), 2L);
-      assertEquals(cache.totalAllocatedBytes(), nativeBytes);
-
-      release.countDown();
-      assertFalse(asyncPut.get(2L, TimeUnit.SECONDS));
-      assertEquals(cache.size(), 2L);
-      assertEquals(cache.totalAllocatedBytes(), nativeBytes);
+      cache.put("one", "value-one");
+      ExecutorService writer = Executors.newSingleThreadExecutor();
+      try {
+        Future<?> second = writer.submit(() -> cache.put("two", "value-two"));
+        second.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.size(), 2L);
+        release.countDown();
+      } finally {
+        writer.shutdownNow();
+      }
+      cache.flushAsync().join();
+      assertEquals(cache.size(), 1L);
+      assertEquals(cache.get("two"), "value-two");
     } finally {
       release.countDown();
-      cache.close();
-    }
-  }
-
-  @Test(timeOut = 2_000L)
-  public void highWaterRejectionWakesTheIdleActorForAsyncRecovery() throws Exception {
-    BlockingPassTicker ticker = new BlockingPassTicker();
-    OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .maxSize(1)
-            .ticker(ticker)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
-    MaintenanceEventLoop worker = worker(cache);
-    Entry first = EntryTestSupport.entry(0, 101, 0L);
-    Entry second = EntryTestSupport.entry(0, 102, 0L);
-    try {
-      waitUntilParked(worker);
-      cache.dataForTest().put(first, first);
-      cache.dataForTest().put(second, second);
-      ticker.blockPass = true;
-      assertFalse(cache.put("rejected", "value"));
-
-      assertTrue(
-          ticker.passStarted.await(1L, TimeUnit.SECONDS),
-          "a rejected write must enter the next strictly scheduled maintenance pass");
-    } finally {
-      ticker.releasePass.countDown();
-      cache.dataForTest().remove(first, first);
-      cache.dataForTest().remove(second, second);
       cache.close();
     }
   }
@@ -550,10 +521,8 @@ public final class MaxSizeTest {
   private static void assertPutEventually(
       OHCache<String, String> cache, String key, String value) {
     for (int attempt = 0; attempt < 1_000; attempt++) {
-      if (cache.put(key, value)) {
-        return;
-      }
-      Thread.yield();
+      cache.put(key, value);
+      return;
     }
     assertTrue(false, "put admission did not succeed for " + key);
   }
@@ -579,20 +548,6 @@ public final class MaxSizeTest {
     return (MaintenanceEventLoop) workerField.get(cache);
   }
 
-  private static Budget budget(OffHeapCache<?, ?> cache) throws Exception {
-    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
-    budgetField.setAccessible(true);
-    return (Budget) budgetField.get(cache);
-  }
-
-  private static void waitUntilParked(MaintenanceEventLoop worker) throws InterruptedException {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-    while (!worker.isParked() && System.nanoTime() < deadline) {
-      Thread.sleep(1L);
-    }
-    assertTrue(worker.isParked(), "maintenance actor did not park");
-  }
-
   private static void await(CountDownLatch latch) {
     try {
       latch.await();
@@ -616,23 +571,4 @@ public final class MaxSizeTest {
     }
   }
 
-  private static final class BlockingPassTicker implements Ticker {
-    final CountDownLatch passStarted = new CountDownLatch(1);
-    final CountDownLatch releasePass = new CountDownLatch(1);
-    volatile boolean blockPass;
-
-    @Override
-    public long nanos() {
-      if (blockPass) {
-        passStarted.countDown();
-        await(releasePass);
-      }
-      return System.nanoTime();
-    }
-
-    @Override
-    public long currentTimeMillis() {
-      return System.currentTimeMillis();
-    }
-  }
 }

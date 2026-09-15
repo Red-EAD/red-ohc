@@ -35,7 +35,7 @@ public class MaintenanceLifecycleTest {
   @Test
   public void closeReclaimsAllNativeMemoryAfterAcceptedMutations() {
     OHCache<String, String> cache = newCache();
-    assertTrue(cache.put("alpha", "value"));
+    cache.put("alpha", "value");
     cache.flushAsync().join();
     assertTrue(cache.totalAllocatedBytes() > 0L);
 

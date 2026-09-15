@@ -92,7 +92,21 @@ public final class ConcurrentLifecycleFuzzTest {
       awaitQuiescence(cache);
       OHCacheStats stats = cache.stats();
       assertFalse(stats.maintenanceUnhealthy());
-      assertEquals(stats.maintenanceQueueDepth(), 0L);
+      assertEquals(
+          stats.maintenanceQueueDepth(),
+          0L,
+          "queue="
+              + stats.maintenanceQueueDepth()
+              + ", size="
+              + cache.size()
+              + ", liveWeight="
+              + stats.liveWeight()
+              + ", ttl="
+              + stats.ttlBacklog()
+              + ", retirement="
+              + stats.retirementQueueDepth()
+              + ", async="
+              + stats.asyncMutationLagRecords());
       assertTrue(
           stats.liveWeight() <= cache.capacity(),
           "liveWeight="
@@ -147,10 +161,11 @@ public final class ConcurrentLifecycleFuzzTest {
                             cache, key, random.nextInt(), System.currentTimeMillis() + 64L);
                         break;
                       case 2:
-                        cache.putIfAbsentAsync(key, random.nextInt(), 0L).join();
+                        runBestEffort(() -> cache.putIfAbsent(key, random.nextInt(), 0L));
                         break;
                       case 3:
-                        cache.replaceAsync(key, random.nextInt(), random.nextInt(), 0L).join();
+                        runBestEffort(
+                            () -> cache.replace(key, random.nextInt(), random.nextInt(), 0L));
                         break;
                       case 4:
                         cache.remove(key);
@@ -176,7 +191,21 @@ public final class ConcurrentLifecycleFuzzTest {
       awaitQuiescence(cache);
       OHCacheStats stats = cache.stats();
       assertFalse(stats.maintenanceUnhealthy());
-      assertEquals(stats.maintenanceQueueDepth(), 0L);
+      assertEquals(
+          stats.maintenanceQueueDepth(),
+          0L,
+          "queue="
+              + stats.maintenanceQueueDepth()
+              + ", size="
+              + cache.size()
+              + ", liveWeight="
+              + stats.liveWeight()
+              + ", ttl="
+              + stats.ttlBacklog()
+              + ", retirement="
+              + stats.retirementQueueDepth()
+              + ", async="
+              + stats.asyncMutationLagRecords());
     } finally {
       callers.shutdownNow();
       cache.close();
@@ -186,16 +215,23 @@ public final class ConcurrentLifecycleFuzzTest {
 
   private static void putBestEffort(
       OffHeapCache<Integer, Integer> cache, int key, int value, long expireAtMillis) {
-    if (expireAtMillis == 0L) {
-      cache.put(key, value);
-    } else {
-      cache.put(key, value, expireAtMillis);
-    }
+    runBestEffort(
+        () -> {
+          if (expireAtMillis == 0L) {
+            cache.put(key, value);
+          } else {
+            cache.put(key, value, expireAtMillis);
+          }
+        });
     // Concurrent stats snapshots must never traverse the actor-owned retirement compact set.
     OHCacheStats stats = cache.stats();
     if (stats.maintenanceUnhealthy()) {
-      throw new AssertionError("maintenance actor became unhealthy during concurrent write");
+            throw new AssertionError("maintenance actor became unhealthy during concurrent write");
     }
+  }
+
+  private static void runBestEffort(Runnable write) {
+    write.run();
   }
 
   private static void awaitQuiescence(OffHeapCache<?, ?> cache) {

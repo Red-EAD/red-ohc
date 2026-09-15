@@ -25,8 +25,8 @@ import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
 import com.red.ohc.index.Entry;
+import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
-import com.red.ohc.storage.WriterArena;
 
 /**
  * Stable 120%-working-set insertion churn using non-blocking producer admission.
@@ -78,14 +78,7 @@ public class OHCEvictionChurnBenchmark {
       keys[index] = OHCWriteAdmissionBenchmark.bytes(keyBytes, index);
       values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
       if (index < CAPACITY_ENTRIES) {
-        if (!cache.put(keys[index], values[index])) {
-          OHCacheStats stats = cache.stats();
-          throw new IllegalStateException(
-              "OHC eviction preload rejected at "
-                  + index
-                  + ": unhealthy="
-                  + stats.maintenanceUnhealthy());
-        }
+        cache.put(keys[index], values[index]);
       }
     }
     cache.flushAsync().join();
@@ -118,31 +111,32 @@ public class OHCEvictionChurnBenchmark {
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(Cursor cursor, WriteResults results) {
+  public void oneThread(
+      Cursor cursor, WriteResults results, BenchmarkWindowResults window) {
     churn(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(Cursor cursor, WriteResults results) {
+  public void cpuThreads(
+      Cursor cursor, WriteResults results, BenchmarkWindowResults window) {
     churn(cursor, results);
   }
 
   private void churn(Cursor cursor, WriteResults results) {
     for (int index = 0; index < BATCH_SIZE; index++) {
       int slot = cursor.next();
-      results.record(cache.put(keys[slot], values[slot]));
+      cache.put(keys[slot], values[slot]);
+      results.record(true);
     }
   }
 
-  /** The OHC capacity contract is rounded native resident weight, not raw serializer payload. */
+  /** The OHC capacity contract charges logical serialized entry bytes. */
   private long nativeCapacityFor(int liveEntries) {
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
-    long entryWeight =
-        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
-    return entryWeight * liveEntries;
+    return CacheMath.logicalEntryBytes(keyAllocation, valueAllocation) * liveEntries;
   }
 
   @State(Scope.Thread)

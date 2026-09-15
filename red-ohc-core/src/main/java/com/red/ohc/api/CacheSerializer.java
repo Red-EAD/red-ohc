@@ -11,14 +11,10 @@ public interface CacheSerializer<T> {
    * @param buf bounded {@code ByteBuffer} into which serialization needs to happen. Value
    *     serialization receives a direct, non-array buffer; key serialization may use the cache's
    *     reusable heap lookup buffer. In both cases the position starts at {@code 0}, and byte
-   *     order is {@link java.nio.ByteOrder#BIG_ENDIAN}. For an ordinary write, limit and capacity
-   *     equal {@link #serializedSize}; during weak-value validation, limit and capacity instead
-   *     equal the native publication length. Implementations must use relative writes so that the
-   *     final position is the number of bytes written, must not call {@link ByteBuffer#array()},
-   *     and must not retain the buffer after returning. With weak-value reuse enabled, the cache
-   *     may call this method again during a cache hit to validate that the weak object still
-   *     represents the native publication; implementations must not mutate the value or depend on
-   *     time, randomness, buffer capacity, or other mutable external state during that validation.
+   *     order is {@link java.nio.ByteOrder#BIG_ENDIAN}. Limit and capacity equal
+   *     {@link #serializedSize}. Implementations must use relative writes so that the final
+   *     position is the number of bytes written, must not call {@link ByteBuffer#array()}, and
+   *     must not retain the buffer after returning.
    */
   void serialize(T value, ByteBuffer buf);
 
@@ -36,8 +32,7 @@ public interface CacheSerializer<T> {
    * @return the type that was deserialized. Must not return {@code null}, and must not retain the
    *     input buffer, a {@code slice()}, {@code duplicate()}, {@code asReadOnlyBuffer()} view, or
    *     any native address. Generic cache APIs return owned objects; use the direct cache APIs for
-   *     an explicitly scoped zero-copy view. When {@code weakValues(true)} is enabled, the result
-   *     must not be a {@link java.nio.ByteBuffer} or any subclass of it.
+   *     an explicitly scoped zero-copy view.
    */
   T deserialize(ByteBuffer buf);
 
@@ -48,10 +43,10 @@ public interface CacheSerializer<T> {
    * @param value non-{@code null} object to calculate serialized size for
    * @return serialized size of {@code t}
    * @implNote The result must be deterministic for the value and agree with the number of bytes
-   *     written by {@link #serialize(Object, ByteBuffer)}. Weak-value validation may use the
-   *     native publication length directly, so this method is not guaranteed to run on a weak hit.
-   *     A write may also be rejected by cache admission before this method is called; callers must
-   *     not rely on serializer side effects or exceptions for rejected writes.
+   *     written by {@link #serialize(Object, ByteBuffer)}. Native allocation, lifecycle, or
+   *     conditional-operation failures can still prevent publication; callers must not rely on
+   *     serializer side effects for an unpublished write.
    */
   int serializedSize(T value);
+
 }

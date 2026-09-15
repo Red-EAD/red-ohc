@@ -42,6 +42,23 @@ final class NativeByteBuffer {
     return buffer;
   }
 
+  /** Rebinds the ThreadContext-owned writable shell after its first validated binding. */
+  static ByteBuffer writableTrusted(ByteBuffer buffer, long address, int length) {
+    // The shell was created by writable() and is reachable only from its owning ThreadContext.
+    // Keep validation and allocation out of this path, but restore mutable Buffer state that a
+    // caller may have changed before the previous lease was invalidated.
+    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
+    UNSAFE.putInt(buffer, LAYOUT.limitOffset, length);
+    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, length);
+    UNSAFE.putLong(buffer, LAYOUT.addressOffset, address);
+    UNSAFE.putBoolean(buffer, LAYOUT.bigEndianOffset, true);
+    UNSAFE.putBoolean(
+        buffer,
+        LAYOUT.nativeByteOrderOffset,
+        ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN);
+    return buffer;
+  }
+
   /** Rebinds an invalidated read-only view to another existing native block. */
   static ByteBuffer readOnly(ByteBuffer buffer, long address, int length) {
     verifySupported();
@@ -52,11 +69,37 @@ final class NativeByteBuffer {
     return buffer;
   }
 
+  /** Rebinds a ThreadContext-owned read-only shell after its first validated binding. */
+  static ByteBuffer readOnlyTrusted(ByteBuffer buffer, long address, int length) {
+    // The shell was created by readOnly() and is reachable only from its owning ThreadContext.
+    // Keep validation and allocation out of this path, but restore mutable Buffer state that a
+    // caller may have changed before the previous lease was invalidated.
+    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
+    UNSAFE.putInt(buffer, LAYOUT.limitOffset, length);
+    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, length);
+    UNSAFE.putLong(buffer, LAYOUT.addressOffset, address);
+    UNSAFE.putBoolean(buffer, LAYOUT.bigEndianOffset, true);
+    UNSAFE.putBoolean(
+        buffer,
+        LAYOUT.nativeByteOrderOffset,
+        ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN);
+    return buffer;
+  }
+
   /** Invalidates a view so accidental use after the reader/writer lease fails immediately. */
   static void invalidate(ByteBuffer buffer) {
     Objects.requireNonNull(buffer, "buffer");
     verifySupported();
     requireOwned(buffer, null, "buffer is not an OHC native view");
+    UNSAFE.putInt(buffer, LAYOUT.markOffset, -1);
+    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
+    UNSAFE.putInt(buffer, LAYOUT.limitOffset, 0);
+    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, 0);
+    UNSAFE.putLong(buffer, LAYOUT.addressOffset, 0L);
+  }
+
+  /** Invalidates a shell whose ownership was established by ThreadContext. */
+  static void invalidateTrusted(ByteBuffer buffer) {
     UNSAFE.putInt(buffer, LAYOUT.markOffset, -1);
     UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
     UNSAFE.putInt(buffer, LAYOUT.limitOffset, 0);

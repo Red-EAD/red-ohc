@@ -1,30 +1,299 @@
 package com.red.ohc.api;
 
 import java.util.Collection;
+import java.util.Enumeration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.DoubleBinaryOperator;
+import java.util.function.Function;
+import java.util.function.IntBinaryOperator;
+import java.util.function.LongBinaryOperator;
+import java.util.function.ToDoubleBiFunction;
+import java.util.function.ToDoubleFunction;
+import java.util.function.ToIntBiFunction;
+import java.util.function.ToIntFunction;
+import java.util.function.ToLongBiFunction;
+import java.util.function.ToLongFunction;
 
-/** A weakly-consistent off-heap cache with synchronous data-plane writes. */
+/**
+ * A weakly-consistent off-heap cache with synchronous data-plane writes and asynchronous target
+ * maintenance.
+ *
+ * <p>The CHM is the authoritative Java index. Values and keys are serialized into native memory,
+ * so reads and callbacks return deserialized heap snapshots rather than preserving Java object
+ * identity. Key matching uses the key serializer's bytes; value matching for conditional methods
+ * uses {@link java.util.Objects#equals(Object, Object)} on deserialized values.
+ *
+ * <p>TTL expiry is logical first and physical later. An expired mapping is absent from reads,
+ * conditional operations, views, and bulk callbacks, but can remain in the CHM-backed physical
+ * index until the maintenance actor retires it. {@link #size()}, {@link #isEmpty()}, and view
+ * sizes use the logical mapping count; {@link #mappingCount()} exposes the constant-time physical
+ * CHM count and may temporarily include expired entries. Logical expiry is observed by reads or
+ * maintenance, so these weakly-consistent counts can lag an unobserved clock transition. Closing
+ * makes reads and views empty; writes, including writes through views, reject the operation with
+ * {@link IllegalStateException}.
+ *
+ * <p>{@link #capacity()} is the steady-state byte target and {@code maxSize} is the corresponding
+ * entry-count target. Neither target synchronously limits a write: logical occupancy and native
+ * usage can temporarily grow while the actor evicts asynchronously. If maintenance remains
+ * behind the write rate, native allocation can eventually fail with an {@link OutOfMemoryError};
+ * that failure makes the cache terminal.
+ */
 public interface OHCache<K, V> extends AutoCloseable {
   /**
-   * Publishes the serialized entry synchronously. A successful return is immediately visible to
-   * {@link #get(Object)}; resource or contention admission failure returns {@code false}.
+   * Publishes the serialized entry synchronously. {@link #capacity()} is an asynchronous eviction
+   * target rather than a write admission limit, so the logical mapping count and live weight may
+   * temporarily exceed it while the maintenance actor catches up. Listener delivery, policy
+   * repair, and native reclamation remain asynchronous. The method is intentionally void: an
+   * unconditional write does not materialize or expose the previous value.
    */
-  boolean put(K key, V value);
+  void put(K key, V value);
 
   /**
-   * Publishes an entry with an absolute expiry time. TTL reads use the current ticker immediately;
-   * physical removal of expired native storage remains asynchronous.
+   * Publishes an entry with an absolute wall-clock expiry time. The method is intentionally void:
+   * an unconditional write does not materialize or expose the previous value. A non-positive
+   * expiry has the same permanent-entry meaning as the existing OHC TTL API.
    */
-  boolean put(K key, V value, long expireAtMillis);
+  void put(K key, V value, long expireAtMillis);
 
-  boolean remove(K key);
+  /** Conditionally publishes a value only when the key is absent or expired. */
+  V putIfAbsent(K key, V value);
 
-  V get(K key);
+  /**
+   * Conditionally publishes a value only when the key is absent or expired, returning the previous
+   * live value when the mapping was not inserted.
+   */
+  V putIfAbsent(K key, V value, long expireAtMillis);
 
-  boolean containsKey(K key);
+  /**
+   * Conditionally replaces a value when the current live value equals expected. The expiry is an
+   * absolute wall-clock time; a non-positive expiry creates a permanent mapping.
+   */
+  boolean replace(K key, V expected, V value, long expireAtMillis);
 
-  int putAll(Map<? extends K, ? extends V> entries);
+  V get(Object key);
+
+  boolean containsKey(Object key);
+
+  /**
+   * Returns the logical live mapping count as an {@code int}, like {@link Map#size()}. The result
+   * may temporarily exceed the configured capacity or {@code maxSize} target while asynchronous
+   * eviction catches up.
+   */
+  int size();
+
+  /** Returns the constant-time physical CHM mapping count; it may include expired entries. */
+  long mappingCount();
+
+  boolean isEmpty();
+
+  boolean equals(Object object);
+
+  int hashCode();
+
+  String toString();
+
+  boolean containsValue(Object value);
+
+  void putAll(Map<? extends K, ? extends V> entries);
+
+  /**
+   * Removes the live mapping for a key if present. Missing keys are a no-op and the method does
+   * not materialize or expose the removed value.
+   */
+  void remove(Object key);
+
+  boolean remove(Object key, Object value);
+
+  boolean replace(K key, V oldValue, V newValue);
+
+  V replace(K key, V value);
+
+  void clear();
+
+  Set<K> keySet();
+
+  Collection<V> values();
+
+  Set<Map.Entry<K, V>> entrySet();
+
+  V getOrDefault(Object key, V defaultValue);
+
+  void forEach(BiConsumer<? super K, ? super V> action);
+
+  void replaceAll(BiFunction<? super K, ? super V, ? extends V> function);
+
+  V computeIfAbsent(K key, Function<? super K, ? extends V> function);
+
+  V computeIfPresent(
+      K key, BiFunction<? super K, ? super V, ? extends V> function);
+
+  V compute(K key, BiFunction<? super K, ? super V, ? extends V> function);
+
+  V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> function);
+  boolean contains(Object value);
+
+  Enumeration<K> keys();
+
+  Enumeration<V> elements();
+
+  Set<K> keySet(V mappedValue);
+
+  /**
+   * Runs a CHM-style weakly-consistent bulk traversal. Every callback receives heap snapshots and
+   * never a native buffer or an object retaining a native address. As with
+   * {@link java.util.concurrent.ConcurrentHashMap}, a caller-supplied parallelism threshold may
+   * execute callbacks on the JDK common pool; OHC does not submit maintenance or reclaim tasks to
+   * that pool.
+   */
+  void forEach(long parallelismThreshold, BiConsumer<? super K, ? super V> action);
+
+  <U> void forEach(
+      long parallelismThreshold,
+      BiFunction<? super K, ? super V, ? extends U> transformer,
+      Consumer<? super U> action);
+
+  <U> U search(
+      long parallelismThreshold,
+      BiFunction<? super K, ? super V, ? extends U> searchFunction);
+
+  <U> U reduce(
+      long parallelismThreshold,
+      BiFunction<? super K, ? super V, ? extends U> transformer,
+      BiFunction<? super U, ? super U, ? extends U> reducer);
+
+  double reduceToDouble(
+      long parallelismThreshold,
+      ToDoubleBiFunction<? super K, ? super V> transformer,
+      double basis,
+      DoubleBinaryOperator reducer);
+
+  long reduceToLong(
+      long parallelismThreshold,
+      ToLongBiFunction<? super K, ? super V> transformer,
+      long basis,
+      LongBinaryOperator reducer);
+
+  int reduceToInt(
+      long parallelismThreshold,
+      ToIntBiFunction<? super K, ? super V> transformer,
+      int basis,
+      IntBinaryOperator reducer);
+
+  void forEachKey(long parallelismThreshold, Consumer<? super K> action);
+
+  <U> void forEachKey(
+      long parallelismThreshold,
+      Function<? super K, ? extends U> transformer,
+      Consumer<? super U> action);
+
+  <U> U searchKeys(
+      long parallelismThreshold, Function<? super K, ? extends U> searchFunction);
+
+  K reduceKeys(
+      long parallelismThreshold, BiFunction<? super K, ? super K, ? extends K> reducer);
+
+  <U> U reduceKeys(
+      long parallelismThreshold,
+      Function<? super K, ? extends U> transformer,
+      BiFunction<? super U, ? super U, ? extends U> reducer);
+
+  double reduceKeysToDouble(
+      long parallelismThreshold,
+      ToDoubleFunction<? super K> transformer,
+      double basis,
+      DoubleBinaryOperator reducer);
+
+  long reduceKeysToLong(
+      long parallelismThreshold,
+      ToLongFunction<? super K> transformer,
+      long basis,
+      LongBinaryOperator reducer);
+
+  int reduceKeysToInt(
+      long parallelismThreshold,
+      ToIntFunction<? super K> transformer,
+      int basis,
+      IntBinaryOperator reducer);
+
+  void forEachValue(long parallelismThreshold, Consumer<? super V> action);
+
+  <U> void forEachValue(
+      long parallelismThreshold,
+      Function<? super V, ? extends U> transformer,
+      Consumer<? super U> action);
+
+  <U> U searchValues(
+      long parallelismThreshold, Function<? super V, ? extends U> searchFunction);
+
+  V reduceValues(
+      long parallelismThreshold, BiFunction<? super V, ? super V, ? extends V> reducer);
+
+  <U> U reduceValues(
+      long parallelismThreshold,
+      Function<? super V, ? extends U> transformer,
+      BiFunction<? super U, ? super U, ? extends U> reducer);
+
+  double reduceValuesToDouble(
+      long parallelismThreshold,
+      ToDoubleFunction<? super V> transformer,
+      double basis,
+      DoubleBinaryOperator reducer);
+
+  long reduceValuesToLong(
+      long parallelismThreshold,
+      ToLongFunction<? super V> transformer,
+      long basis,
+      LongBinaryOperator reducer);
+
+  int reduceValuesToInt(
+      long parallelismThreshold,
+      ToIntFunction<? super V> transformer,
+      int basis,
+      IntBinaryOperator reducer);
+
+  void forEachEntry(
+      long parallelismThreshold, Consumer<? super Map.Entry<K, V>> action);
+
+  <U> void forEachEntry(
+      long parallelismThreshold,
+      Function<Map.Entry<K, V>, ? extends U> transformer,
+      Consumer<? super U> action);
+
+  <U> U searchEntries(
+      long parallelismThreshold,
+      Function<Map.Entry<K, V>, ? extends U> searchFunction);
+
+  Map.Entry<K, V> reduceEntries(
+      long parallelismThreshold,
+      BiFunction<Map.Entry<K, V>, Map.Entry<K, V>, ? extends Map.Entry<K, V>> reducer);
+
+  <U> U reduceEntries(
+      long parallelismThreshold,
+      Function<Map.Entry<K, V>, ? extends U> transformer,
+      BiFunction<? super U, ? super U, ? extends U> reducer);
+
+  double reduceEntriesToDouble(
+      long parallelismThreshold,
+      ToDoubleFunction<Map.Entry<K, V>> transformer,
+      double basis,
+      DoubleBinaryOperator reducer);
+
+  long reduceEntriesToLong(
+      long parallelismThreshold,
+      ToLongFunction<Map.Entry<K, V>> transformer,
+      long basis,
+      LongBinaryOperator reducer);
+
+  int reduceEntriesToInt(
+      long parallelismThreshold,
+      ToIntFunction<Map.Entry<K, V>> transformer,
+      int basis,
+      IntBinaryOperator reducer);
 
   Map<K, V> getAll(Collection<? extends K> keys);
 
@@ -44,31 +313,27 @@ public interface OHCache<K, V> extends AutoCloseable {
    */
   int getDirectAll(Collection<? extends K> keys, DirectEntryConsumer<K> consumer);
 
-  /**
-   * Enqueues a mutation for this cache's maintenance event-loop. The key and value must not be
-   * modified until the returned future completes.
-   */
-  CompletableFuture<Boolean> putIfAbsentAsync(K key, V value, long expireAtMillis);
-
-  /** The key, expected value, and replacement value must remain unchanged until completion. */
-  CompletableFuture<Boolean> replaceAsync(K key, V expected, V value, long expireAtMillis);
-
-  /** The key must remain unchanged until completion. */
-  CompletableFuture<Boolean> removeAsync(K key);
-
   CompletableFuture<V> getOrLoadAsync(K key, CacheLoader<K, V> loader, long expireAtMillis);
 
-  /** Completes after async tasks queued before the call and their maintenance work are drained. */
+  /**
+   * Completes after async tasks queued before the call and their maintenance work are drained. The
+   * capacity/maxSize target is included: when the logical occupancy is over target, completion
+   * waits for the actor to bring it back to target. Concurrent writes after the FIFO fence may
+   * leave later occupancy outside this guarantee.
+   */
   CompletableFuture<Void> flushAsync();
 
-  long size();
-
+  /**
+   * Returns the configured logical serialized-entry byte target. It is not a synchronous write
+   * admission limit; a cache can temporarily exceed it and can grow until native allocation
+   * fails if maintenance cannot keep up.
+   */
   long capacity();
 
+  /** Returns current physical native allocation, including allocator and shared structures. */
   long totalAllocatedBytes();
 
   OHCacheStats stats();
 
-  @Override
   void close();
 }

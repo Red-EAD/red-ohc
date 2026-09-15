@@ -88,7 +88,7 @@ public class BulkCacheTest {
         values.put("key-" + i, "value-" + i);
       }
 
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       cache.flushAsync().join();
       Map<String, String> fetched = getAllEventually(cache, values.keySet());
       assertTrue(fetched instanceof HashMap);
@@ -110,8 +110,8 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("outer", "outer-value"));
-      assertTrue(cache.put("inner", "inner-value"));
+      cache.put("outer", "outer-value");
+      cache.put("inner", "inner-value");
       assertTrue(
           cache.getDirect(
               "outer",
@@ -130,8 +130,8 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("outer", "outer-value"));
-      assertTrue(cache.put("inner", "inner-value"));
+      cache.put("outer", "outer-value");
+      cache.put("inner", "inner-value");
       cache.flushAsync().join();
 
       assertTrue(
@@ -155,7 +155,7 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("key", "value"));
+      cache.put("key", "value");
       cache.flushAsync().join();
 
       assertTrue(
@@ -200,7 +200,7 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("key", "value"));
+      cache.put("key", "value");
       cache.flushAsync().join();
 
       assertTrue(
@@ -232,7 +232,7 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("empty", ""));
+      cache.put("empty", "");
       cache.flushAsync().join();
 
       assertTrue(
@@ -260,8 +260,8 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("outer", "outer-value"));
-      assertTrue(cache.put("inner", "inner-value"));
+      cache.put("outer", "outer-value");
+      cache.put("inner", "inner-value");
       cache.flushAsync().join();
 
       assertTrue(
@@ -296,8 +296,8 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("first", "first-value"));
-      assertTrue(cache.put("second", "second-value"));
+      cache.put("first", "first-value");
+      cache.put("second", "second-value");
       cache.flushAsync().join();
 
       RuntimeException actual =
@@ -334,7 +334,7 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("key", "value"));
+      cache.put("key", "value");
       cache.flushAsync().join();
 
       RuntimeException actual =
@@ -380,8 +380,8 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(observingValueSerializer)
             .build()) {
-      assertTrue(cache.put("key-1", "value-1"));
-      assertTrue(cache.put("key-2", "value-2"));
+      cache.put("key-1", "value-1");
+      cache.put("key-2", "value-2");
       cache.flushAsync().join();
 
       List<String> keys = new ArrayList<>();
@@ -416,7 +416,7 @@ public class BulkCacheTest {
             .keySerializer(BYTES)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put(stored, "value"));
+      cache.put(stored, "value");
 
       assertEquals(
           cache.getDirectAll(keys, (key, value) -> callbacks.add(key)),
@@ -457,7 +457,7 @@ public class BulkCacheTest {
             .keySerializer(BYTES)
             .valueSerializer(countingValueSerializer)
             .build()) {
-      assertTrue(cache.put(stored, "value"));
+      cache.put(stored, "value");
 
       Map<byte[], String> result = cache.getAll(Arrays.asList(first, duplicate));
 
@@ -514,8 +514,8 @@ public class BulkCacheTest {
             .keySerializer(keySerializer)
             .valueSerializer(countingValueSerializer)
             .build()) {
-      assertTrue(cache.put(first, "first-value"));
-      assertTrue(cache.put(second, "second-value"));
+      cache.put(first, "first-value");
+      cache.put(second, "second-value");
 
       Map<AliasedKey, String> result = cache.getAll(Arrays.asList(first, second));
 
@@ -539,7 +539,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 1_025; index++) {
         values.put("direct-batch-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       cache.flushAsync().join();
 
       AtomicInteger callbacks = new AtomicInteger();
@@ -582,7 +582,7 @@ public class BulkCacheTest {
               boundedKeys,
               (key, value) -> {
                 callbacks.incrementAndGet();
-                if (context.slot.epoch != 0L) {
+                if (context.readerPublishedEpoch() != 0L) {
                   observedReaderEpoch.set(true);
                 }
                 assertTrue(value.length() > 0);
@@ -593,7 +593,7 @@ public class BulkCacheTest {
       assertTrue(observedReaderEpoch.get());
       assertTrue(readerActiveAtBoundary.get());
       assertEquals(context.readerDepth(), 0);
-      assertEquals(context.slot.epoch, 0L);
+      assertEquals(context.readerPublishedEpoch(), 0L);
     }
   }
 
@@ -673,8 +673,8 @@ public class BulkCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("outer", "outer-value"));
-      assertTrue(cache.put("inner", "inner-value"));
+      cache.put("outer", "outer-value");
+      cache.put("inner", "inner-value");
       cache.flushAsync().join();
 
       assertEquals(
@@ -704,7 +704,7 @@ public class BulkCacheTest {
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .build()) {
-      assertTrue(cache.put("key", "value"));
+      cache.put("key", "value");
       cache.flushAsync().join();
 
       com.red.ohc.runtime.ThreadContext context = threadContext(cache);
@@ -722,7 +722,7 @@ public class BulkCacheTest {
 
       assertTrue(propagated);
       assertEquals(context.readerDepth(), 0);
-      assertEquals(context.slot.epoch, 0L);
+      assertEquals(context.readerPublishedEpoch(), 0L);
       assertTrue(cache.getDirect("key", value -> assertEquals(value.length(), 5)));
     }
   }
@@ -766,12 +766,13 @@ public class BulkCacheTest {
       for (int index = 0; index < 64; index++) {
         values.put("replace-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       cache.flushAsync().join();
 
       int successful = 0;
       for (int round = 0; round < 400; round++) {
-        successful += cache.putAll(values);
+        cache.putAll(values);
+        successful += values.size();
       }
       assertTrue(successful > 0, "replacement pressure must admit at least one batch");
       assertEquals(cache.get("replace-63"), "value-63");
@@ -790,7 +791,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 1_025; index++) {
         values.put("remove-batch-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       List<String> keys = new ArrayList<>(values.keySet());
       int removed = cache.removeAll(keys);
       assertTrue(removed <= keys.size());
@@ -818,7 +819,7 @@ public class BulkCacheTest {
         for (int index = 0; index < size; index++) {
           values.put("boundary-" + size + "-" + index, "value-" + index);
         }
-        assertEquals(cache.putAll(values), size, "putAll count at boundary " + size);
+        cache.putAll(values);
         for (Map.Entry<String, String> entry : values.entrySet()) {
           assertEquals(
               cache.get(entry.getKey()), entry.getValue(), "putAll visibility at boundary " + size);
@@ -834,6 +835,84 @@ public class BulkCacheTest {
         }
         assertEquals(remaining, size - removed, "removeAll visibility at boundary " + size);
       }
+    }
+  }
+
+  @Test
+  public void removeAllDoesNotSkipAnEntryWhoseWriterIsTemporarilyClaimed() throws Exception {
+    CountDownLatch firstKeySerialized = new CountDownLatch(1);
+    CountDownLatch secondKeySerialized = new CountDownLatch(1);
+    AtomicBoolean removing = new AtomicBoolean();
+    CacheSerializer<String> observingKeySerializer =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            STRING.serialize(value, buffer);
+            if (!removing.get()) {
+              return;
+            }
+            if ("before".equals(value)) {
+              firstKeySerialized.countDown();
+            } else if ("after".equals(value)) {
+              secondKeySerialized.countDown();
+            }
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            return STRING.deserialize(buffer);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return STRING.serializedSize(value);
+          }
+        };
+    try (OffHeapCache<String, String> cache =
+        (OffHeapCache<String, String>)
+            OHCacheBuilder.<String, String>newBuilder()
+                .capacity(1 << 20)
+                .keySerializer(observingKeySerializer)
+                .valueSerializer(STRING)
+                .build()) {
+      cache.put("before", "value");
+      cache.flushAsync().join();
+      com.red.ohc.index.Entry entry = cache.dataForTest().values().iterator().next();
+      assertTrue(entry.claimWriter());
+
+      AtomicReference<Integer> removed = new AtomicReference<>();
+      AtomicReference<Throwable> failure = new AtomicReference<>();
+      Thread remover =
+          new Thread(
+              () -> {
+                try {
+                  removing.set(true);
+                  removed.set(cache.removeAll(Arrays.asList("before", "after")));
+                } catch (Throwable throwable) {
+                  failure.set(throwable);
+                }
+              },
+              "bulk-remove-writer-contention");
+      boolean skippedClaimedEntry;
+      remover.start();
+      try {
+        assertTrue(
+            firstKeySerialized.await(2L, java.util.concurrent.TimeUnit.SECONDS),
+            "removeAll did not reach the claimed first key");
+        skippedClaimedEntry =
+            secondKeySerialized.await(500L, java.util.concurrent.TimeUnit.MILLISECONDS);
+      } finally {
+        entry.finishWriter();
+      }
+      remover.join(2_000L);
+
+      assertFalse(remover.isAlive(), "removeAll did not resume after the writer claim was released");
+      assertEquals(failure.get(), null);
+      assertFalse(
+          skippedClaimedEntry,
+          "removeAll must finish the claimed key before advancing to the next key");
+      assertEquals(removed.get(), Integer.valueOf(1));
+      assertEquals(cache.get("before"), null);
     }
   }
 
@@ -865,15 +944,17 @@ public class BulkCacheTest {
             .keySerializer(failingKeySerializer)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("before", "value"));
+      cache.put("before", "value");
+      assertEquals(cache.get("before"), "value");
       try {
         cache.removeAll(Arrays.asList("before", "boom", "after"));
         throw new AssertionError("removeAll must propagate serializer failure");
       } catch (IllegalStateException expected) {
         // The completed prefix remains deleted.
+        assertEquals(expected.getMessage(), "serializer failure");
       }
       assertEquals(cache.get("before"), null);
-      assertTrue(cache.put("after-failure", "writer-released"));
+      cache.put("after-failure", "writer-released");
       assertEquals(cache.get("after-failure"), "writer-released");
     }
   }
@@ -910,14 +991,14 @@ public class BulkCacheTest {
                     public boolean hasNext() {
                       if (seen == 512 && !boundaryRecorded) {
                         boundaryRecorded = true;
-                        writerStatesAtBatchBoundary.add(context.slot.writerActive);
+                        writerStatesAtBatchBoundary.add(context.isWriterEntered());
                       }
                       return delegate.hasNext();
                     }
 
                     @Override
                     public Entry<String, String> next() {
-                      writerStates.add(context.slot.writerActive);
+                      writerStates.add(context.isWriterEntered());
                       seen++;
                       return delegate.next();
                     }
@@ -937,7 +1018,7 @@ public class BulkCacheTest {
             }
           };
 
-      assertEquals(cache.putAll(observed), values.size());
+      cache.putAll(observed);
       assertEquals(writerStates.size(), values.size());
       for (Boolean writerActive : writerStates) {
         assertTrue(
@@ -963,7 +1044,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 513; index++) {
         values.put("remove-writer-key-" + index, "remove-writer-value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       com.red.ohc.runtime.ThreadContext context = threadContext(cache);
       AtomicBoolean writerActiveAtBoundary = new AtomicBoolean();
       Collection<String> keys =
@@ -979,7 +1060,7 @@ public class BulkCacheTest {
                 public boolean hasNext() {
                   if (seen == 512 && !boundaryRecorded) {
                     boundaryRecorded = true;
-                    writerActiveAtBoundary.set(context.slot.writerActive);
+                    writerActiveAtBoundary.set(context.isWriterEntered());
                   }
                   return delegate.hasNext();
                 }
@@ -1043,7 +1124,7 @@ public class BulkCacheTest {
         // The completed prefix remains visible and the writer admission is released below.
       }
       assertEquals(cache.get("before"), "kept");
-      assertTrue(cache.put("after-failure", "writer-released"));
+      cache.put("after-failure", "writer-released");
       assertEquals(cache.get("after-failure"), "writer-released");
     }
   }
@@ -1066,7 +1147,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 1_025; index++) {
         values.put("paused-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       assertEquals(
           cache.get("paused-1024"),
           "value-1024",
@@ -1079,7 +1160,7 @@ public class BulkCacheTest {
   }
 
   @Test(timeOut = 15_000L)
-  public void singlePutRemainsImmediatelyVisibleWhenMaintenanceIsPausedAndHintQueueIsFull()
+  public void singlePutRemainsImmediatelyVisibleWhenWriterMaintenanceIsPaused()
       throws Exception {
     OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
@@ -1093,17 +1174,17 @@ public class BulkCacheTest {
     pauseMaintenance(cache, actorPaused, release);
     try {
       for (int index = 0; index < 1_024; index++) {
-        assertTrue(cache.put("single-paused-" + index, "value-" + index));
+        cache.put("single-paused-" + index, "value-" + index);
       }
       OHCacheStats paused = cache.stats();
       assertTrue(
           paused.maintenanceQueueDepth() > 0L,
-          "the paused worker must leave pending maintenance work");
-      assertTrue(cache.put("single-paused-1024", "value-1024"));
+          "the paused worker must expose writer-lane maintenance backlog");
+      cache.put("single-paused-1024", "value-1024");
       assertEquals(
           cache.get("single-paused-1024"),
           "value-1024",
-          "a full advisory queue must not delay synchronous CHM publication");
+          "writer-lane maintenance backlog must not delay synchronous CHM publication");
     } finally {
       release.countDown();
       cache.flushAsync().join();
@@ -1112,7 +1193,7 @@ public class BulkCacheTest {
   }
 
   @Test(timeOut = 15_000L)
-  public void writesDoNotWaitWhenBothHintAndRepairQueuesAreFull() throws Exception {
+  public void writesDoNotWaitWhenTheHintQueueIsFull() throws Exception {
     OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
@@ -1126,10 +1207,10 @@ public class BulkCacheTest {
     try {
       Map<String, String> values = new LinkedHashMap<>();
       for (int index = 0; index < 2_050; index++) {
-        values.put("repair-paused-" + index, "value-" + index);
+        values.put("hint-paused-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
-      assertEquals(cache.get("repair-paused-2049"), "value-2049");
+      cache.putAll(values);
+      assertEquals(cache.get("hint-paused-2049"), "value-2049");
     } finally {
       release.countDown();
       cache.flushAsync().join();
@@ -1138,7 +1219,7 @@ public class BulkCacheTest {
   }
 
   @Test(timeOut = 15_000L)
-  public void replacementRetiresTheOldValueEvenWhenItsAdvisoryHintIsDropped() throws Exception {
+  public void replacementRetiresTheOldValueWhileWriterMaintenanceIsBacklogged() throws Exception {
     OffHeapCache<String, String> cache =
         (OffHeapCache<String, String>)
             OHCacheBuilder.<String, String>newBuilder()
@@ -1154,12 +1235,12 @@ public class BulkCacheTest {
       for (int index = 0; index < 1_025; index++) {
         values.put("replace-paused-" + index, "old-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       OHCacheStats paused = cache.stats();
       assertTrue(
           paused.maintenanceQueueDepth() > 0L,
-          "the paused worker must leave pending maintenance work");
-      assertTrue(cache.put("replace-paused-1024", "new-value"));
+          "the paused worker must expose writer-lane maintenance backlog");
+      cache.put("replace-paused-1024", "new-value");
       assertEquals(cache.get("replace-paused-1024"), "new-value");
     } finally {
       release.countDown();
@@ -1180,7 +1261,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 1_025; index++) {
         values.put("bulk-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       cache.flushAsync().join();
       ArrayList<String> duplicateInput = new ArrayList<>(values.keySet());
       duplicateInput.addAll(values.keySet());
@@ -1243,7 +1324,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 513; index++) {
         values.put("read-key-" + index, "read-value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       cache.flushAsync().join();
       encodedKeys.set(0);
 
@@ -1285,8 +1366,8 @@ public class BulkCacheTest {
             .keySerializer(keySerializer)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put(first, "set-value-1"));
-      assertTrue(cache.put(second, "set-value-2"));
+      cache.put(first, "set-value-1");
+      cache.put(second, "set-value-2");
       assertEquals(cache.getAll(keys).size(), keys.size());
       assertEquals(
           hashCalls.get(),
@@ -1308,7 +1389,7 @@ public class BulkCacheTest {
 
           @Override
           public String deserialize(ByteBuffer buffer) {
-            deserializedInsideEpoch.set(context.get().slot.epoch != 0L);
+            deserializedInsideEpoch.set(context.get().readerPublishedEpoch() != 0L);
             return STRING.deserialize(buffer);
           }
 
@@ -1328,7 +1409,7 @@ public class BulkCacheTest {
       for (int index = 0; index < 513; index++) {
         values.put("epoch-key-" + index, "value-" + index);
       }
-      assertEquals(cache.putAll(values), values.size());
+      cache.putAll(values);
       cache.flushAsync().join();
       context.set(threadContext(cache));
 

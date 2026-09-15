@@ -1,5 +1,6 @@
 package com.red.ohc.api;
 
+/** Supplies the elapsed-time and wall-clock sources used by a cache. */
 public interface Ticker {
   Ticker DEFAULT =
       new Ticker() {
@@ -14,7 +15,9 @@ public interface Ticker {
         }
       };
 
+  /** Returns a monotonic elapsed-time reading suitable for deadlines and latency measurements. */
   long nanos();
 
+  /** Returns wall-clock milliseconds, used for absolute-expiry conversion and diagnostics. */
   long currentTimeMillis();
 }

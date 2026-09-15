@@ -1,14 +1,19 @@
 package com.red.ohc.storage;
 
 import java.lang.reflect.Field;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.LongAdder;
 
 import sun.misc.Unsafe;
 
 import com.red.ohc.api.AllocatorType;
+import com.red.ohc.runtime.ThreadContext;
 
 /** Native allocation and primitive access. JNA remains the production default. */
 public final class NativeMemory {
@@ -17,9 +22,6 @@ public final class NativeMemory {
   /** Cached once so bounded CAS paths never query the runtime on their hot path. */
   public static final int LOGICAL_CPU_COUNT =
       Math.max(1, Runtime.getRuntime().availableProcessors());
-  private static final int DEFAULT_WRITER_STRIPE_COUNT = computeWriterStripeCount();
-  private static final int DEFAULT_RETIREMENT_RECORDS_PER_STRIPE =
-      computeRetirementRecordsPerStripe(DEFAULT_WRITER_STRIPE_COUNT);
 
   /** Start block-wise comparison only when the key is large enough to amortize aggregation. */
   static final int BULK_EQUALS_THRESHOLD = 128;
@@ -40,47 +42,33 @@ public final class NativeMemory {
 
   private NativeMemory() {}
 
-  public static int defaultWriterStripeCount() {
-    return DEFAULT_WRITER_STRIPE_COUNT;
-  }
-
-  public static int defaultRetirementRecordsPerStripe() {
-    return DEFAULT_RETIREMENT_RECORDS_PER_STRIPE;
-  }
-
-  private static int computeWriterStripeCount() {
-    int target = Math.max(1, LOGICAL_CPU_COUNT * 4);
-    int stripes = 1;
-    while (stripes < target && stripes < (1 << 30)) {
-      stripes <<= 1;
-    }
-    return stripes;
-  }
-
-  private static int computeRetirementRecordsPerStripe(int stripeCount) {
-    long perStripe = (512L << 10) / ((long) stripeCount * 32L);
-    int records = 2;
-    while ((records << 1) <= perStripe) {
-      records <<= 1;
-    }
-    return records;
-  }
-
   public static final class Memory {
+    private static final long ALIGNMENT_PADDING_BYTES = 128L;
     private final NativeAllocator allocator;
-    private final long hardLimit;
     private final AtomicLong allocated = new AtomicLong();
     private final AtomicLong rawAllocations = new AtomicLong();
     private final AtomicLong entryAllocations = new AtomicLong();
-    private final WriterArena[] arenas;
-    private final int stripeMask;
-    private static final int PAGE_CHUNK_BITS = 10;
+    private final AtomicLong pageAllocatedCount = new AtomicLong();
+    private final LongAdder pageReusedCount = new LongAdder();
+    private final LongAdder[] pageReadyCounts = newReadyPageCounts();
+    private final AtomicLong pageTrimmedCount = new AtomicLong();
+    private final AtomicLong smallAllocationFallbacks = new AtomicLong();
+    private final AtomicLong directEntryAllocations = new AtomicLong();
+    private final AtomicInteger nextArenaId = new AtomicInteger(1);
+    private final AtomicBoolean trimOwner = new AtomicBoolean();
+    private static final int READY_STACK_STRIDE = 8;
+    /**
+     * Packed ABA-safe page-id heads; each independently mutated size-class head owns one 64-byte
+     * lane so unrelated page traffic cannot bounce the same cache line.
+     */
+    private final AtomicLongArray readyPageStacks =
+        new AtomicLongArray(SizeClasses.count() * READY_STACK_STRIDE);
+    private static final int PAGE_CHUNK_BITS = 16;
     private static final int PAGE_CHUNK_SIZE = 1 << PAGE_CHUNK_BITS;
-    private static final int PAGE_CHUNK_COUNT = 1 << (WriterArena.PAGE_ID_BITS - PAGE_CHUNK_BITS);
-    private static final int MAX_PAGE_ID = WriterArena.PAGE_ID_MASK;
-    private static final int PAGE_VERSION_BITS = 22 - WriterArena.PAGE_ID_BITS;
-    private static final int PAGE_VERSION_MASK = (1 << PAGE_VERSION_BITS) - 1;
-    private final AtomicInteger nextPageId = new AtomicInteger(1);
+    private static final int PAGE_CHUNK_COUNT = 1 << (WriterArena.HANDLE_PAGE_BITS - PAGE_CHUNK_BITS);
+    private static final int PAGE_VERSION_MASK =
+        (1 << WriterArena.HANDLE_GENERATION_BITS) - 1;
+    private final AtomicLong nextPageId = new AtomicLong(1L);
 
     /**
      * Sparse page-id free stack; nodes are indices in fixed primitive arrays, never Page objects.
@@ -88,36 +76,27 @@ public final class NativeMemory {
      */
     private final AtomicLong freePageIdHead = new AtomicLong();
 
-    private final AtomicIntegerArray freePageIdNext = new AtomicIntegerArray(MAX_PAGE_ID + 1);
-    private final AtomicIntegerArray pageVersions = new AtomicIntegerArray(MAX_PAGE_ID + 1);
+    private final IntChunkTable freePageIdNext = new IntChunkTable();
+    private final IntChunkTable readyPageNext = new IntChunkTable();
+    private final IntChunkTable pageVersions = new IntChunkTable();
     private final AtomicReferenceArray<AtomicReferenceArray<WriterArena.Page>> pageChunks =
         new AtomicReferenceArray<>(PAGE_CHUNK_COUNT);
-    private final PageDepot pageDepot;
-    private static final int MIN_POOLED_PAGES = 512;
-    private static final int MAX_POOLED_PAGES = 2_048;
-    private final int pooledPageLimit;
     private final AtomicInteger pooledPageCount = new AtomicInteger();
 
     public Memory(AllocatorType type) {
-      this(type, Long.MAX_VALUE);
+      this(new NativeAllocator(type));
     }
 
-    public Memory(AllocatorType type, long hardLimit) {
-      if (hardLimit <= 0L) {
-        throw new IllegalArgumentException("hardLimit must be positive");
+    Memory(NativeAllocator allocator) {
+      this.allocator = Objects.requireNonNull(allocator, "allocator");
+    }
+
+    private static LongAdder[] newReadyPageCounts() {
+      LongAdder[] counts = new LongAdder[SizeClasses.count()];
+      for (int sizeClass = 0; sizeClass < counts.length; sizeClass++) {
+        counts[sizeClass] = new LongAdder();
       }
-      this.allocator = new NativeAllocator(type);
-      this.hardLimit = hardLimit;
-      int stripeCount = DEFAULT_WRITER_STRIPE_COUNT;
-      this.arenas = new WriterArena[stripeCount];
-      for (int index = 0; index < stripeCount; index++) {
-        arenas[index] = new WriterArena(this, index + 1);
-      }
-      this.stripeMask = stripeCount - 1;
-      long targetPages = Math.max(MIN_POOLED_PAGES, Math.min(MAX_POOLED_PAGES, (long) stripeCount * 8L));
-      long physicalPageLimit = hardLimit / SizeClasses.PAGE_BYTES;
-      this.pooledPageLimit = (int) Math.min(targetPages, physicalPageLimit);
-      this.pageDepot = new PageDepot(this, pooledPageLimit);
+      return counts;
     }
 
     public long allocate(long bytes) {
@@ -130,11 +109,36 @@ public final class NativeMemory {
       if (bytes <= 0L) {
         throw new IllegalArgumentException("bytes must be positive");
       }
-      reservePhysical(bytes);
+      allocated.getAndAdd(bytes);
       try {
         long address = allocator.allocate(bytes);
+        if (address == 0L) {
+          throw new IllegalStateException("native allocator returned address 0");
+        }
         rawAllocations.incrementAndGet();
         return address;
+      } catch (Throwable failure) {
+        allocated.addAndGet(-bytes);
+        throw failure;
+      }
+    }
+
+    public long tryAllocateRaw(long bytes) {
+      if (bytes <= 0L) {
+        throw new IllegalArgumentException("bytes must be positive");
+      }
+      allocated.getAndAdd(bytes);
+      try {
+        long address = allocator.allocate(bytes);
+        if (address == 0L) {
+          allocated.addAndGet(-bytes);
+          return 0L;
+        }
+        rawAllocations.incrementAndGet();
+        return address;
+      } catch (OutOfMemoryError exhausted) {
+        allocated.addAndGet(-bytes);
+        return 0L;
       } catch (Throwable failure) {
         allocated.addAndGet(-bytes);
         throw failure;
@@ -153,9 +157,6 @@ public final class NativeMemory {
       return allocated.get();
     }
 
-    public long hardLimit() {
-      return hardLimit;
-    }
 
     public long rawAllocationCount() {
       return rawAllocations.get();
@@ -165,34 +166,192 @@ public final class NativeMemory {
       return entryAllocations.get();
     }
 
-    int pooledPageLimit() {
-      return pooledPageLimit;
+    public long pageAllocatedCount() {
+      return pageAllocatedCount.get();
+    }
+
+    public long pageReusedCount() {
+      return pageReusedCount.sum();
+    }
+
+    public long pageReadyCount() {
+      long ready = 0L;
+      for (LongAdder count : pageReadyCounts) {
+        ready += count.sum();
+      }
+      return ready;
+    }
+
+    public long pageTrimmedCount() {
+      return pageTrimmedCount.get();
+    }
+
+    public long smallAllocationFallbackCount() {
+      return smallAllocationFallbacks.get();
+    }
+
+    public long directEntryAllocationCount() {
+      return directEntryAllocations.get();
     }
 
     public long allocateEntryPage() {
+      return allocateEntryPage(SizeClasses.MIN_PAGE_BYTES);
+    }
+
+    private long allocateEntryPage(int pageBytes) {
+      long rawAddress = allocateRaw(pageBytes + ALIGNMENT_PADDING_BYTES);
+      long address = (rawAddress + 64L) & ~63L;
+      // The word immediately before the visible page is outside every slot and retains the raw
+      // allocator base needed to free the aligned page.
+      U.putLong(address - Long.BYTES, rawAddress);
       entryAllocations.incrementAndGet();
-      return allocateRaw(SizeClasses.PAGE_BYTES);
+      pageAllocatedCount.incrementAndGet();
+      return address;
     }
 
     public long allocateDirectEntry(long bytes) {
+      long rawAddress = allocateRaw(bytes);
+      long address = (rawAddress + 64L) & ~63L;
+      U.putLong(address + 56L, rawAddress);
       entryAllocations.incrementAndGet();
-      return allocateRaw(bytes);
+      return address;
+    }
+
+    /** Returns the stable pooled-slot handle, or zero for direct allocations. */
+    public static long entryAllocatorHandle(long entryAddress) {
+      if (entryAddress == 0L) {
+        return 0L;
+      }
+      long block = entryAddress - WriterArena.PREFIX_BYTES;
+      long metadata = U.getLong(block + 48L);
+      int sizeClass = (int) ((metadata >>> 32) & 0xffffL);
+      return sizeClass == WriterArena.DIRECT_CLASS ? 0L : U.getLong(block + 56L);
+    }
+
+    private void freeDirectEntry(long block, long bytes) {
+      long rawAddress = U.getLong(block + 56L);
+      if (rawAddress == 0L) {
+        throw new IllegalStateException("direct allocation has no raw base");
+      }
+      free(rawAddress, bytes);
+    }
+
+    private void freeEntryPageAllocation(WriterArena.Page page) {
+      long rawAddress = U.getLong(page.address - Long.BYTES);
+      if (rawAddress == 0L) {
+        throw new IllegalStateException("pooled page has no raw base");
+      }
+      free(rawAddress, page.pageBytes + ALIGNMENT_PADDING_BYTES);
     }
 
     public WriterArena newWriterArena() {
-      return writerForCurrentThread();
+      int arenaId = nextArenaId.getAndIncrement();
+      if (arenaId <= 0) {
+        throw new IllegalStateException("writer arena id exhausted");
+      }
+      return new WriterArena(this, arenaId);
     }
 
-    public WriterArena writerForCurrentThread() {
-      return arenas[((int) Thread.currentThread().getId()) & stripeMask];
+    WriterArena.Page tryStealAvailablePage(
+        int sizeClass, WriterArena.SizeClassState newOwner) {
+      for (;;) {
+        WriterArena.Page page = popReadyPage(sizeClass);
+        if (page == null) {
+          return null;
+        }
+        if (page.sizeClass != sizeClass) {
+          continue;
+        }
+        if (!isCurrentPage(page)) {
+          continue;
+        }
+        WriterArena.SizeClassState expectedOwner = page.ownerClass;
+        boolean acquired =
+            expectedOwner == newOwner
+                ? page.tryActivate(newOwner)
+                : page.tryRebalance(expectedOwner, newOwner);
+        if (acquired) {
+          pageReusedCount.increment();
+          return page;
+        }
+      }
     }
 
-    public int writerStripeIndex() {
-      return ((int) Thread.currentThread().getId()) & stripeMask;
+    /**
+     * A queued page is only a candidate. The page table identity and generation must still match
+     * before its owner/state CAS can make it active; this keeps a trimmed token from surviving a
+     * page-id reuse.
+     */
+    private boolean isCurrentPage(WriterArena.Page page) {
+      WriterArena.Page current = pageForId(page.id);
+      return current == page && current.pageKey == page.pageKey;
     }
 
-    public int writerStripeCount() {
-      return arenas.length;
+    void publishAvailablePage(WriterArena.Page page) {
+      // Publish the diagnostic count before the token. A concurrent pop can observe the stack
+      // immediately after the CAS, and must be able to balance the ready count.
+      restoreReadyPage(page);
+    }
+
+    private void restoreReadyPage(WriterArena.Page page) {
+      recordPageReady(page.sizeClass);
+      try {
+        pushReadyPage(page);
+      } catch (Throwable failure) {
+        pageReadyCounts[page.sizeClass].decrement();
+        throw failure;
+      }
+    }
+
+    private void pushReadyPage(WriterArena.Page page) {
+      int sizeClass = page.sizeClass;
+      int stackIndex = readyStackIndex(sizeClass);
+      for (;;) {
+        long current = readyPageStacks.get(stackIndex);
+        int headId = readyPageId(current);
+        readyPageNext.set(page.id, headId);
+        long updated = nextReadyPageHead(current, page.id);
+        if (readyPageStacks.compareAndSet(stackIndex, current, updated)) {
+          return;
+        }
+      }
+    }
+
+    /** Pops one token from the per-size-class ABA-safe LIFO stack. */
+    private WriterArena.Page popReadyPage(int sizeClass) {
+      int stackIndex = readyStackIndex(sizeClass);
+      for (;;) {
+        long current = readyPageStacks.get(stackIndex);
+        int headId = readyPageId(current);
+        if (headId == 0) {
+          return null;
+        }
+        int nextId = readyPageNext.get(headId);
+        long updated = nextReadyPageHead(current, nextId);
+        if (readyPageStacks.compareAndSet(stackIndex, current, updated)) {
+          pageReadyCounts[sizeClass].decrement();
+          WriterArena.Page page = pageForId(headId);
+          if (page == null || page.id != headId) {
+            continue;
+          }
+          return page;
+        }
+      }
+    }
+
+    private static int readyPageId(long head) {
+      return (int) (head & WriterArena.PAGE_ID_MASK);
+    }
+
+    private static int readyStackIndex(int sizeClass) {
+      return sizeClass * READY_STACK_STRIDE;
+    }
+
+    private static long nextReadyPageHead(long head, int pageId) {
+      long stamp =
+          ((head >>> WriterArena.PAGE_ID_BITS) + 1L)
+              & (-1L >>> WriterArena.PAGE_ID_BITS);
+      return (stamp << WriterArena.PAGE_ID_BITS) | (pageId & WriterArena.PAGE_ID_MASK);
     }
 
     public void releaseEntry(long entryAddress, long entryBytes) {
@@ -200,25 +359,336 @@ public final class NativeMemory {
         return;
       }
       long block = entryAddress - WriterArena.PREFIX_BYTES;
-      long metadata = U.getLong(block);
-      int arenaId = (int) metadata;
+      long metadata = U.getLong(block + 48L);
       int sizeClass = (int) ((metadata >>> 32) & 0xffffL);
       if (sizeClass == WriterArena.DIRECT_CLASS) {
-        free(block, WriterArena.directAllocationBytes(entryBytes));
+        freeDirectEntry(block, WriterArena.directAllocationBytes(entryBytes));
         return;
       }
-      int index = arenaId - 1;
-      if (index < 0 || index >= arenas.length) {
-        throw new IllegalStateException("unknown allocator stripe: " + arenaId);
+      long handle = U.getLong(block + 56L);
+      WriterArena.Page page = pageForHandle(handle);
+      if (page == null || page.sizeClass != sizeClass || !page.ownsEntry(block, handle)) {
+        throw new IllegalStateException("unknown allocator slot handle " + handle);
       }
-      arenas[index].remoteFree(block, sizeClass);
+      int remaining = page.freeSlot(block, handle);
+      page.completeRemoteFree(remaining);
+    }
+
+    /** Releases a reusable actor batch, grouping entries by page with context-owned scratch. */
+    public void releaseEntryBatch(
+        ThreadContext context,
+        long[] entryAddresses,
+        long[] entryBytes,
+        long[] entryHandles,
+        int count) {
+      if (context == null) {
+        throw new NullPointerException("context");
+      }
+      if (entryAddresses == null
+          || entryBytes == null
+          || entryHandles == null
+          || count < 0
+          || count > entryAddresses.length
+          || count > entryBytes.length
+          || count > entryHandles.length) {
+        throw new IllegalArgumentException("invalid entry release batch");
+      }
+      if (count == 0) {
+        return;
+      }
+      context.ensureReleaseBatchScratch(count);
+      long[] groupKeys = context.releaseGroupKeys();
+      int[] groupCounts = context.releaseGroupCounts();
+      int[] groupOffsets = context.releaseGroupOffsets();
+      int[] groupPositions = context.releaseGroupPositions();
+      int[] groupSlots = context.releaseGroupSlots();
+      int[] groupIndexes = context.releaseGroupIndexes();
+      int groupMask = groupKeys.length - 1;
+      int groupCount = 0;
+      try {
+        int index = 0;
+        while (index < count) {
+          entryHandles[index] = 0L;
+          long entryAddress = entryAddresses[index];
+          if (entryAddress == 0L) {
+            index++;
+            continue;
+          }
+          long block = entryAddress - WriterArena.PREFIX_BYTES;
+          int sizeClass = SizeClasses.indexForEntry(entryBytes[index]);
+          if (sizeClass < 0) {
+            freeDirectEntry(block, WriterArena.directAllocationBytes(entryBytes[index]));
+            index++;
+            continue;
+          }
+          long metadata = U.getLong(block + 48L);
+          int recordedClass = (int) ((metadata >>> 32) & 0xffffL);
+          if (recordedClass == WriterArena.DIRECT_CLASS) {
+            freeDirectEntry(block, WriterArena.directAllocationBytes(entryBytes[index]));
+            index++;
+            continue;
+          }
+          if (recordedClass != sizeClass) {
+            throw new IllegalStateException(
+                "allocator size class does not match entry allocation: recorded="
+                    + recordedClass
+                    + ", expected="
+                    + sizeClass);
+          }
+          long handle = U.getLong(block + 56L);
+          entryHandles[index] = handle;
+          WriterArena.Page page = pageForHandle(handle);
+          if (page == null || page.sizeClass != sizeClass || !page.ownsEntry(block, handle)) {
+            throw new IllegalStateException("unknown allocator slot handle " + handle);
+          }
+          long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
+          int groupSlot = groupSlot(pageKey, groupKeys, groupMask);
+          if (groupKeys[groupSlot] == 0L) {
+            groupKeys[groupSlot] = pageKey;
+            groupCounts[groupSlot] = 0;
+            groupSlots[groupCount++] = groupSlot;
+          }
+          groupCounts[groupSlot]++;
+          index++;
+        }
+
+        int pooledCount = 0;
+        for (index = 0; index < count; index++) {
+          if (entryHandles[index] != 0L) {
+            pooledCount++;
+          }
+        }
+        int offset = 0;
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          groupOffsets[groupSlot] = offset;
+          groupPositions[groupSlot] = offset;
+          offset += groupCounts[groupSlot];
+        }
+        for (index = 0; index < count; index++) {
+          long handle = entryHandles[index];
+          if (handle == 0L) {
+            continue;
+          }
+          long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
+          int groupSlot = groupSlot(pageKey, groupKeys, groupMask);
+          groupIndexes[groupPositions[groupSlot]++] = index;
+        }
+        if (offset != pooledCount) {
+          throw new IllegalStateException("allocator release grouping lost a pooled entry");
+        }
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          int firstIndex = groupIndexes[groupOffsets[groupSlot]];
+          long firstEntry = entryAddresses[firstIndex];
+          long firstBlock = firstEntry - WriterArena.PREFIX_BYTES;
+          long firstHandle = entryHandles[firstIndex];
+          int sizeClass = (int) ((U.getLong(firstBlock + 48L) >>> 32) & 0xffffL);
+          WriterArena.Page page = pageForHandle(firstHandle);
+          if (page == null || page.sizeClass != sizeClass) {
+            throw new IllegalStateException("unknown allocator page in grouped release");
+          }
+          int remaining =
+              page.freeEntries(
+                  entryAddresses,
+                  entryHandles,
+                  groupIndexes,
+                  groupOffsets[groupSlot],
+                  groupCounts[groupSlot]);
+          for (int groupIndex = 0; groupIndex < groupCounts[groupSlot]; groupIndex++) {
+            int recordIndex = groupIndexes[groupOffsets[groupSlot] + groupIndex];
+            // The release operation is the linearization point for this group. Clear the source
+            // slots before the availability callback. If that callback fails after the allocator
+            // has accepted the group, a retry must skip these records rather than free them again.
+            entryAddresses[recordIndex] = 0L;
+            entryHandles[recordIndex] = 0L;
+          }
+          page.completeRemoteFree(remaining);
+        }
+      } finally {
+        for (int group = 0; group < groupCount; group++) {
+          groupKeys[groupSlots[group]] = 0L;
+        }
+      }
+    }
+
+    /** Releases native retirement columns with an actor-prepared pooled-handle column. */
+    public int releaseEntryBatch(
+        ThreadContext context,
+        long entryAddressesAddress,
+        long entryAllocationsAddress,
+        long entryHandlesAddress,
+        int count) {
+      if (context == null) {
+        throw new NullPointerException("context");
+      }
+      if (entryAddressesAddress == 0L
+          || entryAllocationsAddress == 0L
+          || entryHandlesAddress == 0L
+          || count < 0) {
+        throw new IllegalArgumentException("invalid native entry release batch");
+      }
+      context.resetReleaseBatchProgress();
+      if (count == 0) {
+        return 0;
+      }
+      context.ensureReleaseBatchScratch(count);
+      long[] groupKeys = context.releaseGroupKeys();
+      int[] groupCounts = context.releaseGroupCounts();
+      int[] groupOffsets = context.releaseGroupOffsets();
+      int[] groupPositions = context.releaseGroupPositions();
+      int[] groupSlots = context.releaseGroupSlots();
+      int[] groupIndexes = context.releaseGroupIndexes();
+      long[] groupBytes = context.releaseGroupBytes();
+      int[] entryGroupSlots = context.releaseEntryGroupSlots();
+      Object[] groupPages = context.releaseGroupPages();
+      int[] entrySlots = context.releaseEntrySlots();
+      int groupMask = groupKeys.length - 1;
+      int groupCount = 0;
+      int pooledCount = 0;
+      long previousPageKey = 0L;
+      int previousGroupSlot = -1;
+      try {
+        for (int index = 0; index < count; index++) {
+          entryGroupSlots[index] = -1;
+          long entryAddress = NativeMemory.getLong(entryAddressesAddress + (long) index * 8L);
+          if (entryAddress == 0L) {
+            previousPageKey = 0L;
+            previousGroupSlot = -1;
+            continue;
+          }
+          long allocation = NativeMemory.getLong(entryAllocationsAddress + (long) index * 8L);
+          long block = entryAddress - WriterArena.PREFIX_BYTES;
+          long handle =
+              NativeMemory.getLong(entryHandlesAddress + (long) index * Long.BYTES);
+          int expectedClass = SizeClasses.indexForEntry(allocation);
+          int sizeClass = expectedClass < 0 ? WriterArena.DIRECT_CLASS : expectedClass;
+          if (sizeClass == WriterArena.DIRECT_CLASS) {
+            previousPageKey = 0L;
+            previousGroupSlot = -1;
+            freeDirectEntry(block, WriterArena.directAllocationBytes(allocation));
+            // Address is the sole liveness marker. The other columns are dead once it is cleared
+            // and will be overwritten before this segment slot is reused.
+            NativeMemory.putLong(entryAddressesAddress + (long) index * 8L, 0L);
+            context.recordReleaseBatchProgress(1, WriterArena.allocationWeight(allocation));
+            continue;
+          }
+          if (handle == 0L) {
+            throw new IllegalStateException("pooled retirement record has no allocator handle");
+          }
+          long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
+          int slot = WriterArena.Page.slotOf(handle);
+          int groupSlot =
+              previousGroupSlot >= 0 && pageKey == previousPageKey
+                  ? previousGroupSlot
+                  : groupSlot(pageKey, groupKeys, groupMask);
+          WriterArena.Page page;
+          if (groupKeys[groupSlot] == 0L) {
+            // The unreleased retirement slot is still included in allocatedSlots-freedSlots, so
+            // beginTrimming cannot reach its equality gate while this actor is about to free it.
+            // The descriptor state check below is defense-in-depth for a stale memo entry; it is
+            // not relied upon as a read-then-act pin.
+            Object cached = context.releasePageMemoLookup(pageKey);
+            page = cached instanceof WriterArena.Page ? (WriterArena.Page) cached : null;
+            if (page != null && !page.matchesRelease(pageKey, sizeClass, block, slot)) {
+              context.releasePageMemoInvalidate(pageKey, cached);
+              page = null;
+            }
+            if (page == null) {
+              page = pageForHandle(handle);
+            }
+            if (page == null || !page.matchesRelease(pageKey, sizeClass, block, slot)) {
+              throw new IllegalStateException("unknown allocator slot handle " + handle);
+            }
+            context.releasePageMemoRemember(pageKey, page);
+            groupKeys[groupSlot] = pageKey;
+            groupPages[groupSlot] = page;
+            groupCounts[groupSlot] = 0;
+            groupBytes[groupSlot] = 0L;
+            groupSlots[groupCount++] = groupSlot;
+          } else {
+            page = (WriterArena.Page) groupPages[groupSlot];
+            // Reusing a segment-local group never bypasses per-record decoded ownership.
+            if (page.sizeClass != sizeClass || !page.ownsEntry(pageKey, block, slot)) {
+              throw new IllegalStateException("unknown allocator slot handle " + handle);
+            }
+          }
+          entrySlots[index] = slot;
+          entryGroupSlots[index] = groupSlot;
+          groupCounts[groupSlot]++;
+          groupBytes[groupSlot] += WriterArena.allocationWeight(allocation);
+          pooledCount++;
+          previousPageKey = pageKey;
+          previousGroupSlot = groupSlot;
+        }
+
+        int offset = 0;
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          groupOffsets[groupSlot] = offset;
+          groupPositions[groupSlot] = offset;
+          offset += groupCounts[groupSlot];
+        }
+        for (int index = 0; index < count; index++) {
+          int groupSlot = entryGroupSlots[index];
+          if (groupSlot < 0) {
+            continue;
+          }
+          groupIndexes[groupPositions[groupSlot]++] = index;
+        }
+        if (offset != pooledCount) {
+          throw new IllegalStateException("allocator release grouping lost a pooled entry");
+        }
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          WriterArena.Page page = (WriterArena.Page) groupPages[groupSlot];
+          int remaining =
+              page.freeValidatedSlots(
+                  entrySlots,
+                  groupIndexes,
+                  groupOffsets[groupSlot],
+                  groupCounts[groupSlot]);
+          if (remaining == 0) {
+            context.releasePageMemoInvalidate(groupKeys[groupSlot], page);
+          }
+          for (int index = 0; index < groupCounts[groupSlot]; index++) {
+            int recordIndex = groupIndexes[groupOffsets[groupSlot] + index];
+            // Grouped reclaim can be retried after another group has already succeeded. Address
+            // is the sole liveness marker and must be cleared before progress/callback publication.
+            NativeMemory.putLong(
+                entryAddressesAddress + (long) recordIndex * Long.BYTES, 0L);
+          }
+          // Record the group before the availability callback. If that callback fails, the cleared
+          // records are already durable and the retry must account only for the remaining groups.
+          context.recordReleaseBatchProgress(groupCounts[groupSlot], groupBytes[groupSlot]);
+          page.completeRemoteFree(remaining);
+        }
+        return context.releaseBatchRecords();
+      } finally {
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          groupKeys[groupSlot] = 0L;
+          groupPages[groupSlot] = null;
+        }
+      }
+    }
+
+    private static int groupSlot(long pageKey, long[] groupKeys, int groupMask) {
+      int slot = (int) ((pageKey ^ (pageKey >>> 32)) & groupMask);
+      while (groupKeys[slot] != 0L && groupKeys[slot] != pageKey) {
+        slot = (slot + 1) & groupMask;
+      }
+      return slot;
     }
 
     public void closeArenas() {
-      for (WriterArena arena : arenas) {
-        arena.releasePages();
+      // Remove every ready token before invalidating the page table. This prevents a stale stack
+      // node from retaining a freed Page descriptor after shutdown.
+      for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
+        while (popReadyPage(sizeClass) != null) {
+          // The page-table pass below owns the physical free; popping only removes the token.
+        }
       }
-      pageDepot.clear();
       for (int chunkIndex = 0; chunkIndex < pageChunks.length(); chunkIndex++) {
         AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(chunkIndex);
         if (chunk == null) {
@@ -227,96 +697,158 @@ public final class NativeMemory {
         for (int slot = 0; slot < chunk.length(); slot++) {
           WriterArena.Page page = chunk.get(slot);
           if (page != null) {
-            freeEntryPage(page);
+            freeEntryPage(page, true);
           }
         }
       }
-    }
-
-    /** Releases fully empty depot pages during writer-side native pressure. */
-    public long trimIdlePages() {
-      return pageDepot.trimIdlePages();
-    }
-
-    WriterArena.Page acquireEntryPage(int sizeClass) {
-      WriterArena.Page page = tryAcquireEntryPage(sizeClass);
-      if (page == null) {
-        throw new AllocationLimitException(hardLimit, allocated.get(), SizeClasses.PAGE_BYTES);
+      for (LongAdder count : pageReadyCounts) {
+        count.reset();
       }
-      return page;
     }
 
-    WriterArena.Page tryAcquireEntryPage(int sizeClass) {
-      WriterArena.Page reused = pageDepot.acquire(sizeClass);
-      if (reused != null) {
-        return reused;
+    /** Allocation-failure cold path. Exactly one caller drains each ready LIFO once. */
+    public long trimAvailablePages() {
+      if (!trimOwner.compareAndSet(false, true)) {
+        return 0L;
       }
-      boolean counted = false;
-      for (int attempt = 0; attempt < LOGICAL_CPU_COUNT; attempt++) {
-        int current = pooledPageCount.get();
-        if (current >= pooledPageLimit) {
-          return null;
+      long trimmedBytes = 0L;
+      try {
+        for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
+          long candidates = Math.max(0L, pageReadyCounts[sizeClass].sum());
+          if (candidates == 0L) {
+            continue;
+          }
+          int deferredHead = 0;
+          try {
+            for (long candidate = 0L; candidate < candidates; candidate++) {
+              WriterArena.Page page = popReadyPage(sizeClass);
+              if (page == null) {
+                break;
+              }
+              if (!isCurrentPage(page)) {
+                continue;
+              }
+              if (page.beginTrimming() && freeEntryPage(page, false)) {
+                pageTrimmedCount.incrementAndGet();
+                trimmedBytes += page.pageBytes;
+              } else {
+                // Keep a page that cannot be trimmed off the stack until this pass has inspected
+                // the rest of the snapshot; immediately pushing it back would pop the same page
+                // again and starve a trimmable page below it.
+                readyPageNext.set(page.id, deferredHead);
+                deferredHead = page.id;
+              }
+            }
+          } finally {
+            while (deferredHead != 0) {
+              int pageId = deferredHead;
+              deferredHead = readyPageNext.get(pageId);
+              WriterArena.Page page = pageForId(pageId);
+              if (page != null && page.id == pageId) {
+                restoreReadyPage(page);
+              }
+            }
+          }
         }
-        if (pooledPageCount.compareAndSet(current, current + 1)) {
-          counted = true;
-          break;
-        }
-        Thread.onSpinWait();
+      } finally {
+        trimOwner.set(false);
       }
-      if (!counted) {
-        return null;
-      }
-      int pageKey = 0;
+      return trimmedBytes;
+    }
+
+    WriterArena.Page tryAcquireEntryPage(
+        int sizeClass, WriterArena.SizeClassState ownerClass) {
+      pooledPageCount.incrementAndGet();
+      long pageKey = 0L;
       long address = 0L;
+      int pageBytes = SizeClasses.pageBytes(sizeClass);
       try {
         pageKey = nextPageKey();
-        int pageId = pageKey & MAX_PAGE_ID;
-        address = allocateEntryPage();
+        if (pageKey == 0) {
+          pooledPageCount.decrementAndGet();
+          return null;
+        }
+        int pageId = (int) (pageKey & WriterArena.PAGE_ID_MASK);
+        // Ready publication happens after the Page leaves its owner. Materialize the sparse link
+        // chunk while acquisition can still unwind, so that publication itself cannot allocate.
+        readyPageNext.prepare(pageId);
+        address = allocateEntryPage(pageBytes);
+        if (address == 0L) {
+          recyclePageId(pageId);
+          pooledPageCount.decrementAndGet();
+          return null;
+        }
         WriterArena.Page page =
             new WriterArena.Page(
-                pageId, pageKey, address, sizeClass, SizeClasses.slotBytes(sizeClass));
+                ownerClass,
+                pageId,
+                pageKey,
+                address,
+                sizeClass,
+                SizeClasses.slotBytes(sizeClass),
+                pageBytes);
         registerPage(page);
         return page;
       } catch (Throwable failure) {
         if (address != 0L) {
-          free(address, SizeClasses.PAGE_BYTES);
+          long rawAddress = U.getLong(address - Long.BYTES);
+          free(rawAddress, pageBytes + ALIGNMENT_PADDING_BYTES);
         }
         if (pageKey != 0) {
-          recyclePageId(pageKey & MAX_PAGE_ID);
+          recyclePageId((int) (pageKey & WriterArena.PAGE_ID_MASK));
         }
         pooledPageCount.decrementAndGet();
         throw failure;
       }
     }
 
-    void returnUnusedPage(WriterArena.Page page) {
-      freeEntryPage(page);
+    /** Test-only raw page acquisition; production allocation always supplies its sticky owner. */
+    WriterArena.Page tryAcquireEntryPage(int sizeClass) {
+      WriterArena arena = newWriterArena();
+      return tryAcquireEntryPage(sizeClass, arena.sizeClassState(sizeClass));
     }
 
-    void releaseEmptyPage(WriterArena.Page page) {
-      pageDepot.release(page);
+    void returnUnusedPage(WriterArena.Page page) {
+      freeEntryPage(page, true);
     }
 
     void freeEntryPage(WriterArena.Page page) {
-      if (!page.freePhysical()) {
-        return;
-      }
-      unregisterPage(page);
-      free(page.address, SizeClasses.PAGE_BYTES);
-      pooledPageCount.decrementAndGet();
-      recyclePageId(page.id);
+      freeEntryPage(page, true);
     }
 
-    int nextPageKey() {
-      int pageId = takeFreePageId();
+    private boolean freeEntryPage(WriterArena.Page page, boolean force) {
+      if (!page.freePhysical(force)) {
+        return false;
+      }
+      unregisterPage(page);
+      freeEntryPageAllocation(page);
+      pooledPageCount.decrementAndGet();
+      recyclePageId(page.id);
+      return true;
+    }
+
+    void recordPageReady(int sizeClass) {
+      pageReadyCounts[sizeClass].increment();
+    }
+
+    void recordSmallAllocationFallback() {
+      smallAllocationFallbacks.incrementAndGet();
+    }
+
+    void recordDirectEntryAllocation() {
+      directEntryAllocations.incrementAndGet();
+    }
+
+    long nextPageKey() {
+      long pageId = takeFreePageId();
       if (pageId == 0) {
         pageId = nextPageId.getAndIncrement();
       }
-      if (pageId <= 0 || pageId > MAX_PAGE_ID) {
-        throw new AllocationLimitException(hardLimit, allocated.get(), SizeClasses.PAGE_BYTES);
+      if (pageId <= 0L || pageId > WriterArena.PAGE_ID_MASK) {
+        return 0;
       }
-      int version = pageVersions.incrementAndGet(pageId) & PAGE_VERSION_MASK;
-      return (version << WriterArena.PAGE_ID_BITS) | pageId;
+      int version = pageVersions.incrementAndGet((int) pageId) & PAGE_VERSION_MASK;
+      return ((long) version << WriterArena.HANDLE_PAGE_BITS) | pageId;
     }
 
     void registerPage(WriterArena.Page page) {
@@ -342,18 +874,22 @@ public final class NativeMemory {
       }
     }
 
-    WriterArena.Page pageForHandle(int handle) {
-      int pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
-      int pageId = pageKey & MAX_PAGE_ID;
+    WriterArena.Page pageForHandle(long handle) {
+      long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
+      int pageId = (int) (pageKey & WriterArena.PAGE_ID_MASK);
       if (pageId == 0) {
         return null;
       }
-      AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(pageId >>> PAGE_CHUNK_BITS);
-      WriterArena.Page page = chunk == null ? null : chunk.get(pageId & (PAGE_CHUNK_SIZE - 1));
+      WriterArena.Page page = pageForId(pageId);
       return page != null && page.pageKey == pageKey ? page : null;
     }
 
-    private int takeFreePageId() {
+    private WriterArena.Page pageForId(int pageId) {
+      AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(pageId >>> PAGE_CHUNK_BITS);
+      return chunk == null ? null : chunk.get(pageId & (PAGE_CHUNK_SIZE - 1));
+    }
+
+    private long takeFreePageId() {
       while (true) {
         long head = freePageIdHead.get();
         int pageId = (int) head;
@@ -363,7 +899,7 @@ public final class NativeMemory {
         int next = freePageIdNext.get(pageId);
         long updated = packPageIdHead(((int) (head >>> 32)) + 1, next);
         if (freePageIdHead.compareAndSet(head, updated)) {
-          return pageId;
+          return pageId & WriterArena.PAGE_ID_MASK;
         }
       }
     }
@@ -380,35 +916,49 @@ public final class NativeMemory {
     }
 
     private static long packPageIdHead(int stamp, int pageId) {
-      return ((long) stamp << 32) | (pageId & 0xffff_ffffL);
+      return ((long) stamp << 32) | (pageId & WriterArena.PAGE_ID_MASK);
     }
 
-    private void reservePhysical(long bytes) {
-      for (int attempt = 0; attempt < LOGICAL_CPU_COUNT; attempt++) {
-        long current = allocated.get();
-        if (current > hardLimit - bytes) {
-          throw new AllocationLimitException(hardLimit, current, bytes);
-        }
-        if (allocated.compareAndSet(current, current + bytes)) {
-          return;
-        }
-        Thread.onSpinWait();
+    /** Lazily allocated primitive chunks covering exactly the handle's page-id namespace. */
+    private static final class IntChunkTable {
+      private static final int CHUNK_BITS = 12;
+      private static final int CHUNK_SIZE = 1 << CHUNK_BITS;
+      private static final int CHUNK_COUNT =
+          1 << (WriterArena.HANDLE_PAGE_BITS - CHUNK_BITS);
+      private final AtomicReferenceArray<AtomicIntegerArray> chunks =
+          new AtomicReferenceArray<>(CHUNK_COUNT);
+
+      int get(int index) {
+        AtomicIntegerArray chunk = chunks.get(index >>> CHUNK_BITS);
+        return chunk == null ? 0 : chunk.get(index & (CHUNK_SIZE - 1));
       }
-      throw new AllocationLimitException(hardLimit, allocated.get(), bytes);
-    }
-  }
 
-  /** Admission failure is recoverable for cache writes; it is not a JVM-wide OutOfMemoryError. */
-  public static final class AllocationLimitException extends RuntimeException {
-    AllocationLimitException(long hardLimit, long allocated, long requested) {
-      super(
-          "native hard limit "
-              + hardLimit
-              + " exceeded: allocated="
-              + allocated
-              + ", requested="
-              + requested);
+      void set(int index, int value) {
+        ensureChunk(index).set(index & (CHUNK_SIZE - 1), value);
+      }
+
+      void prepare(int index) {
+        ensureChunk(index);
+      }
+
+      int incrementAndGet(int index) {
+        return ensureChunk(index).incrementAndGet(index & (CHUNK_SIZE - 1));
+      }
+
+      private AtomicIntegerArray ensureChunk(int index) {
+        int chunkIndex = index >>> CHUNK_BITS;
+        AtomicIntegerArray chunk = chunks.get(chunkIndex);
+        if (chunk != null) {
+          return chunk;
+        }
+        AtomicIntegerArray created = new AtomicIntegerArray(CHUNK_SIZE);
+        if (!chunks.compareAndSet(chunkIndex, null, created)) {
+          return chunks.get(chunkIndex);
+        }
+        return created;
+      }
     }
+
   }
 
   public static long getLong(long address) {
@@ -456,8 +1006,20 @@ public final class NativeMemory {
     return U.getInt(address);
   }
 
+  public static int getIntVolatile(long address) {
+    return U.getIntVolatile(null, address);
+  }
+
+  public static boolean compareAndSwapInt(long address, int expected, int update) {
+    return U.compareAndSwapInt(null, address, expected, update);
+  }
+
   public static void putInt(long address, int value) {
     U.putInt(address, value);
+  }
+
+  public static void putIntVolatile(long address, int value) {
+    U.putIntVolatile(null, address, value);
   }
 
   public static byte getByte(long address) {

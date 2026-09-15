@@ -181,28 +181,30 @@ public class OHCGetAllPutAllBenchmark {
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void getAllOneThread(Blackhole blackhole) {
+  public void getAllOneThread(Blackhole blackhole, BenchmarkWindowResults window) {
     getAll(blackhole);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void getAllCpuThreads(Blackhole blackhole) {
+  public void getAllCpuThreads(Blackhole blackhole, BenchmarkWindowResults window) {
     getAll(blackhole);
   }
 
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void putAllOneThread(Blackhole blackhole, WriteResults results) {
+  public void putAllOneThread(
+      Blackhole blackhole, WriteResults results, BenchmarkWindowResults window) {
     putAll(blackhole, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void putAllCpuThreads(Blackhole blackhole, WriteResults results) {
+  public void putAllCpuThreads(
+      Blackhole blackhole, WriteResults results, BenchmarkWindowResults window) {
     putAll(blackhole, results);
   }
 
@@ -227,7 +229,8 @@ public class OHCGetAllPutAllBenchmark {
     Map<Integer, byte[]> freshBatch = freshBatches.get().next(values);
     int accepted;
     if ("OHC".equals(implementation)) {
-      accepted = ohc.putAll(freshBatch);
+      ohc.putAll(freshBatch);
+      accepted = BATCH_SIZE;
     } else {
       caffeine.putAll(freshBatch);
       accepted = BATCH_SIZE;

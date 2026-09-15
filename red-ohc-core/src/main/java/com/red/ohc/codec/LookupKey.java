@@ -12,7 +12,9 @@ public final class LookupKey {
   private long hash64;
 
   public void set(byte[] bytes, int length) {
-    this.bytes = bytes;
+    if (this.bytes != bytes) {
+      this.bytes = bytes;
+    }
     this.length = length;
     long hash64 = Hashing.farmHashUo(bytes, 0, length);
     this.hash64 = hash64;
@@ -58,8 +60,7 @@ public final class LookupKey {
       return false;
     }
     Entry entry = (Entry) other;
-    return entry.keyHash() == hash
-        && entry.keyLength() == length
+    return entry.keyLength() == length
         && NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, length);
   }
 }

@@ -1,5 +1,6 @@
 package com.red.ohc.cache;
 
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
@@ -48,13 +49,14 @@ public class DirectValueEpochTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .build()) {
-      assertTrue(cache.put(key, new byte[16]));
+      cache.put(key, new byte[16]);
       cache.flushAsync().join();
       Future<Boolean> directRead =
           reader.submit(() -> waitForDirectHit(cache, key, entered, release));
       try {
         assertTrue(entered.await(2L, TimeUnit.SECONDS), "direct consumer did not start");
-        assertTrue(cache.removeAsync(key).get(2L, TimeUnit.SECONDS));
+        cache.remove(key);
+        assertFalse(cache.containsKey(key));
         assertTrue(
             cache.totalAllocatedBytes() > 0L,
             "native storage must remain allocated during the direct callback");

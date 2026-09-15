@@ -21,8 +21,8 @@ import org.mapdb.DBMaker;
 import org.mapdb.HTreeMap;
 
 import com.red.ohc.index.Entry;
+import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
-import com.red.ohc.storage.WriterArena;
 
 /** Shared raw-byte serialization helpers for the OHC and Ehcache JMH states. */
 public final class SerializedBenchmarkSupport {
@@ -101,7 +101,28 @@ public final class SerializedBenchmarkSupport {
     return new Dataset(
         keys,
         values,
-        "ZIPF_099".equals(distribution) ? zipfSequence(WORKING_SET) : uniformSequence(WORKING_SET));
+        sequenceForDistribution(WORKING_SET, distribution));
+  }
+
+  public static int[] writeSequence(String shape, String distribution) {
+    switch (shape) {
+      case "REPLACE_ONLY":
+        return sequenceForDistribution(CAPACITY_ENTRIES, distribution);
+      case "MIXED":
+        return sequenceForDistribution(WORKING_SET, distribution);
+      case "INSERT_CHURN":
+        return insertChurnSequence(distribution);
+      case "NEW_KEY":
+        // The sequence keeps value selection deterministic; the key itself is generated from the
+        // writer thread and its monotonic operation ordinal by newKey().
+        return sequenceForDistribution(CAPACITY_ENTRIES, distribution);
+      default:
+        throw new IllegalArgumentException("unsupported write shape: " + shape);
+    }
+  }
+
+  public static boolean isNewKeyShape(String shape) {
+    return "NEW_KEY".equals(shape);
   }
 
   public static boolean isWrite(String workload, long operation) {
@@ -133,12 +154,11 @@ public final class SerializedBenchmarkSupport {
         * (keyBytes + valueBytes + EHCACHE_ENTRY_OVERHEAD_BYTES);
   }
 
+  /** Returns the logical serialized-byte capacity for the fixed-size OHC benchmark workload. */
   public static long ohcCapacityBytes(int keyBytes, int valueBytes) {
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
-    long entryWeight =
-        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
-    return entryWeight * CAPACITY_ENTRIES;
+    return CacheMath.logicalEntryBytes(keyAllocation, valueAllocation) * CAPACITY_ENTRIES;
   }
 
   public static int benchmarkThreadCount() {
@@ -151,6 +171,26 @@ public final class SerializedBenchmarkSupport {
 
   public static byte[] ownedCopy(byte[] value) {
     return value == null ? null : Arrays.copyOf(value, value.length);
+  }
+
+  /**
+   * Creates a deterministic key for a sustained-new-key workload. The high 32 bits identify the
+   * JMH writer thread and the low 32 bits identify that thread's write ordinal, so benchmark
+   * threads never intentionally collide within the measured run.
+   */
+  public static byte[] newKey(int keyBytes, int threadIndex, long writeOrdinal) {
+    if (keyBytes < Long.BYTES) {
+      throw new IllegalArgumentException("NEW_KEY requires at least 8 key bytes");
+    }
+    if (threadIndex < 0 || writeOrdinal < 0L || writeOrdinal > 0xffff_ffffL) {
+      throw new IllegalArgumentException("invalid NEW_KEY writer identity");
+    }
+    long identity = ((long) threadIndex << 32) | writeOrdinal;
+    byte[] key = bytes(keyBytes, identity ^ 0xd1b54a32d192ed03L);
+    for (int index = 0; index < Long.BYTES; index++) {
+      key[keyBytes - Long.BYTES + index] = (byte) (identity >>> (56 - index * 8));
+    }
+    return key;
   }
 
   /** Benchmark-local content key; it keeps raw-key semantics without using OHC's EncodedKey API. */
@@ -182,7 +222,7 @@ public final class SerializedBenchmarkSupport {
     }
   }
 
-  private static byte[] bytes(int length, int seed) {
+  private static byte[] bytes(int length, long seed) {
     byte[] bytes = new byte[length];
     long value = seed * 0x9e3779b97f4a7c15L;
     for (int i = 0; i < length; i++) {
@@ -202,6 +242,26 @@ public final class SerializedBenchmarkSupport {
       seed ^= seed >>> 7;
       seed ^= seed << 17;
       sequence[i] = (int) Long.remainderUnsigned(seed, bound);
+    }
+    return sequence;
+  }
+
+  private static int[] sequenceForDistribution(int bound, String distribution) {
+    return "ZIPF_099".equals(distribution) ? zipfSequence(bound) : uniformSequence(bound);
+  }
+
+  private static int[] insertChurnSequence(String distribution) {
+    int outsideEntries = WORKING_SET - CAPACITY_ENTRIES;
+    int[] resident = sequenceForDistribution(CAPACITY_ENTRIES, distribution);
+    int[] outside = sequenceForDistribution(outsideEntries, distribution);
+    int[] sequence = new int[ACCESS_SEQUENCE_LENGTH];
+    for (int index = 0; index < sequence.length; index++) {
+      int sample = index >>> 1;
+      if ((index & 1) == 0) {
+        sequence[index] = CAPACITY_ENTRIES + outside[sample % outside.length];
+      } else {
+        sequence[index] = resident[sample % resident.length];
+      }
     }
     return sequence;
   }

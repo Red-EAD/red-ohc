@@ -12,18 +12,19 @@ import com.red.ohc.api.Ticker;
 
 /** Builder for the off-heap cache. */
 public final class OHCacheBuilder<K, V> {
-  private long capacity = 64L << 20;
+  private static final long DEFAULT_NATIVE_DEBT_BUDGET_BYTES = 64L << 20;
+  private long capacity;
   private long maxSize;
   private boolean capacityConfigured;
   private boolean maxSizeConfigured;
+  private long nativeMemoryBudgetBytes;
+  private boolean nativeMemoryBudgetConfigured;
   private CacheSerializer<K> keySerializer;
   private CacheSerializer<V> valueSerializer;
   private long defaultTtlMillis;
   private Ticker ticker = Ticker.DEFAULT;
   private Eviction eviction = Eviction.S3_FIFO;
   private EvictionListener<K, V> evictionListener;
-  private boolean weakValues;
-  private boolean speculativeInsert;
   private AllocatorType allocatorType = AllocatorType.JNA;
   private Executor loaderExecutor;
   private long closeTimeoutMillis = 30_000L;
@@ -34,6 +35,15 @@ public final class OHCacheBuilder<K, V> {
     return new OHCacheBuilder<>();
   }
 
+  /**
+   * Selects a logical serialized-entry byte capacity. Each entry charges its serialized key
+   * allocation plus its serialized value allocation, including OHC's fixed headers and alignment;
+   * allocator pages, size-class rounding, and shared maintenance structures are excluded. Actual
+   * native usage is exposed separately by {@link OHCache#totalAllocatedBytes()}. This value is the
+   * actor's steady-state eviction target, not a synchronous write admission limit: a writer may
+   * temporarily exceed it while the actor claims logical victims. Retirement backlog is observed
+   * separately through the native memory-debt budget; it does not throttle writes.
+   */
   public OHCacheBuilder<K, V> capacity(long capacity) {
     if (capacity <= 0L) {
       throw new IllegalArgumentException("capacity must be positive");
@@ -47,10 +57,11 @@ public final class OHCacheBuilder<K, V> {
   }
 
   /**
-   * Selects a weakly consistent entry-count bound. Maintenance evicts asynchronously toward this
-   * size; new keys are rejected without waiting once the cache reaches a small bounded overshoot
-   * watermark. This mode does not impose an independent native-byte limit and is mutually
-   * exclusive with {@link #capacity(long)}.
+   * Selects an entry-count target. The maintenance actor asynchronously claims logical victims to
+   * approach this target; writes are not rejected merely because the current count is above it.
+   * This mode is mutually exclusive with {@link #capacity(long)}; use
+   * {@link #nativeMemoryBudgetBytes(long)} to observe native retirement backlog independently of
+   * the entry-count target.
    */
   public OHCacheBuilder<K, V> maxSize(long maxSize) {
     if (maxSize <= 0L) {
@@ -61,6 +72,20 @@ public final class OHCacheBuilder<K, V> {
     }
     this.maxSize = maxSize;
     this.maxSizeConfigured = true;
+    return this;
+  }
+
+  /**
+   * Sets the native retirement-debt budget used for diagnostics. Physical retirement is always
+   * asynchronous and this setting never blocks, rejects, or asks a writer to reclaim native
+   * memory. Live logical capacity is controlled by {@link #capacity(long)} or {@link #maxSize(long)}.
+   */
+  public OHCacheBuilder<K, V> nativeMemoryBudgetBytes(long bytes) {
+    if (bytes <= 0L) {
+      throw new IllegalArgumentException("nativeMemoryBudgetBytes must be positive");
+    }
+    nativeMemoryBudgetBytes = bytes;
+    nativeMemoryBudgetConfigured = true;
     return this;
   }
 
@@ -97,39 +122,6 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
-  /**
-   * Enables weak reuse of deserialized Java values.
-   *
-   * <p>The option is disabled by default. A value serializer whose generic type resolves to
-   * {@link java.nio.ByteBuffer} is rejected during {@link #build()}. Java generic erasure can make
-   * that type undecidable; such serializers are checked again when values are written or
-   * deserialized. ByteBuffer values are never accepted while this option is enabled. A weak hit
-   * may return the same Java object supplied to a cache write, so callers should prefer immutable
-   * values. Mutating a value in place does not update the native authoritative copy; write a new
-   * value again to synchronize it.
-   */
-  public OHCacheBuilder<K, V> weakValues(boolean enabled) {
-    this.weakValues = enabled;
-    return this;
-  }
-
-  /**
-   * Skips the pre-read {@code get} on the put miss path for capacity-bounded caches: a new entry is
-   * allocated and published via {@code putIfAbsent} directly, falling back to a replace only when
-   * the CAS loses to a concurrent writer. This removes one CHM traversal plus its reader-epoch
-   * handshake per new-key put, which dominates insert-heavy workloads. On a CAS loss the candidate
-   * is freed and the existing entry is replaced, so correctness is unchanged.
-   *
-   * <p>The option has no effect on count-bounded ({@link #maxSize(long)}) caches: their write
-   * admission needs to know whether the key already exists before deciding to admit a new entry,
-   * so the pre-read cannot be elided. Defaults to {@code false} to preserve the historical
-   * read-then-write ordering.
-   */
-  public OHCacheBuilder<K, V> speculativeInsert(boolean enabled) {
-    this.speculativeInsert = enabled;
-    return this;
-  }
-
   public OHCacheBuilder<K, V> allocator(AllocatorType allocatorType) {
     this.allocatorType = Objects.requireNonNull(allocatorType, "allocatorType");
     return this;
@@ -153,13 +145,16 @@ public final class OHCacheBuilder<K, V> {
   }
 
   OffHeapCache<K, V> buildTyped() {
+    if (!capacityConfigured && !maxSizeConfigured) {
+      throw new IllegalStateException("capacity or maxSize is required");
+    }
     if (keySerializer == null || valueSerializer == null) {
       throw new IllegalStateException("both keySerializer and valueSerializer are required");
     }
-    if (weakValues && SerializerTypeResolver.resolvesToByteBuffer(valueSerializer)) {
-      throw new IllegalArgumentException(
-          "weakValues(true) does not support ByteBuffer values; use weakValues(false) or a non-ByteBuffer value type");
-    }
+    long nativeDebtBudget =
+        nativeMemoryBudgetConfigured
+            ? nativeMemoryBudgetBytes
+            : defaultNativeDebtBudget(capacityConfigured ? capacity : -1L);
     return new OffHeapCache<>(
         keySerializer,
         valueSerializer,
@@ -170,10 +165,15 @@ public final class OHCacheBuilder<K, V> {
         ticker,
         eviction,
         evictionListener,
-        weakValues,
-        speculativeInsert,
         capacity,
-        maxSize);
+        maxSize,
+        nativeDebtBudget);
+  }
+
+  private static long defaultNativeDebtBudget(long configuredCapacity) {
+    return configuredCapacity <= 0L
+        ? DEFAULT_NATIVE_DEBT_BUDGET_BYTES
+        : Math.max(DEFAULT_NATIVE_DEBT_BUDGET_BYTES, configuredCapacity);
   }
 
 }

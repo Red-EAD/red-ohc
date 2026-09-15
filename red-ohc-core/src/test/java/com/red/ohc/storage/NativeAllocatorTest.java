@@ -7,12 +7,17 @@ import org.testng.annotations.Test;
 import com.red.ohc.api.AllocatorType;
 
 public class NativeAllocatorTest {
-  @Test(expectedExceptions = NativeMemory.AllocationLimitException.class)
-  public void nativeHardLimitRejectsTheNextPhysicalAllocation() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA, 64L);
+  @Test
+  public void memoryTracksActualNativeAllocationWithoutCacheAdmission() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long address = memory.allocate(64L);
     try {
-      memory.allocate(8L);
+      long second = memory.allocate(8L);
+      try {
+        assertTrue(memory.allocated() >= 72L);
+      } finally {
+        memory.free(second, 8L);
+      }
     } finally {
       memory.free(address, 64L);
     }

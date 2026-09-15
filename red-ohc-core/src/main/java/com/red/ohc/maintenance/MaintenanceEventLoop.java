@@ -1,34 +1,30 @@
 package com.red.ohc.maintenance;
 
-import java.lang.ref.ReferenceQueue;
-import java.lang.ref.WeakReference;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
-import org.jctools.queues.MpscArrayQueue;
+import org.jctools.queues.MpscUnboundedArrayQueue;
+import org.jctools.util.PaddedAtomicLong;
 
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
-import com.red.ohc.index.ChmSizing;
 import com.red.ohc.index.Entry;
-import com.red.ohc.index.WeakValueStateStore;
 import com.red.ohc.runtime.AccessConsumer;
 import com.red.ohc.runtime.AccessRing;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
-import com.red.ohc.storage.Budget;
+import com.red.ohc.runtime.ThreadContext;
+import com.red.ohc.runtime.WriterResourceRegistry;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 
@@ -43,58 +39,55 @@ public final class MaintenanceEventLoop
     void notify(Entry entry, long valueAddress, RemovalCause cause);
   }
 
-  private static final long EPOCH_ADVANCE_INTERVAL_NANOS = 1_000_000L;
-  private static final long WINDOW_NANOS = 1_000_000L;
-  private static final long EVICTION_RETRY_INITIAL_NANOS = WINDOW_NANOS;
-  private static final long EVICTION_RETRY_MAX_NANOS = 10_000_000L;
-  private static final long RECLAIM_RETRY_INITIAL_NANOS = WINDOW_NANOS;
-  private static final long RECLAIM_RETRY_MAX_NANOS = 10_000_000L;
-  /**
-   * A deferred mutation has a writer in progress. Retry it with bounded backoff rather than
-   * converting one long writer publication into a microsecond poll loop.
-   */
-  private static final long DEFERRED_MUTATION_RETRY_INITIAL_NANOS = WINDOW_NANOS;
-  private static final long DEFERRED_MUTATION_RETRY_MAX_NANOS = 10_000_000L;
-
+  private static final long NO_DEADLINE = Long.MIN_VALUE;
+  private static final long MAX_IDLE_PARK_NANOS = 10_000_000L;
+  private static final long READER_SIGNAL_STOPPING = 1L;
+  private static final long READER_SIGNAL_HAS_SHUTDOWN_WAITER = 1L << 1;
+  private static final int MAILBOX_QUEUE_CHUNK_SIZE = 1_024;
+  private static final int MAILBOX_MAX_PER_TURN = 1_024;
+  private static final int LIFECYCLE_MAX_PER_TURN = 1_024;
+  private static final int CAPACITY_MAX_PER_TURN = 1_024;
+  private static final int ACCESS_MAX_PER_TURN = 1_024;
+  private static final int TTL_MAX_PER_TURN = 1_024;
+  private static final int RECLAIM_MAX_SEGMENTS = 128;
+  private static final int ADVISORY_MAX_PER_TURN =
+      MaintenanceBudgetController.TOTAL_MAINTENANCE_HARD_CAP;
+  private static final int READER_LIFECYCLE_SCAN_LIMIT = 256;
   private static final int WORK_MUTATION = 1;
   private static final int WORK_REMOVAL = 1 << 1;
   private static final int WORK_ACCESS_SCAN = 1 << 2;
-  private static final int WORK_PRESSURE = 1 << 3;
-  private static final int WORK_RETIREMENT = 1 << 4;
-  private static final int WORK_ASYNC = 1 << 5;
-  private static final int WORK_FLUSH = 1 << 6;
-  private static final int WORK_CLOCK = 1 << 7;
-  private static final int WORK_WEAK_VALUES = 1 << 8;
-  private static final long WEAK_VALUE_CLEANUP_INTERVAL_NANOS = 1_000_000_000L;
+  private static final int WORK_RETIREMENT = 1 << 3;
+  private static final int WORK_ASYNC = 1 << 4;
+  private static final int WORK_FLUSH = 1 << 5;
+  private static final int WORK_CLOCK = 1 << 6;
+  private static final int WORK_READER_LIFECYCLE = 1 << 7;
+  private static final int WORK_CAPACITY = 1 << 8;
+  private static final int WORK_READER_NOTIFICATION = 1 << 9;
+  private static final int RUNNABLE_CHECK_WORK = 1;
+  private static final int RUNNABLE_CHECK_READERS = 1 << 1;
+  private static final int RUNNABLE_CHECK_ACTIVE_READERS = 1 << 2;
+  private static final AtomicLongFieldUpdater<MaintenanceEventLoop>
+      ASYNC_COMPLETED_SEQUENCE_UPDATER =
+          AtomicLongFieldUpdater.newUpdater(MaintenanceEventLoop.class, "asyncCompletedSequence");
 
   private final ConcurrentHashMap<Entry, Entry> data;
   private final NativeMemory.Memory memory;
-  private final Budget budget;
   private final Ticker ticker;
   private final long capacity;
-  private final boolean countBounded;
+  private final Eviction eviction;
+  private volatile WriterLifecycleJournal writerLifecycleJournal;
+  /** Actor-local cache of the lifecycle journal's coalesced ready state. */
+  private long writerLifecycleReadinessGeneration = Long.MIN_VALUE;
+  private boolean writerLifecycleReady;
+  private volatile WriterResourceRegistry writerResources;
   private volatile EvictionNotifier evictionNotifier;
-  private final int queueCapacity;
-  private final MpscArrayQueue<Entry> queue;
-
-  /** Reliable removal transport: it is reserved before CHM removal and may contain tombstones. */
-  private final ReliableRemovalQueue reliableRemovals;
-
-  private final AtomicBoolean repairNeeded = new AtomicBoolean();
-  private final AtomicLong repairVersion = new AtomicLong();
-  private final AtomicBoolean allocationPressureRequested = new AtomicBoolean();
-  private final AtomicBoolean budgetPressureRequested = new AtomicBoolean();
-  private final ConcurrentLinkedQueue<Entry>[] repairQueues;
-  private final int repairShardMask;
-  private final AtomicIntegerArray repairShardDirty;
-  private final RepairShardToken[] repairShardTokens;
-  private final ConcurrentLinkedQueue<RepairShardToken> dirtyRepairShardQueue =
-      new ConcurrentLinkedQueue<>();
-  private final AtomicLong repairDebtTotal = new AtomicLong();
-  private final ConcurrentLinkedQueue<AsyncMutationTask> asyncMutations =
-      new ConcurrentLinkedQueue<>();
-  /** Linearizes async sequence assignment with queue publication for the flush barrier. */
-  private final Object asyncSubmissionLock = new Object();
+  private final MpscUnboundedArrayQueue<Object> mailbox;
+  /** Durable messages only; coalesced advisory markers do not represent queued business work. */
+  private final AtomicLong durableMailboxDepth = new AtomicLong();
+  /** Actor-local marker set when the head message is held behind the active flush fence. */
+  private boolean mailboxFenceBlocked;
+  /** The most recent flush marker consumed by the actor; extensions reuse its future. */
+  private FlushRequest lastConsumedFlushMarker;
   private final AtomicLong asyncSubmitted = new AtomicLong();
   private final AtomicLong asyncFailed = new AtomicLong();
   private final AtomicLong asyncRejected = new AtomicLong();
@@ -102,50 +95,89 @@ public final class MaintenanceEventLoop
   private final AtomicLong asyncDequeuedSequence = new AtomicLong();
   private volatile long asyncCompletedSequence;
 
-  /** Actor-owned Entries whose transport item arrived while a writer owns the Entry mutex. */
-  private final ArrayDeque<Entry> deferredMutations = new ArrayDeque<>();
-
-  private long deferredMutationRetryNanos = Long.MAX_VALUE;
-  private long deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
   private final ReaderRegistry readers;
-  private final RetirementQueue retirements;
-  private final int retirementRecordsPerStripe;
-  private final int actorRetirementBatchRecords;
-  private final RetirementQueue.Reservation actorRetirement = new RetirementQueue.Reservation();
-  private final ReliableRemovalQueue.Record removalRecord = new ReliableRemovalQueue.Record();
+  private final long[] readerEpochs = new long[2];
+  private final RetirementJournal retirements;
+  private final long nativeDebtBudgetBytes;
+  private final MaintenanceTuning tuning;
+  private long safeReclaimSegments;
+  private long safeReclaimBatches;
+  private long mailboxHeadUnpublishedCount;
+  /** Actor-local round-robin cursor for unmanaged lifecycle records. */
+  private int lifecycleLaneCursor;
+  /** True only for the current turn when an MPSC producer reserved but has not published the head. */
+  private boolean mailboxHeadUnpublished;
+  private long oldestSafeHeadTicket;
+  private long oldestSafeHeadNanos = Long.MAX_VALUE;
+  private volatile long oldestSafeWaitNanos;
+  private final RetirementRateSampler retirementRateSampler = new RetirementRateSampler();
+  private final MaintenanceBudgetController maintenanceBudgetController;
+  /** Next actor-local pressure sample; expensive debt scans are not per-turn work. */
+  private long nextMaintenanceBudgetPressureNanos = Long.MIN_VALUE;
+  private volatile long maintenancePassWorkNanos;
+  private long maintenanceActiveNanosTotal;
+  private long maintenanceParkNanosTotal;
+  private long maintenanceImmediateContinuationCount;
+  private volatile long publishedMaintenanceActiveNanosTotal;
+  private volatile long publishedMaintenanceParkNanosTotal;
+  private volatile long publishedMaintenanceImmediateContinuationCount;
+  private volatile long accessRingDroppedCount;
+  private final WriterLifecycleLane.Record writerRemovalRecord =
+      new WriterLifecycleLane.Record();
+  private final EntryLinks links;
+  /** Reusable actor key for identity-safe capacity removal without rereading Entry native keys. */
+  private final EvictionKey evictionKey = new EvictionKey();
+  private final ThreadContext.IdentityRemoval identityRemoval =
+      new ThreadContext.IdentityRemoval();
   private final TimerWheel wheel;
   private final MaintenancePolicy policy;
   private final Thread thread;
+  private final AtomicBoolean actorStarted = new AtomicBoolean();
   private final WakeGate wakeGate = new WakeGate();
+  private final IdleBackoff idleBackoff;
   private final AtomicInteger requestedWork = new AtomicInteger();
-  private final BatchLimits batchLimits = BatchLimits.forCpu(NativeMemory.LOGICAL_CPU_COUNT);
-  private final WindowScheduler windowScheduler = new WindowScheduler();
   private final WorkPlan workPlan = new WorkPlan();
+  private final WorkDecision workDecision = new WorkDecision();
 
   private final AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
   private final AtomicReference<FlushRequest> flushRequest = new AtomicReference<>();
+  /** Serializes control-plane publication without putting ordinary cache writes behind a lock. */
+  private final Object asyncFlushPublicationLock = new Object();
+  private volatile Runnable asyncSequenceAllocatedHookForTest;
+  private volatile Runnable lifecycleMessageOfferHookForTest;
+  private volatile Runnable flushRetirementExtensionHookForTest;
+  private final TurnCuts turnCuts;
   private volatile boolean closing;
-  private volatile boolean stopping;
+  private volatile boolean writesUnavailable;
   private volatile boolean parked;
-  private volatile ReferenceQueue<Object> weakValueQueue;
-  private volatile WeakValueStateStore weakValueStateStore;
-  private boolean weakValueCleanupContinuation;
-
-  /** Actor-owned cursor and liveness marker for the weak reader access scan snapshot. */
+  /** Actor-owned cursor and pending-work marker for the bitmap-backed reader access scan. */
   private int accessScanCursor;
   private boolean accessScanActive;
+  private int readerLifecycleCursor;
+  private int readerLifecycleStart;
+  private long nextReaderLifecycleCheckNanos = Long.MAX_VALUE;
+  private boolean readerLifecycleCheckActive;
+  private boolean readerLifecycleWrapped;
+  /** The flush boundary for which the actor has observed reader lifecycle state. */
+  private FlushRequest readerLifecycleFlushRequest;
 
-  /** Incremented before the actor's final empty-source check for an idle park. */
+  /** Actor-local capacity retry state; only the blocked entry release reopens the drain. */
+  private volatile boolean capacityBlocked;
+  private volatile Entry capacityBlockedEntry;
+  private long capacityRetryNanos = Long.MAX_VALUE;
+  /** Actor-created retirement records that must be added to the active flush fence. */
+  private boolean actorRetirementNeedsFlushFence;
 
-  private volatile long epoch = 1L;
+  /** Actor-published QSBR epoch, read by every cache reader. */
+  private final AtomicLong epoch = new AtomicLong(1L);
+  /** Reader-exit notification sequence; readers only increment it on the marked path. */
+  private final AtomicLong readerNotificationSequence = new AtomicLong();
+  private long observedReaderNotificationSequence;
+  private final ReentrantLock shutdownWaitLock = new ReentrantLock();
+  private final Condition shutdownProgress = shutdownWaitLock.newCondition();
+  /** Padded control bits read by every reader exit without sharing a line with ordinary state. */
+  private final PaddedAtomicLong readerExitSignals = new PaddedAtomicLong();
 
-  /** Actor-owned epoch of the newest sealed retirement record. */
-  private long latestRetireEpoch;
-
-  /** Actor-owned timestamp of the most recent epoch advance. */
-  private long lastEpochAdvanceNanos;
-
-  private boolean hasAdvancedEpoch;
   private volatile long nowMillis;
 
   /**
@@ -161,199 +193,272 @@ public final class MaintenanceEventLoop
   private volatile long hits;
   private volatile long misses;
   private volatile long physicalExpired;
-  private final AtomicLong entryResidenceCount = new AtomicLong();
-  private final AtomicLong totalEntryResidenceTimeMillis = new AtomicLong();
+  private final AtomicLong residenceSampleCount = new AtomicLong();
+  private final AtomicLong residenceSampleTotalMillis = new AtomicLong();
   private volatile long timeoutLagMillis;
   private final AtomicLong nativeAllocationFailures = new AtomicLong();
+  private final AtomicLong evictionCount = new AtomicLong();
+  private final AtomicLong evictionWeight = new AtomicLong();
 
   private final AtomicBoolean unhealthy = new AtomicBoolean();
-
-  private long evictionRetryNanos = Long.MAX_VALUE;
-  private long evictionRetryBackoffNanos = EVICTION_RETRY_INITIAL_NANOS;
+  private volatile LogicalAdmission logicalAdmission;
 
   /** A sealed retirement could not pass QSBR; recheck it on the bounded epoch deadline. */
-  private boolean reclaimBlocked;
+  private volatile boolean reclaimBlocked;
   private long reclaimRetryNanos = Long.MAX_VALUE;
-  private long reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
-
-  /** A bounded reclaim pass hit its limit and must be continued before the worker can park. */
-  private boolean reclaimContinuation;
-
-  /** The actor has processed a removal but is waiting for two retirement slots. */
-  private boolean pendingRemovalRetirement;
-  private Throwable pendingRemovalFailure;
-  private long pendingRemovalRetryNanos = Long.MAX_VALUE;
-  private long pendingRemovalRetryBackoffNanos = WINDOW_NANOS;
-
+  private long reclaimRetryBackoffNanos;
+  private long retirementReclaimBlockedCount;
+  private long retirementReclaimBlockedNanos;
+  private long retirementReclaimBlockedSinceNanos = Long.MIN_VALUE;
+  private long retirementRetryWakeCount;
   /** Actor-owned marker: publish the policy weight only after a policy mutation. */
   private boolean policyDirty;
 
   public MaintenanceEventLoop(
       ConcurrentHashMap<Entry, Entry> data,
       NativeMemory.Memory memory,
-      Budget budget,
       Ticker ticker,
       long capacity,
       Eviction eviction,
-      ReaderRegistry readers) {
+      ReaderRegistry readers,
+      long nativeDebtBudgetBytes) {
     this(
         data,
         memory,
-        budget,
         ticker,
         capacity,
         eviction,
         null,
         readers,
-        ChmSizing.maintenanceQueueCapacity(0L, capacity));
+        false,
+        new RetirementJournal(memory),
+        nativeDebtBudgetBytes,
+        new EntryLinks(memory),
+        MaintenanceTuning.DEFAULT);
   }
 
+  /** Production seam allowing the cache's logical ledger to share the actor's link arena. */
   public MaintenanceEventLoop(
       ConcurrentHashMap<Entry, Entry> data,
       NativeMemory.Memory memory,
-      Budget budget,
       Ticker ticker,
       long capacity,
       Eviction eviction,
       EvictionNotifier evictionNotifier,
-      ReaderRegistry readers) {
+      ReaderRegistry readers,
+      boolean countBounded,
+      RetirementJournal retirementJournal,
+      long nativeDebtBudgetBytes,
+      EntryLinks links) {
     this(
         data,
         memory,
-        budget,
         ticker,
         capacity,
         eviction,
         evictionNotifier,
         readers,
-        ChmSizing.maintenanceQueueCapacity(0L, capacity));
+        countBounded,
+        retirementJournal,
+        nativeDebtBudgetBytes,
+        links,
+        MaintenanceTuning.DEFAULT);
   }
 
-  public MaintenanceEventLoop(
+  MaintenanceEventLoop(
       ConcurrentHashMap<Entry, Entry> data,
       NativeMemory.Memory memory,
-      Budget budget,
-      Ticker ticker,
-      long capacity,
-      Eviction eviction,
-      ReaderRegistry readers,
-      int queueCapacity) {
-    this(data, memory, budget, ticker, capacity, eviction, null, readers, queueCapacity, false);
-  }
-
-  public MaintenanceEventLoop(
-      ConcurrentHashMap<Entry, Entry> data,
-      NativeMemory.Memory memory,
-      Budget budget,
       Ticker ticker,
       long capacity,
       Eviction eviction,
       EvictionNotifier evictionNotifier,
       ReaderRegistry readers,
-      int queueCapacity) {
-    this(
-        data,
-        memory,
-        budget,
-        ticker,
-        capacity,
-        eviction,
-        evictionNotifier,
-        readers,
-        queueCapacity,
-        false);
-  }
-
-  public MaintenanceEventLoop(
-      ConcurrentHashMap<Entry, Entry> data,
-      NativeMemory.Memory memory,
-      Budget budget,
-      Ticker ticker,
-      long capacity,
-      Eviction eviction,
-      EvictionNotifier evictionNotifier,
-      ReaderRegistry readers,
-      int queueCapacity,
-      boolean countBounded) {
+      boolean countBounded,
+      RetirementJournal retirementJournal,
+      long nativeDebtBudgetBytes,
+      EntryLinks links,
+      MaintenanceTuning tuning) {
     this.data = data;
     this.memory = memory;
-    this.budget = budget;
     this.ticker = ticker;
     this.capacity = capacity;
-    this.countBounded = countBounded;
+    this.eviction = eviction;
     this.evictionNotifier = evictionNotifier;
-    if (Integer.bitCount(queueCapacity) != 1 || queueCapacity < 1_024) {
-      throw new IllegalArgumentException("queueCapacity must be a power of two >= 1024");
+    if (retirementJournal == null) {
+      throw new NullPointerException("retirementJournal");
     }
-    this.queueCapacity = queueCapacity;
-    this.queue = new MpscArrayQueue<>(queueCapacity);
-    int shardCount = 1;
-    int requestedShards = Math.min(16, Math.max(1, queueCapacity / 1_024));
-    while (shardCount < requestedShards) {
-      shardCount <<= 1;
+    if (nativeDebtBudgetBytes <= 0L) {
+      throw new IllegalArgumentException("nativeDebtBudgetBytes must be positive");
     }
-    @SuppressWarnings("unchecked")
-    ConcurrentLinkedQueue<Entry>[] repairQueues = new ConcurrentLinkedQueue[shardCount];
-    for (int i = 0; i < shardCount; i++) {
-      repairQueues[i] = new ConcurrentLinkedQueue<>();
+    this.mailbox = new MpscUnboundedArrayQueue<>(MAILBOX_QUEUE_CHUNK_SIZE);
+    if (links == null) {
+      throw new NullPointerException("links");
     }
-    this.repairQueues = repairQueues;
-    this.repairShardMask = shardCount - 1;
-    this.repairShardDirty = new AtomicIntegerArray(shardCount);
-    this.repairShardTokens = new RepairShardToken[shardCount];
-    for (int i = 0; i < shardCount; i++) {
-      this.repairShardTokens[i] = new RepairShardToken(i);
-    }
-    this.reliableRemovals = new ReliableRemovalQueue(queueCapacity);
-    this.policy = new MaintenancePolicy(eviction, capacity, countBounded);
+    this.links = links;
+    this.policy = new MaintenancePolicy(eviction, capacity, countBounded, links);
     this.readers = readers;
-    this.retirementRecordsPerStripe = NativeMemory.defaultRetirementRecordsPerStripe();
-    this.actorRetirementBatchRecords =
-        Math.min(batchLimits.general, retirementRecordsPerStripe);
-    this.retirements =
-        new RetirementQueue(
-            memory,
-            memory.writerStripeCount(),
-            retirementRecordsPerStripe);
+    this.retirements = retirementJournal;
+    this.nativeDebtBudgetBytes = nativeDebtBudgetBytes;
+    if (tuning == null) {
+      throw new NullPointerException("tuning");
+    }
+    this.tuning = tuning;
+    this.maintenanceBudgetController = new MaintenanceBudgetController(tuning);
+    this.idleBackoff = new IdleBackoff(tuning);
+    this.reclaimRetryBackoffNanos = tuning.reclaimRetryInitialNanos;
+    this.turnCuts = new TurnCuts(retirementJournal.laneCount() + 1);
+    long initialNowNanos = ticker.nanos();
     long initialNowMillis = ticker.currentTimeMillis();
-    this.wheel = new TimerWheel(initialNowMillis);
+    this.wheel = new TimerWheel(initialNowNanos, links);
     this.nowMillis = initialNowMillis;
+    this.nowNanos = initialNowNanos;
     this.thread = new Thread(this, "red-ohc-maintenance-event-loop");
     this.thread.setDaemon(true);
+    retirementJournal.bindOpenProducerSignal(this::signal);
+    retirementJournal.bindReadySignal(
+        () -> requestWork(WORK_RETIREMENT), this::recordTerminalFailure);
+  }
+
+  public MaintenanceEventLoop(
+      ConcurrentHashMap<Entry, Entry> data,
+      NativeMemory.Memory memory,
+      Ticker ticker,
+      long capacity,
+      Eviction eviction,
+      ReaderRegistry readers,
+      RetirementJournal retirementJournal,
+      long nativeDebtBudgetBytes) {
+    this(
+        data,
+        memory,
+        ticker,
+        capacity,
+        eviction,
+        null,
+        readers,
+        false,
+        retirementJournal,
+        nativeDebtBudgetBytes,
+        new EntryLinks(memory),
+        MaintenanceTuning.DEFAULT);
+  }
+
+  public MaintenanceEventLoop(
+      ConcurrentHashMap<Entry, Entry> data,
+      NativeMemory.Memory memory,
+      Ticker ticker,
+      long capacity,
+      Eviction eviction,
+      EvictionNotifier evictionNotifier,
+      ReaderRegistry readers,
+      long nativeDebtBudgetBytes) {
+    this(
+        data,
+        memory,
+        ticker,
+        capacity,
+        eviction,
+        evictionNotifier,
+        readers,
+        false,
+        new RetirementJournal(memory),
+        nativeDebtBudgetBytes,
+        new EntryLinks(memory),
+        MaintenanceTuning.DEFAULT);
+  }
+
+  public MaintenanceEventLoop(
+      ConcurrentHashMap<Entry, Entry> data,
+      NativeMemory.Memory memory,
+      Ticker ticker,
+      long capacity,
+      Eviction eviction,
+      EvictionNotifier evictionNotifier,
+      ReaderRegistry readers,
+      boolean countBounded,
+      RetirementJournal retirementJournal,
+      long nativeDebtBudgetBytes) {
+    this(
+        data,
+        memory,
+        ticker,
+        capacity,
+        eviction,
+        evictionNotifier,
+        readers,
+        countBounded,
+        retirementJournal,
+        nativeDebtBudgetBytes,
+        new EntryLinks(memory),
+        MaintenanceTuning.DEFAULT);
   }
 
   public void start() {
+    if (!actorStarted.compareAndSet(false, true)) {
+      throw new IllegalStateException("maintenance actor is already started");
+    }
     thread.start();
   }
 
-  /** Binds cache-local weak-value cleanup before the actor thread starts. */
-  public void bindWeakValueQueue(ReferenceQueue<Object> queue) {
-    if (thread.getState() != Thread.State.NEW) {
-      throw new IllegalStateException("weak-value queue must be bound before maintenance starts");
+  public void bindWriterLifecycleJournal(WriterLifecycleJournal journal) {
+    if (journal == null) {
+      throw new NullPointerException("journal");
     }
-    weakValueQueue = queue;
+    if (thread.getState() != Thread.State.NEW) {
+      throw new IllegalStateException("writer lifecycle journal must be bound before maintenance starts");
+    }
+    writerLifecycleJournal = journal;
+    writerLifecycleReadinessGeneration = Long.MIN_VALUE;
+    writerLifecycleReady = false;
+    journal.bindReadySignal(this::requestLifecycleMaintenance, this::recordTerminalFailure);
   }
 
-  /** Binds cache-local weak-value state before the actor thread starts. */
-  public void bindWeakValueStateStore(WeakValueStateStore store) {
-    if (thread.getState() != Thread.State.NEW) {
-      throw new IllegalStateException("weak-value state store must be bound before maintenance starts");
+  public void bindWriterResourceRegistry(WriterResourceRegistry registry) {
+    if (registry == null) {
+      throw new NullPointerException("registry");
     }
-    weakValueStateStore = store;
+    if (thread.getState() != Thread.State.NEW) {
+      throw new IllegalStateException(
+          "writer resource registry must be bound before maintenance starts");
+    }
+    writerResources = registry;
+    registry.bindReadySignal(() -> requestWork(WORK_REMOVAL | WORK_RETIREMENT));
+  }
+
+  public void bindLogicalAdmission(LogicalAdmission admission) {
+    if (admission == null) {
+      throw new NullPointerException("admission");
+    }
+    if (thread.getState() != Thread.State.NEW) {
+      throw new IllegalStateException("logical admission must be bound before maintenance starts");
+    }
+    logicalAdmission = admission;
+  }
+
+  /** Reconciles the ledger against the map owned by this actor, not a caller-side test seam. */
+  public void assertLogicalAdmissionStable(LogicalAdmission admission) {
+    if (admission == null) {
+      throw new NullPointerException("admission");
+    }
+    admission.assertStable(data);
   }
 
   public void stop() {
-    synchronized (asyncSubmissionLock) {
-      stopping = true;
+    synchronized (asyncFlushPublicationLock) {
+      writesUnavailable = true;
+      setReaderExitSignal(READER_SIGNAL_STOPPING);
     }
+    signalShutdownProgress(readerExitSignals.get());
     signal();
     LockSupport.unpark(thread);
   }
 
   public void beginClosing() {
-    synchronized (asyncSubmissionLock) {
+    synchronized (asyncFlushPublicationLock) {
+      writesUnavailable = true;
       closing = true;
     }
+    signalShutdownProgress();
   }
 
   public void join(long timeoutMillis) throws InterruptedException {
@@ -369,7 +474,17 @@ public final class MaintenanceEventLoop
   }
 
   public long epoch() {
-    return epoch;
+    return epoch.get();
+  }
+
+  private long incrementEpoch() {
+    long current = epoch.get();
+    if (current >= ReaderRegistry.MAX_READER_EPOCH) {
+      throw new IllegalStateException("reader epoch exhausted its 62-bit encoding");
+    }
+    long next = current + 1L;
+    epoch.set(next);
+    return next;
   }
 
   public long nowMillis() {
@@ -380,17 +495,29 @@ public final class MaintenanceEventLoop
     return thread;
   }
 
-  /** Logical unique-entry backlog; the physical advisory queue is bounded and repairable. */
-  public long queueDepth() {
-    return queue.size() + repairDebt();
+  public RetirementJournal retirementJournal() {
+    return retirements;
   }
 
-  public long queueCapacity() {
-    return queueCapacity;
+  /** Pending messages in the actor mailbox. */
+  public long queueDepth() {
+    return Math.max(0L, durableMailboxDepth.get());
   }
 
   public long retiredBytes() {
     return retirements.retiredBytes();
+  }
+
+  public long nativeDebtBudgetBytes() {
+    return nativeDebtBudgetBytes;
+  }
+
+  public long nativeDebtHeadroomBytes() {
+    if (nativeDebtBudgetBytes == Long.MAX_VALUE) {
+      return -1L;
+    }
+    long debt = retirements.retirementDebtBytes();
+    return debt >= nativeDebtBudgetBytes ? 0L : nativeDebtBudgetBytes - debt;
   }
 
   public int retiredEntries() {
@@ -405,8 +532,44 @@ public final class MaintenanceEventLoop
     return policy.sketchBytes();
   }
 
-  public long ghostHeapBytes() {
-    return policy.ghostHeapBytes();
+  public long ghostNativeBytes() {
+    return policy.ghostNativeBytes();
+  }
+
+  public long ghostAllocationTrims() {
+    return policy.ghostAllocationTrims();
+  }
+
+  public long ghostAllocationDrops() {
+    return policy.ghostAllocationDrops();
+  }
+
+  /** Number of sampled accesses intentionally suppressed while their producer snapshot was Skip. */
+  public long skipSuppressedAccesses() {
+    return policy.skipSuppressedAccesses();
+  }
+
+  /** Number of first Ghost reappearances deliberately deferred to Small/Skip. */
+  public long ghostDeferredPromotions() {
+    return policy.ghostDeferredPromotions();
+  }
+
+  public boolean ghostRehashPending() {
+    return policy.ghostRehashPending();
+  }
+
+  /** Legacy alias for the number of sampled Skip accesses suppressed by the policy. */
+  public long admissionSkipSuppressedAccesses() {
+    return policy.skipSuppressedAccesses();
+  }
+
+  /** Legacy alias for the number of first Ghost reappearances deferred by the policy. */
+  public long admissionGhostDeferredPromotions() {
+    return policy.ghostDeferredPromotions();
+  }
+
+  public long admissionGhostNativeBytes() {
+    return policy.ghostNativeBytes();
   }
 
   public long ttlBacklog() {
@@ -421,17 +584,38 @@ public final class MaintenanceEventLoop
     return retirements.queuedRecords();
   }
 
-  public long retirementQueueCapacity() {
-    return retirements.capacityRecords();
+  public long retirementSafeSegmentCount() {
+    return retirements.safeSegmentDebt();
   }
 
-  public long repairQueueDepth() {
-    return repairDebt();
+  public long retirementReclaimBatchCount() {
+    return safeReclaimBatches;
+  }
+
+  public long retirementOldestSafeWaitNanos() {
+    return oldestSafeWaitNanos;
+  }
+
+  public long mailboxHeadUnpublishedCount() {
+    return mailboxHeadUnpublishedCount;
   }
 
   public long asyncMutationQueueDepth() {
     long depth = asyncSubmitted.get() - asyncDequeuedSequence.get();
     return Math.max(0L, depth);
+  }
+
+  public long asyncMutationPublishedRecords() {
+    return asyncSubmitted.get();
+  }
+
+  public long asyncMutationCompletedRecords() {
+    return asyncCompletedSequence;
+  }
+
+  public long asyncMutationLagRecords() {
+    long lag = asyncSubmitted.get() - asyncCompletedSequence;
+    return Math.max(0L, lag);
   }
 
   public long asyncMutationFailedCount() {
@@ -448,61 +632,153 @@ public final class MaintenanceEventLoop
       throw new NullPointerException("action/reject");
     }
     Throwable rejection = null;
-    try {
-      synchronized (asyncSubmissionLock) {
-        if (closing || stopping) {
-          rejection = new IllegalStateException("cache is closing");
+    boolean rejectionCounted = false;
+    synchronized (asyncFlushPublicationLock) {
+      if (closing || isStopping()) {
+        rejection = new IllegalStateException("cache is closing");
+      } else {
+        Throwable unavailable = terminalFailure.get();
+        if (unavailable != null) {
+          rejection = new com.red.ohc.api.CacheMaintenanceException(unavailable);
         } else {
-          Throwable unavailable = terminalFailure.get();
-          if (unavailable != null) {
-            rejection =
-                new com.red.ohc.api.CacheMaintenanceException(unavailable);
-          } else {
-            long sequence = asyncSubmitted.get() + 1L;
-            AsyncMutationTask task = new AsyncMutationTask(sequence, action, reject);
-            asyncMutations.offer(task);
-            // Publish the sequence only after the queue owns the task. Flush submission takes
-            // this same monitor, so it cannot capture a sequence with no corresponding task.
-            asyncSubmitted.set(sequence);
+          // Sequence allocation and the corresponding MPSC offer are one publication
+          // linearization point. A producer cannot reserve a sequence and then let a later
+          // producer enqueue its task first.
+          long sequence = asyncSubmitted.incrementAndGet();
+          boolean offered = false;
+          try {
+            Runnable sequenceHook = asyncSequenceAllocatedHookForTest;
+            if (sequenceHook != null) {
+              sequenceHook.run();
+            }
+            offerDurable(ActorMessage.async(new AsyncMutationTask(sequence, action, reject)));
+            offered = true;
+          } catch (Throwable failure) {
+            asyncRejected.incrementAndGet();
+            rejectionCounted = true;
+            if (!offered) {
+              // A failed publication consumed a sequence number but has no mailbox node. Mark it
+              // completed before entering terminal state so the observable prefix has no hole.
+              advanceAsyncDequeuedSequence(sequence);
+              advanceAsyncCompletedSequence(sequence);
+            }
+            recordTerminalFailure(failure);
+            rejection = failure;
           }
         }
       }
-    } catch (OutOfMemoryError error) {
-      asyncRejected.incrementAndGet();
-      recordTerminalFailure(error);
-      notifyAsyncRejection(reject, error);
-      return false;
     }
     if (rejection != null) {
-      asyncRejected.incrementAndGet();
+      if (!rejectionCounted) {
+        asyncRejected.incrementAndGet();
+      }
       notifyAsyncRejection(reject, rejection);
       return false;
     }
-    requestWork(WORK_ASYNC);
+    signal();
     return true;
   }
 
-  public void registerReader(ReaderSlot slot) {
-    readers.register(slot);
-    // Registration is cold relative to cache reads. It wakes the actor once so the actor can
-    // install the periodic scan state; subsequent access publication is ring-local only.
+  public int registerReader(ReaderSlot slot) {
+    int index = readers.register(slot);
+    slot.setAccessSignal(this::requestAccessWork);
+    // Registration is cold relative to cache reads. It also starts the first bounded lifecycle
+    // sweep immediately; later sweeps are driven by the actor-owned one-second deadline.
+    requestWork(WORK_ACCESS_SCAN | WORK_READER_LIFECYCLE);
+    return index;
+  }
+
+  public boolean registerReader(ThreadContext context) {
+    try {
+      registerReader(context.slot);
+    } catch (IllegalStateException failure) {
+      if (!closing) {
+        throw failure;
+      }
+      context.readerPublishedEpoch(0L);
+      return false;
+    }
+    context.readerPublishedEpoch(0L);
+    return true;
+  }
+
+  public void publishReaderState(ThreadContext context, long state) {
+    readers.setReaderState(context.slot, state);
+    context.readerPublishedEpoch(state & ReaderRegistry.EPOCH_MASK);
+  }
+
+  /** Publishes a reader state whose epoch and protection bit are already known to be valid. */
+  public void publishReaderStateKnownEpoch(ThreadContext context, long state) {
+    readers.setReaderStateKnownEpoch(context.slot, state);
+    context.readerPublishedEpochKnown(state & ReaderRegistry.EPOCH_MASK);
+  }
+
+  public void clearReaderState(ThreadContext context) {
+    readers.setReaderStateKnownEpoch(context.slot, 0L);
+    context.readerPublishedEpoch(0L);
+  }
+
+  /** Clears a rejected reader without exposing close-side slot unbinding as an internal error. */
+  public boolean clearReaderStateIfRegistered(ThreadContext context) {
+    boolean cleared = readers.clearReaderStateIfRegistered(context.slot);
+    context.readerPublishedEpoch(0L);
+    return cleared;
+  }
+
+  public void setWriterActive(ThreadContext context, boolean active) {
+    readers.setWriterAdmission(context.slot, active);
+  }
+
+  private void requestAccessWork() {
     requestWork(WORK_ACCESS_SCAN);
   }
 
-  /** ReaderGuard calls this only after an active read becomes quiescent during close. */
-  public void readerQuiescent() {
-    if (stopping) {
+  /** ReaderGuard calls this after a marked reader becomes quiescent or drops value protection. */
+  public void readerQuiescent(ReaderSlot slot) {
+    if (readers.consumeReaderNotification(slot)) {
+      readerNotificationSequence.incrementAndGet();
+      requestWork(WORK_READER_NOTIFICATION | WORK_CLOCK);
+    }
+    long signals = readerExitSignals.get();
+    if ((signals & READER_SIGNAL_STOPPING) != 0L) {
       // shutdownAndFree parks outside WakeGate, so this must not rely on a REQUIRED gate
       // transition to wake the actor after its final reader leaves.
       LockSupport.unpark(thread);
     }
+    signalShutdownProgress(signals);
   }
 
   public void recordNativeAllocationFailure() {
     nativeAllocationFailures.incrementAndGet();
   }
 
+  /** Records one successful SIZE eviction after its CHM unlink has become durable. */
+  public void recordSizeEviction(long keyAllocation, long valueAllocation) {
+    if (keyAllocation < 0L || valueAllocation < 0L) {
+      throw new IllegalArgumentException("negative logical eviction allocation");
+    }
+    recordSizeEvictionWeight(saturatingAdd(keyAllocation, valueAllocation));
+  }
+
+  private void recordSizeEvictionWeight(long logicalBytes) {
+    evictionCount.incrementAndGet();
+    addSaturated(evictionWeight, logicalBytes);
+  }
+
+  private static void addSaturated(AtomicLong counter, long delta) {
+    for (;;) {
+      long current = counter.get();
+      long next = saturatingAdd(current, delta);
+      if (counter.compareAndSet(current, next)) {
+        return;
+      }
+    }
+  }
+
   public void throwIfUnavailable() {
+    if (!writesUnavailable) {
+      return;
+    }
     Throwable failure = terminalFailure.get();
     if (failure != null) {
       throw new com.red.ohc.api.CacheMaintenanceException(failure);
@@ -510,7 +786,7 @@ public final class MaintenanceEventLoop
     if (closing) {
       throw new IllegalStateException("cache is closing");
     }
-    if (stopping) {
+    if (isStopping()) {
       throw new IllegalStateException("cache maintenance is stopping");
     }
   }
@@ -520,22 +796,41 @@ public final class MaintenanceEventLoop
       throw new NullPointerException("failure");
     }
     FlushRequest request;
-    List<AsyncMutationTask> pending;
-    synchronized (asyncSubmissionLock) {
+    synchronized (asyncFlushPublicationLock) {
+      writesUnavailable = true;
       if (!terminalFailure.compareAndSet(null, failure)) {
         return;
       }
       unhealthy.set(true);
       request = flushRequest.getAndSet(null);
-      pending = drainPendingAsyncTasks();
     }
     com.red.ohc.api.CacheMaintenanceException unavailable =
         new com.red.ohc.api.CacheMaintenanceException(failure);
     if (request != null) {
       request.future.completeExceptionally(unavailable);
     }
-    rejectAsyncTasks(pending, unavailable);
+    // MpscUnboundedArrayQueue has one consumer: only the actor (or the actor-owned teardown
+    // path) may poll it. A producer-side failure merely wakes the actor, which drains pending
+    // messages in its terminal branch without creating a second consumer.
+    if (Thread.currentThread() == thread || !actorStarted.get()) {
+      failPendingMailbox(unavailable);
+    }
     signal();
+    // Terminal cleanup is not ordinary continuation work and must bypass the fixed cadence even
+    // when WakeGate is already in REQUIRED state and signal() therefore has nothing to unpark.
+    LockSupport.unpark(thread);
+  }
+
+  void setAsyncSequenceAllocatedHookForTest(Runnable hook) {
+    asyncSequenceAllocatedHookForTest = hook;
+  }
+
+  void setLifecycleMessageOfferHookForTest(Runnable hook) {
+    lifecycleMessageOfferHookForTest = hook;
+  }
+
+  void setFlushRetirementExtensionHookForTest(Runnable hook) {
+    flushRetirementExtensionHookForTest = hook;
   }
 
   /** Reliable removal only: ADD/UPDATE are published after their data-plane mutation. */
@@ -560,58 +855,135 @@ public final class MaintenanceEventLoop
         || (flags & ~(Entry.PENDING_ADD | Entry.PENDING_UPDATE)) != 0) {
       throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
     }
-    if (!entry.publishMutation(flags)) {
+    if (!prepareMutation(entry, flags)) {
       return;
     }
-    boolean offered;
+    enqueueMutationHint(entry, wake);
+  }
+
+  /** Marks a mutation before the corresponding pointer or CHM publication is exposed. */
+  public boolean prepareMutation(Entry entry, int flags) {
+    if ((flags & (Entry.PENDING_ADD | Entry.PENDING_UPDATE)) == 0
+        || (flags & ~(Entry.PENDING_ADD | Entry.PENDING_UPDATE)) != 0) {
+      throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
+    }
+    return entry.publishMutation(flags);
+  }
+
+  /** Completes the advisory queue handoff after the data-plane publication. */
+  public void enqueueMutationHint(Entry entry, boolean wake) {
     try {
-      offered = queue.offer(entry);
-      if (!offered) {
-        handleMutationTransportFailure(entry, wake, null);
-      }
-    } catch (OutOfMemoryError error) {
-      handleMutationTransportFailure(entry, wake, error);
+      offerDurable(ActorMessage.mutation(entry));
+    } catch (Throwable failure) {
+      recordTerminalFailure(failure);
     }
-  }
-
-  private void handleMutationTransportFailure(Entry entry, boolean wake, OutOfMemoryError error) {
-    // The mapping/value pointer is already visible. A maintenance transport failure is
-    // advisory for this operation: keep the put result synchronous and fail closed for
-    // subsequent writes while close() frees the authoritative CHM/native state.
-    markMutationForRepair(entry, wake);
-    if (error != null) {
-      recordTerminalFailure(error);
-    }
-  }
-
-  private void markMutationForRepair(Entry entry) {
-    markMutationForRepair(entry, true);
-  }
-
-  private void markMutationForRepair(Entry entry, boolean wake) {
-    int shard = entry.keyHash() & repairShardMask;
-    boolean firstRepair = entry.queueOfferFailed();
-    if (firstRepair) {
-      repairDebtTotal.incrementAndGet();
-      if (repairShardDirty.compareAndSet(shard, 0, 1)) {
-        dirtyRepairShardQueue.offer(repairShardTokens[shard]);
-      }
-    }
-    repairVersion.incrementAndGet();
-    repairNeeded.set(true);
     if (wake) {
-      requestWork(WORK_MUTATION);
-    }
-    // A marker owns exactly one repair-queue item. Subsequent coalesced mutations only
-    // update the Entry flags; enqueueing duplicates would consume the bounded shard queue
-    // without adding repair debt or useful maintenance work.
-    if (firstRepair) {
-      enqueueRepair(entry, shard);
+      signal();
     }
   }
 
-  private void enqueueRepair(Entry entry, int shard) {
-    repairQueues[shard].offer(entry);
+  /**
+   * Checks the writer-side fast path for a TTL extension that remains in the actor's timer slot.
+   * The actor still owns all timer mutations; this method only reads the published timer
+   * location. A caller must hold the Entry writer claim and must have proved that the old value is
+   * live and that the new deadline is an extension.
+   */
+  public boolean canMergeTtlUpdate(
+      Entry entry, long oldDeadlineNanos, long newDeadlineNanos, long writerNowNanos) {
+    if (entry == null
+        || oldDeadlineNanos == NO_DEADLINE
+        || newDeadlineNanos == NO_DEADLINE
+        || newDeadlineNanos < oldDeadlineNanos
+        || writerNowNanos == Long.MIN_VALUE
+        || oldDeadlineNanos <= writerNowNanos) {
+      return false;
+    }
+    return wheel.hasSameScheduledSlot(entry, newDeadlineNanos);
+  }
+
+  /** Publishes a writer mutation through the FIFO mailbox after its lane slot is durable. */
+  public void enqueueWriterMutationHint(
+      WriterLifecycleLane lane,
+      Entry entry,
+      long keyHash64,
+      long valueAllocation,
+      long mutationVersion,
+      boolean wake) {
+    if (lane == null) {
+      throw new NullPointerException("lane");
+    }
+    if (entry == null) {
+      throw new NullPointerException("entry");
+    }
+    long sequence = 0L;
+    boolean reserved = false;
+    try {
+      sequence = lane.reserve();
+      reserved = true;
+      WriterLifecycleLane.MailboxMessage mailboxMessage =
+          lane.commitMutationForMailbox(
+              sequence, entry, keyHash64, valueAllocation, mutationVersion);
+      reserved = false;
+      enqueueWriterLifecycleMessage(mailboxMessage, wake);
+    } catch (Throwable error) {
+      if (reserved) {
+        WriterLifecycleLane.MailboxMessage mailboxMessage = lane.cancelForMailbox(sequence);
+        try {
+          enqueueWriterLifecycleMessage(mailboxMessage, false);
+        } catch (Throwable cancelFailure) {
+          error.addSuppressed(cancelFailure);
+        }
+      }
+      recordTerminalFailure(error);
+      throwUnchecked(error);
+    }
+  }
+
+  /** Commits a previously written writer lifecycle slot and gives its consumption to the actor. */
+  public void commitWriterLifecycle(WriterLifecycleLane lane, long sequence, boolean wake) {
+    if (lane == null) {
+      throw new NullPointerException("lane");
+    }
+    WriterLifecycleLane.MailboxMessage mailboxMessage;
+    try {
+      mailboxMessage = lane.commitForMailbox(sequence);
+    } catch (Throwable failure) {
+      recordTerminalFailure(failure);
+      throwUnchecked(failure);
+      return;
+    }
+    try {
+      enqueueWriterLifecycleMessage(mailboxMessage, wake);
+    } catch (Throwable ignored) {
+      // The lane slot was published before the mailbox offer. Leave that slot for terminal or
+      // shutdown cleanup instead of asking the caller to overwrite it with a cancellation.
+    }
+  }
+
+  /** Cancels a previously reserved writer lifecycle slot and gives its consumption to the actor. */
+  public void cancelWriterLifecycle(WriterLifecycleLane lane, long sequence, boolean wake) {
+    if (lane == null) {
+      throw new NullPointerException("lane");
+    }
+    WriterLifecycleLane.MailboxMessage mailboxMessage = lane.cancelForMailbox(sequence);
+    enqueueWriterLifecycleMessage(mailboxMessage, wake);
+  }
+
+  private void enqueueWriterLifecycleMessage(
+      WriterLifecycleLane.MailboxMessage mailboxMessage, boolean wake) {
+    try {
+      Runnable hook = lifecycleMessageOfferHookForTest;
+      if (hook != null) {
+        hook.run();
+      }
+      offerDurable(mailboxMessage);
+    } catch (Throwable failure) {
+      recordTerminalFailure(failure);
+      throwUnchecked(failure);
+    }
+    if (wake) {
+      signal();
+    }
   }
 
   /** Cancels a reliable removal reservation before CHM visibility changes. */
@@ -619,26 +991,192 @@ public final class MaintenanceEventLoop
     entry.cancelPendingClaim();
   }
 
-  /** Publishes a pre-reserved block to the cache-owned native retirement transport. */
-  public void retireValue(
-      com.red.ohc.runtime.ThreadContext context, long address, long allocation) {
-    retirements.appendValue(context.retirement(), address, allocation);
-    context.markRetirementPublished();
+  /** Wakes the actor after the lifecycle commit has become visible. */
+  public void requestLifecycleMaintenance() {
+    requestWork(WORK_REMOVAL);
   }
 
-  /**
-   * The producer calls this exactly once after publishing every CHM/pointer mutation and its
-   * retirement records. It only publishes a coalesced work class; the actor waits for its next
-   * one-millisecond window before inspecting the queues.
-   */
-  public void afterWrite(com.red.ohc.runtime.ThreadContext context) {
-    boolean retirementWake = context.consumeRetirementPublished();
-    requestWork(retirementWake ? WORK_MUTATION | WORK_RETIREMENT : WORK_MUTATION);
+  private boolean isPostFlushAsync(Object candidate, FlushRequest batchFlush) {
+    if (!(candidate instanceof ActorMessage)) {
+      return false;
+    }
+    ActorMessage message = (ActorMessage) candidate;
+    if (message.kind != ActorMessage.ASYNC) {
+      return false;
+    }
+    return batchFlush != null && sequenceAfter(message.async.sequence, batchFlush.sequence);
   }
 
-  /** Low-frequency callers without a cache ThreadContext always request a wake. */
-  public void afterWrite() {
-    requestWork(WORK_MUTATION | WORK_RETIREMENT);
+  private int drainMailbox(int limit) {
+    int processed = 0;
+    long durableConsumed = 0L;
+    FlushRequest batchFlush = flushRequest.get();
+    // Only lifecycle records can advance a writer resource's captured watermark. Ordinary
+    // mutation, async, and flush messages must not reopen a blocked resource sweep.
+    boolean lifecycleProgress = false;
+    mailboxFenceBlocked = false;
+    mailboxHeadUnpublished = false;
+    int budget = Math.min(limit, MAILBOX_MAX_PER_TURN);
+    try {
+      while (processed < budget) {
+        Throwable terminal = terminalFailure.get();
+        if (terminal != null) {
+          processed +=
+              failPendingMailbox(
+                  new com.red.ohc.api.CacheMaintenanceException(terminal));
+          break;
+        }
+        // Decrement the durable depth once for the whole actor-local batch instead of touching a
+        // contended atomic on every FIFO poll. Terminal cleanup uses pollMailbox() separately and
+        // therefore keeps its exact per-message accounting.
+        Object next = mailbox.relaxedPeek();
+        if (next == null) {
+          if (durableMailboxDepth.get() != 0L) {
+            mailboxHeadUnpublished = true;
+            mailboxHeadUnpublishedCount = saturatingAdd(mailboxHeadUnpublishedCount, 1L);
+          }
+          break;
+        }
+        if (isPostFlushAsync(next, batchFlush)) {
+          mailboxFenceBlocked = true;
+          break;
+        }
+        Object message = mailbox.relaxedPoll();
+        if (message == null) {
+          if (durableMailboxDepth.get() != 0L) {
+            mailboxHeadUnpublished = true;
+            mailboxHeadUnpublishedCount = saturatingAdd(mailboxHeadUnpublishedCount, 1L);
+          }
+          break;
+        }
+        if (!(message instanceof ActorMessage)
+            || ((ActorMessage) message).kind != ActorMessage.ADVISORY) {
+          durableConsumed++;
+        }
+        processed++;
+        terminal = terminalFailure.get();
+        if (terminal != null) {
+          failMailboxMessage(
+              message, new com.red.ohc.api.CacheMaintenanceException(terminal));
+          processed +=
+              failPendingMailbox(
+                  new com.red.ohc.api.CacheMaintenanceException(terminal));
+          break;
+        }
+        if (message instanceof WriterLifecycleLane.MailboxMessage) {
+          WriterLifecycleLane.MailboxMessage lifecycleMessage =
+              (WriterLifecycleLane.MailboxMessage) message;
+          processLifecycleMessage(
+              lifecycleMessage.owner(), lifecycleMessage.sequence(), lifecycleMessage);
+          lifecycleProgress = true;
+        } else {
+          ActorMessage actorMessage = (ActorMessage) message;
+          switch (actorMessage.kind) {
+            case ActorMessage.ADVISORY:
+              // The coalesced work bits are already visible in requestedWork. The marker only keeps
+              // advisory wakeups on the same FIFO transport as durable messages.
+              break;
+            case ActorMessage.MUTATION:
+              if (actorMessage.entry != null) {
+                processEntry(actorMessage.entry);
+              }
+              break;
+            case ActorMessage.ASYNC:
+              processAsyncMutation(actorMessage.async);
+              break;
+            case ActorMessage.FLUSH:
+              lastConsumedFlushMarker = actorMessage.flush;
+              // A flush can be published while an earlier mailbox action is running.  The
+              // marker is the FIFO boundary for that publication, so refresh the batch fence at
+              // this single boundary rather than reading flushRequest for every mailbox item.
+              FlushRequest currentFlush = flushRequest.get();
+              batchFlush = currentFlush == null ? actorMessage.flush : currentFlush;
+              break;
+            default:
+              throw new AssertionError("unknown actor message kind: " + actorMessage.kind);
+          }
+        }
+      }
+    } finally {
+      if (durableConsumed != 0L) {
+        durableMailboxDepth.addAndGet(-durableConsumed);
+        if (lifecycleProgress) {
+          requestWriterResourceScan();
+        }
+      }
+    }
+    if (terminalFailure.get() == null) {
+      extendPendingFlushForActorRetirements();
+      publishLiveWeight();
+      completeFlushIfIdle();
+    }
+    return processed;
+  }
+
+  private int reclaimSafeSegmentsInline(int maximumSegments) {
+    if (maximumSegments <= 0) {
+      return 0;
+    }
+    RetirementJournal.ReclaimResult reclaimed =
+        retirements.reclaimActorSafeBatchResult(memory, maximumSegments);
+    if (reclaimed.segments != 0) {
+      safeReclaimSegments = saturatingAdd(safeReclaimSegments, reclaimed.segments);
+      safeReclaimBatches = saturatingAdd(safeReclaimBatches, 1L);
+      requestWriterResourceScan();
+    }
+    return reclaimed.segments;
+  }
+
+  private void processLifecycleMessage(
+      WriterLifecycleLane lane,
+      long expectedSequence,
+      WriterLifecycleLane.MailboxMessage mailboxMessage) {
+    if (terminalFailure.get() != null) {
+      // Leave the lane record untouched. The close/shutdown path will drain mailbox-owned
+      // lifecycle records with its explicit ownership mode after the actor stops retrying work.
+      return;
+    }
+    if (lane == null) {
+      recordTerminalFailure(new IllegalStateException("lifecycle message has no lane"));
+      return;
+    }
+    if (mailboxMessage == null
+        || mailboxMessage.owner() != lane
+        || mailboxMessage.sequence() != expectedSequence) {
+      throw new IllegalStateException("lifecycle mailbox node does not match its lane sequence");
+    }
+    if (!lane.poll(writerRemovalRecord)) {
+      throw new IllegalStateException(
+          "lifecycle mailbox record is not published: " + expectedSequence);
+    }
+    try {
+      if (writerRemovalRecord.sequence != expectedSequence) {
+        IllegalStateException mismatch =
+            new IllegalStateException(
+                "lifecycle mailbox sequence mismatch: expected "
+                    + expectedSequence
+                    + ", actual "
+                    + writerRemovalRecord.sequence);
+        // The lane is the ownership record. Apply the actual head before surfacing the invariant
+        // violation so a terminal transition cannot strand native lifecycle state.
+        try {
+          processWriterLifecycleRecord(lane);
+        } catch (Throwable failure) {
+          mismatch.addSuppressed(failure);
+        }
+        throw mismatch;
+      }
+      processWriterLifecycleRecord(lane);
+    } finally {
+      lane.release(writerRemovalRecord);
+      lane.finishReadyDrain();
+    }
+  }
+
+  /** Publishes one batch-level wake for deferred mutation hints. */
+  public void requestMutationMaintenance() {
+    requestWork(WORK_MUTATION | WORK_REMOVAL);
+    requestCapacityMaintenanceIfOverTarget();
   }
 
   /** Requests an actor pass after a writer-side resource pressure event. */
@@ -646,152 +1184,179 @@ public final class MaintenanceEventLoop
     requestWork(WORK_MUTATION | WORK_RETIREMENT | WORK_CLOCK);
   }
 
-  /** Page trimming is requested only after a native allocation-limit failure. */
-  public void requestAllocationPressure() {
-    if (allocationPressureRequested.compareAndSet(false, true)) {
-      requestWork(WORK_PRESSURE | WORK_CLOCK);
-    }
-  }
-
-  /** Idle writer credit is reclaimed only after a budget reservation failure. */
-  public void requestBudgetPressure() {
-    if (budgetPressureRequested.compareAndSet(false, true)) {
-      requestWork(WORK_PRESSURE | WORK_CLOCK);
-    }
-  }
-
-  /**
-   * Reserves native retirement records before an index mutation publishes a replacement or removal.
-   */
-  public boolean prepareRetirement(com.red.ohc.runtime.ThreadContext context, int records) {
-    return retirements.tryReserve(context.retirement(), records);
-  }
-
-  /**
-   * Reserves removal cleanup and a reliable queue slot before the caller changes CHM visibility.
-   */
-  public boolean prepareReliableRemoval(
-      com.red.ohc.runtime.ThreadContext context, Entry entry) {
-    if (context == null || entry == null) {
-      throw new NullPointerException("context/entry");
-    }
-    throwIfUnavailable();
-    if (!reliableRemovals.tryReserve(context.reliableRemoval())) {
-      return false;
-    }
-    try {
-      if (!reserveMutation(entry, Entry.PENDING_REMOVE)) {
-        reliableRemovals.cancel(context.reliableRemoval());
-        requestWork(WORK_REMOVAL);
-        return false;
+  /** Requests one coalesced capacity drain without creating a mailbox node per write. */
+  public void requestCapacityMaintenance() {
+    int current;
+    do {
+      current = requestedWork.get();
+      if ((current & WORK_CAPACITY) != 0) {
+        return;
       }
-      return true;
-    } catch (Throwable failure) {
-      if (context.reliableRemoval().active()) {
-        reliableRemovals.cancel(context.reliableRemoval());
-      }
-      requestWork(WORK_REMOVAL);
-      throw failure;
+    } while (!requestedWork.compareAndSet(current, current | WORK_CAPACITY));
+    signal();
+  }
+
+  /** Wakes a capacity pass only when the entry it stopped behind has been released. */
+  public void requestCapacityMaintenanceIfBlocked(Entry entry) {
+    if (capacityBlockedEntry == entry) {
+      requestCapacityMaintenance();
     }
   }
 
-  /**
-   * Commits a pre-reserved removal record; the actor publishes its retirement records only after
-   * listener and policy work has completed.
-   *
-   * <p>The notification may deserialize the supplied value and the entry key. The single
-   * maintenance owner therefore observes the notification before either native address becomes
-   * reclaimable.
-   */
-  public void publishRemovalAndRetire(
-      com.red.ohc.runtime.ThreadContext context,
-      Entry entry,
-      boolean wake,
-      long valueAddress,
-      long valueAllocation,
-      RemovalCause cause) {
-    entry.completePendingClaim();
-    reliableRemovals.commit(
-        context.reliableRemoval(), entry, valueAddress, valueAllocation, cause);
-    if (wake) {
-      requestWork(WORK_REMOVAL);
+  private void requestCapacityMaintenanceIfOverTarget() {
+    LogicalAdmission admission = logicalAdmission;
+    if (admission != null && admission.needsCapacityWake()) {
+      requestCapacityMaintenance();
     }
   }
 
-  public void cancelReliableRemoval(
-      com.red.ohc.runtime.ThreadContext context, Entry entry) {
-    entry.cancelPendingClaimIfPresent();
-    if (context.reliableRemoval().active()) {
-      reliableRemovals.cancel(context.reliableRemoval());
-      requestWork(WORK_REMOVAL);
-    }
-  }
 
-  public void cancelRetirement(com.red.ohc.runtime.ThreadContext context) {
-    retirements.cancel(context.retirement());
-  }
-
-  /** Control-plane barrier; callers share one pending barrier and never enter the hint queue. */
+  /** Control-plane barrier; the marker is ordered with all earlier mailbox messages. */
   public CompletableFuture<Void> flush() {
-    Throwable failure = terminalFailure.get();
-    if (failure != null) {
-      CompletableFuture<Void> failed = new CompletableFuture<>();
-      failed.completeExceptionally(new com.red.ohc.api.CacheMaintenanceException(failure));
-      return failed;
-    }
-    synchronized (asyncSubmissionLock) {
-      failure = terminalFailure.get();
-      if (failure != null) {
-        CompletableFuture<Void> failed = new CompletableFuture<>();
-        failed.completeExceptionally(
-            new com.red.ohc.api.CacheMaintenanceException(failure));
-        return failed;
+    synchronized (asyncFlushPublicationLock) {
+      for (;;) {
+        Throwable failure = terminalFailure.get();
+        if (failure != null) {
+          CompletableFuture<Void> failed = new CompletableFuture<>();
+          failed.completeExceptionally(
+              new com.red.ohc.api.CacheMaintenanceException(failure));
+          return failed;
+        }
+        FlushRequest existing = flushRequest.get();
+        WriterLifecycleJournal lifecycle = writerLifecycleJournal;
+        long[] lifecycleWatermark = lifecycle == null ? null : lifecycle.captureWatermark();
+        FlushRequest created =
+            new FlushRequest(
+                asyncSubmitted.get(),
+                existing == null ? new CompletableFuture<>() : existing.future,
+                lifecycleWatermark,
+                retirements.captureAndCutWatermark());
+        if (!flushRequest.compareAndSet(existing, created)) {
+          // The actor can clear a completed request between the read and publication. Retry from
+          // the new snapshot; never dereference a request that may have just been cleared.
+          continue;
+        }
+        try {
+          if (existing == null) {
+            offerDurable(ActorMessage.flush(created));
+          } else {
+            requestWork(WORK_FLUSH | WORK_CLOCK);
+          }
+          signal();
+        } catch (Throwable error) {
+          recordTerminalFailure(error);
+        }
+        return created.future;
       }
-      FlushRequest existing = flushRequest.get();
-      if (existing != null) {
-        existing.sequence = asyncSubmitted.get();
-        requestWork(WORK_FLUSH | WORK_CLOCK);
-        return existing.future;
-      }
-      FlushRequest created =
-          new FlushRequest(asyncSubmitted.get(), new CompletableFuture<>());
-      if (!flushRequest.compareAndSet(null, created)) {
-        return flushRequest.get().future;
-      }
-      requestWork(WORK_FLUSH | WORK_CLOCK);
-      return created.future;
     }
   }
 
   public Snapshot snapshot() {
-    long repairDebt = repairDebt();
+    WriterLifecycleJournal lifecycle = writerLifecycleJournal;
+    long lifecyclePublishedRecords = lifecycle == null ? 0L : lifecycle.publishedRecordsTotal();
+    long lifecycleCompletedRecords = lifecycle == null ? 0L : lifecycle.completedRecordsTotal();
+    long lifecycleLagRecords = lifecycle == null ? 0L : lifecycle.lagRecords();
+    long lifecycleAllocatedSegments = lifecycle == null ? 0L : lifecycle.allocatedSegments();
+    long lifecycleHeadOfLineStops = lifecycle == null ? 0L : lifecycle.headOfLineStopCount();
     return new Snapshot(
         hits,
         misses,
-        policy.evictions(),
-        policy.evictionWeight(),
+        evictionCount.get(),
+        evictionWeight.get(),
         physicalExpired,
         publishedLiveWeight,
         timeoutLagMillis,
         unhealthy.get(),
-        queue.size() + repairDebt,
+        queueDepth(),
         ttlBacklog(),
         nativeAllocationFailures.get(),
-        entryResidenceCount.get(),
-        totalEntryResidenceTimeMillis.get());
+        residenceSampleCount.get(),
+        1.0d / ThreadContext.RESIDENCE_SAMPLE_INTERVAL,
+        averageResidenceSampleMillis(),
+        maintenancePassWorkNanos,
+        publishedMaintenanceActiveNanosTotal,
+        publishedMaintenanceParkNanosTotal,
+        publishedMaintenanceImmediateContinuationCount,
+        retirements.lastSealScannedLanes(),
+        retirements.lastSealSealedLanes(),
+        retirements.lastSealRecords(),
+        retirements.sealRecordsTotal(),
+        retirements.reclaimRecordsTotal(),
+        retirements.sealScannedLanesTotal(),
+        retirements.sealHeadOfLineStops(),
+        retirementReclaimBlockedCount,
+        retirementReclaimBlockedNanos,
+        retirementRetryWakeCount,
+        readers.activeReaderCount(),
+        accessRingDroppedCount,
+        retirementQueueDepth(),
+        retirements.publishedRecordsTotal(),
+        retirements.completedRecordsTotal(),
+        retirements.lagRecords(),
+        retirements.unsafeRecords(),
+        retirements.unsafeBytes(),
+        retirements.safeRecords(),
+        retirements.safeBytes(),
+        retirements.claimedRecords(),
+        retirements.claimedBytes(),
+        retirements.actorReclaimedRecordsTotal(),
+        retirements.allocatedSegments(),
+        retirements.reusedSegments(),
+        retirements.trimmedSegments(),
+        asyncMutationQueueDepth(),
+        asyncMutationPublishedRecords(),
+        asyncMutationCompletedRecords(),
+        asyncMutationLagRecords(),
+        policy.ghostNativeBytes(),
+        policy.ghostAllocationTrims(),
+        policy.ghostAllocationDrops(),
+        policy.ghostRehashPending(),
+        policy.skipSuppressedAccesses(),
+        policy.ghostDeferredPromotions(),
+        lifecyclePublishedRecords,
+        lifecycleCompletedRecords,
+        lifecycleLagRecords,
+        lifecycleAllocatedSegments,
+        lifecycleHeadOfLineStops,
+        memory.pageAllocatedCount(),
+        memory.pageReusedCount(),
+        memory.pageReadyCount(),
+        memory.pageTrimmedCount(),
+        writerResources == null ? 0L : writerResources.activeCount(),
+        writerResources == null ? 0L : writerResources.retiringCount(),
+        writerResources == null ? 0L : writerResources.pooledCount(),
+        retirements.generatedBytesTotal(),
+        retirements.completedBytesTotal(),
+        retirementRateSampler.generatedBytesPerSecond(),
+        retirementRateSampler.completedBytesPerSecond(),
+        nativeDebtBudgetBytes,
+        nativeDebtHeadroomBytes(),
+        retirements.safeSegmentDebt(),
+        safeReclaimBatches,
+        oldestSafeWaitNanos,
+        mailboxHeadUnpublishedCount);
   }
 
   @Override
   public void run() {
     wakeGate.requireProcessing();
-    while (!stopping || hasShutdownWork()) {
-      if (stopping && terminalFailure.get() != null) {
+    boolean previousBatchCompleted = false;
+    while (!isStopping() || hasShutdownWork()) {
+      monotonicSampledThisPass = false;
+      if (isStopping()) {
+        previousBatchCompleted = false;
+      }
+      if (isStopping() && terminalFailure.get() != null) {
+        previousBatchCompleted = false;
         break;
       }
       // A terminal maintenance failure makes the cache unavailable, but the actor remains
-      // alive until close() owns the final native teardown. Park without retrying the
-      // corrupted maintenance state while preserving in-flight reader safety.
-      if (terminalFailure.get() != null) {
+      // alive until close() owns the final native teardown. Drain pending messages as the sole
+      // mailbox consumer, then park without retrying the corrupted maintenance state.
+      Throwable terminal = terminalFailure.get();
+      if (terminal != null) {
+        previousBatchCompleted = false;
+        failPendingMailbox(new com.red.ohc.api.CacheMaintenanceException(terminal));
         parked = true;
         try {
           LockSupport.park(this);
@@ -800,38 +1365,74 @@ public final class MaintenanceEventLoop
         }
         continue;
       }
-      if (!hasPendingWork()) {
+      if (durableMailboxDepth.get() != 0L || mailbox.relaxedPeek() != null) {
+        long mailboxStartNanos = System.nanoTime();
+        int mailboxProcessed = 0;
+        try {
+          sampleMonotonicNow();
+          mailboxProcessed = drainMailbox(MAILBOX_MAX_PER_TURN);
+          if (mailboxProcessed > 0 && previousBatchCompleted) {
+            maintenanceImmediateContinuationCount =
+                saturatingAdd(maintenanceImmediateContinuationCount, 1L);
+            previousBatchCompleted = false;
+          }
+        } catch (Throwable failure) {
+          // Mailbox work is actor-owned too. A failed mutation/lifecycle dispatch must enter the
+          // same terminal path as a failed maintenance pass instead of killing the actor thread.
+          recordTerminalFailure(failure);
+        } finally {
+          long endNanos = System.nanoTime();
+          long elapsed = Math.max(0L, endNanos - mailboxStartNanos);
+          maintenanceBudgetController.observeTurn(endNanos, elapsed, mailboxProcessed);
+          updateMaintenanceBudget(endNanos);
+          maintenancePassWorkNanos = elapsed;
+          maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
+          publishActorSnapshots();
+        }
+        if (mailboxProcessed > 0) {
+          idleBackoff.reset();
+        }
+        if (terminalFailure.get() != null) {
+          previousBatchCompleted = false;
+          continue;
+        }
+      }
+      WorkDecision decision = captureWorkDecision(true);
+      if (!decision.isRunnable()) {
+        previousBatchCompleted = false;
         parkUntilWork();
         continue;
       }
-
-      // Cadence is real elapsed time. The cache ticker remains the semantic time source for TTL
-      // and QSBR tests, and may legitimately be frozen by a caller.
-      long windowNow = System.nanoTime();
-      windowScheduler.request(windowNow);
-      if (!windowScheduler.isDue(windowNow)) {
-        parkUntilWindow(windowNow);
-        continue;
+      if (previousBatchCompleted) {
+        maintenanceImmediateContinuationCount =
+            saturatingAdd(maintenanceImmediateContinuationCount, 1L);
+        previousBatchCompleted = false;
       }
-
-      int work;
+      idleBackoff.reset();
+      long passStartNanos = System.nanoTime();
+      int maintenanceWorkUnits = 0;
+      boolean batchCompleted = false;
       try {
-        monotonicSampledThisPass = true;
-        nowNanos = ticker.nanos();
-        WorkPlan plan = selectWorkPlan();
+        sampleMonotonicNow();
+        WorkPlan plan = decision.plan;
         if (!plan.hasActions()) {
-          windowScheduler.complete(windowNow, hasContinuationWork(), nextRetryDeadlineNanos());
           continue;
         }
-        work = maintenancePass(plan);
+        maintenanceWorkUnits = maintenancePass(plan);
+        batchCompleted = true;
       } catch (Throwable failure) {
         recordTerminalFailure(failure);
-        work = 0;
       } finally {
-        finishActorRetirementBatch();
+        long endNanos = System.nanoTime();
+        long elapsed = Math.max(0L, endNanos - passStartNanos);
+        maintenanceBudgetController.observeTurn(endNanos, elapsed, maintenanceWorkUnits);
+        updateMaintenanceBudget(endNanos);
+        maintenancePassWorkNanos = elapsed;
+        maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
+        publishActorSnapshots();
       }
-      long passEnd = System.nanoTime();
-      windowScheduler.complete(passEnd, hasContinuationWork(), nextRetryDeadlineNanos());
+      previousBatchCompleted =
+          batchCompleted && !isStopping() && terminalFailure.get() == null;
     }
     shutdownAndFree();
   }
@@ -840,74 +1441,651 @@ public final class MaintenanceEventLoop
   private int maintenancePass() {
     monotonicSampledThisPass = false;
     sampleMonotonicNow();
-    return maintenancePass(selectWorkPlan());
+    if (retirements.hasOpenProducerRecords()) {
+      retirements.cutAllProducersAtWatermark();
+      retirements.requestSeal();
+      requestWork(WORK_RETIREMENT);
+    }
+    return maintenancePass(captureWorkDecision(true).plan);
   }
 
-  /** Executes only the actions selected at the preceding one-millisecond window boundary. */
+  /** Executes one fair turn. Each source is drained only through its captured cut. */
   private int maintenancePass(WorkPlan plan) {
     refreshClock(plan);
+    TurnCuts turn = captureTurnCuts(plan);
+    ReaderRegistry.SlotTableSnapshot accessSlots = turn.accessSlots;
+    turn.accessSlots = null;
+    prepareMaintenanceQuotas(plan, turn);
     int work = 0;
-    if (weakValueQueue != null) {
-      work += drainWeakValueReferences(batchLimits.general);
-    }
-    if (plan.budget) {
-      boolean budgetRequested = budgetPressureRequested.getAndSet(false);
-      if (!countBounded && budgetRequested && budget.reclaimIdleCredits() != 0L) {
-        work++;
-      }
-    }
-    if (plan.hasPolicyMutations()) {
+    boolean policyChanged = plan.hasAdvisoryPolicyMutations();
+    if (policyChanged) {
       policy.beginWriteBatch();
     }
     if (plan.removals) {
-      work += drainReliableRemovals(batchLimits.general);
+      work +=
+          drainWriterLifecycleJournal(
+              turn.lifecycleWatermark, plan.lifecycleQuota);
+      policyChanged |= policyDirty;
     }
-    if (plan.mutations) {
-      work += drainMutations(batchLimits.general);
-    }
-    if (plan.repair) {
-      work += repairMutations(batchLimits.general);
-    }
-    if (plan.deferred) {
-      work += drainDeferredMutations(batchLimits.general);
-    }
-    if (plan.access) {
-      work += drainAccesses(batchLimits.access);
-    }
-    // Expiry/eviction runs after mutation repair so actor policy never observes a stale
-    // pointer or pending flag.
-    if (plan.ttl) {
-      work += wheel.advance(nowMillis, batchLimits.general, this);
-    }
-    if (plan.seal) {
-      work += sealRetirements(batchLimits.general);
-    }
-    if (plan.reclaim) {
-      if (advanceEpochIfDue(nowNanos)) {
-        work++;
-      }
-      if (reclaimWorkDue(nowNanos)) {
-        work += reclaim(batchLimits.general);
+    extendPendingFlushForActorRetirements();
+    // Publish the turn's fixed retirement cut before advisory policy/TTL work. SAFE segments stay
+    // on the actor-owned retirement queue and are reclaimed by the bounded turn below.
+    work += drainRetirementTurn(plan, turn);
+    if (plan.capacity) {
+      work += drainCapacityPressure(plan);
+      if (extendPendingFlushForActorRetirements()) {
+        // Capacity eviction can append actor-owned retirements after the first safe turn. Extend
+        // the same flush fence and give those records one bounded reclaim turn before completion.
+        work += drainRetirementTurn(plan, turn);
       }
     }
-    if (plan.eviction) {
-      try {
-        work += evictIfNeeded(batchLimits.eviction);
-      } finally {
-        finishActorRetirementBatch();
+    int advisoryRemaining = plan.advisoryQuota;
+    if (advisoryRemaining > 0 && (plan.ghostRehash || policyChanged)) {
+      int ghostQuota =
+          Math.min(NativeS3GhostMap.REHASH_PASS_BUDGET, advisoryRemaining);
+      int phaseWork = policy.advanceGhostRehash(ghostQuota);
+      work += phaseWork;
+      advisoryRemaining -= Math.min(advisoryRemaining, phaseWork);
+    }
+    if (plan.access && plan.accessQuota > 0) {
+      work +=
+          drainAccesses(
+              accessSlots, Math.min(turn.accessRecords, plan.accessQuota));
+    }
+    if (plan.readerLifecycle && plan.readerLifecycleQuota > 0) {
+      int readerQuota =
+          Math.min(READER_LIFECYCLE_SCAN_LIMIT, plan.readerLifecycleQuota);
+      work += scanTerminatedReaders(readerQuota);
+    }
+    // Expiry/eviction runs after the authoritative mutation transport has been drained so actor
+    // policy never observes a stale pointer or pending flag.
+    if (plan.ttl && plan.ttlQuota > 0) {
+      work += wheel.advance(nowNanos, plan.ttlQuota, this);
+      if (extendPendingFlushForActorRetirements()) {
+        // Expiry runs after the first retirement turn, so give records created by this same flush
+        // pass their own bounded seal/reclaim turn before checking the fence.
+        work += drainRetirementTurn(plan, turn);
       }
     }
-    if (plan.allocation && allocationPressureRequested.getAndSet(false)) {
-      work += memory.trimIdlePages() > 0L ? 1 : 0;
+    WriterResourceRegistry resources = writerResources;
+    // A blocked resource is idle until a new request or an earlier phase reports scan progress;
+    // advisory quota alone is not a reason to walk every retiring resource again.
+    if (advisoryRemaining > 0
+        && resources != null
+        && resources.hasRetirementWork()) {
+      work += resources.processRetirements(turn.resourceVersion, advisoryRemaining);
     }
-    if (plan.async) {
-      work += drainAsyncMutations(batchLimits.async);
-    }
+    policyChanged |= policyDirty;
     publishLiveWeight();
     if (plan.flush) {
       completeFlushIfIdle();
     }
+    if (plan.access) {
+      accessScanActive = plan.accessQuota < turn.accessRecords;
+      if (accessScanActive) {
+        requestWork(WORK_ACCESS_SCAN);
+      }
+    }
+    if (plan.ttl && plan.ttlQuota < TTL_MAX_PER_TURN && ttlWorkDue()) {
+      requestWork(WORK_CLOCK);
+    }
+    sampleRetirementRates();
     return work;
+  }
+
+  private void prepareMaintenanceQuotas(WorkPlan plan, TurnCuts turn) {
+    WriterLifecycleJournal lifecycle = writerLifecycleJournal;
+    int lifecycleDemand =
+        plan.removals
+            ? boundedWorkCount(
+                Math.max(1L, lifecycle == null ? 0L : lifecycle.lagRecords()))
+            : 0;
+    int capacityDemand = plan.capacity ? CAPACITY_MAX_PER_TURN : 0;
+    boolean retirementPending =
+        plan.seal
+            || plan.flush
+            || plan.safe
+            || retirements.hasSealedSegments()
+            || retirements.hasSafeSegments();
+    int retirementDemand =
+        retirementPending
+            ? boundedWorkCount(Math.max(1L, retirements.safeSegmentDebt()))
+            : 0;
+    int accessDemand =
+        plan.access ? Math.max(1, Math.min(turn.accessRecords, ACCESS_MAX_PER_TURN)) : 0;
+    int ttlDemand =
+        plan.ttl
+            ? Math.max(
+                1, Math.min((int) Math.min(Integer.MAX_VALUE, ttlBacklog()), TTL_MAX_PER_TURN))
+            : 0;
+    int ghostDemand = plan.ghostRehash ? NativeS3GhostMap.REHASH_PASS_BUDGET : 0;
+    int readerDemand = plan.readerLifecycle ? READER_LIFECYCLE_SCAN_LIMIT : 0;
+    WriterResourceRegistry resources = writerResources;
+    // Only an unvisited scan or a newly queued resource is demand. Progress discovered by an
+    // earlier phase reopens the scan for the next immediate continuation.
+    boolean resourcePending = resources != null && resources.hasRetirementWork();
+    int resourceDemand =
+        resourcePending ? boundedWorkCount(Math.max(1L, resources.retiringCount())) : 0;
+    int advisoryDemand = saturatingIntAdd(ghostDemand, resourceDemand);
+    int totalDemand =
+        saturatingIntAdd(
+            saturatingIntAdd(
+                saturatingIntAdd(lifecycleDemand, capacityDemand), retirementDemand),
+            saturatingIntAdd(
+                saturatingIntAdd(accessDemand, ttlDemand), advisoryDemand));
+    int baseQuota = maintenanceBudgetController.workQuota();
+
+    plan.lifecycleQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota,
+            lifecycleDemand,
+            totalDemand,
+            LIFECYCLE_MAX_PER_TURN,
+            plan.removals ? 1 : 0);
+    plan.capacityQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota,
+            capacityDemand,
+            totalDemand,
+            CAPACITY_MAX_PER_TURN,
+            plan.capacity ? 1 : 0);
+    plan.retirementQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota,
+            retirementDemand,
+            totalDemand,
+            RECLAIM_MAX_SEGMENTS,
+            retirementPending ? 1 : 0);
+    plan.accessQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota, accessDemand, totalDemand, ACCESS_MAX_PER_TURN, 0);
+    plan.ttlQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota, ttlDemand, totalDemand, TTL_MAX_PER_TURN, plan.ttl ? 1 : 0);
+    plan.readerLifecycleQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota,
+            readerDemand,
+            totalDemand,
+            READER_LIFECYCLE_SCAN_LIMIT,
+            plan.readerLifecycle ? 1 : 0);
+    plan.advisoryQuota =
+        maintenanceBudgetController.phaseQuota(
+            baseQuota,
+            advisoryDemand,
+            totalDemand,
+            ADVISORY_MAX_PER_TURN,
+            resourcePending ? 1 : 0);
+  }
+
+  /**
+   * Drains logical occupancy in bounded turns. Capacity is deliberately a lower-priority actor
+   * source: mailbox mutations and lifecycle records are cut and applied before this method runs.
+   */
+  private int drainCapacityPressure(WorkPlan plan) {
+    LogicalAdmission admission = logicalAdmission;
+    if (admission != null) {
+      admission.actorBeginCapacityPass();
+    }
+    if (admission == null || !admission.isOverTarget()) {
+      capacityBlockedEntry = null;
+      capacityBlocked = false;
+      capacityRetryNanos = Long.MAX_VALUE;
+      return 0;
+    }
+
+    capacityBlockedEntry = null;
+    capacityBlocked = false;
+    capacityRetryNanos = Long.MAX_VALUE;
+    int removed = 0;
+    int attempts = 0;
+    int removalBudget = plan.capacityQuota;
+    int attemptBudget = Math.max(1, removalBudget) * 4;
+    while (admission.isOverTarget()
+        && removed < removalBudget
+        && attempts < attemptBudget) {
+      admission.actorReconcileExternalReductions();
+      if (!admission.isOverTarget()) {
+        break;
+      }
+      MaintenancePolicy.Selection selection = policy.selectVictim(64);
+      attempts += Math.max(1, policy.lastVictimScanCount());
+      Entry victim = selection.entry;
+      if (victim == null) {
+        if (selection.kind == MaintenancePolicy.Selection.Kind.SCAN_EXHAUSTED
+            && attempts < attemptBudget) {
+          continue;
+        }
+        scheduleCapacityRetry();
+        break;
+      }
+      long taggedValue = victim.valueAddress;
+      long value = Entry.rawValueAddress(taggedValue);
+      if (!victim.isAlive() || victim.isLogicallyAbsent() || value == 0L) {
+        policy.remove(victim, false);
+        continue;
+      }
+      if (victim.isWriterLocked()) {
+        capacityBlockedEntry = victim;
+        capacityBlocked = true;
+        scheduleCapacityRetry();
+        break;
+      }
+      long generation = victim.generation();
+      long victimCharge = admission.chargeOf(victim);
+      if (removeFromMap(
+          victim,
+          true,
+          generation,
+          taggedValue,
+          RemovalCause.SIZE)) {
+        removed++;
+        // The shared LongAdder is updated by the logical-absent transition. Keep this actor-local
+        // sample in step without paying for a contended exact sum after every victim.
+        admission.actorSubtractReleasedCharge(victimCharge);
+        if (!admission.isOverTarget()) {
+          admission.actorReconcileCapacity();
+        }
+        continue;
+      }
+      if (victim.isWriterLocked()) {
+        capacityBlockedEntry = victim;
+        capacityBlocked = true;
+        scheduleCapacityRetry();
+        break;
+      }
+      if (!victim.isAlive()
+          || victim.isLogicallyAbsent()
+          || Entry.rawValueAddress(victim.valueAddress) == 0L
+          || !isMappedEntry(victim)) {
+        policy.remove(victim, false);
+      } else {
+        policy.skipLocked(victim);
+        scheduleCapacityRetry();
+        break;
+      }
+    }
+
+    admission.actorReconcileCapacity();
+
+    if (!admission.isOverTarget()) {
+      capacityBlockedEntry = null;
+      capacityBlocked = false;
+      capacityRetryNanos = Long.MAX_VALUE;
+    } else if (removed > 0 && !capacityBlocked) {
+      // Keep the next bounded turn behind any mailbox work that arrived during this pass.
+      requestCapacityMaintenance();
+    } else if (!capacityBlocked && capacityRetryNanos == Long.MAX_VALUE) {
+      if (removalBudget < CAPACITY_MAX_PER_TURN) {
+        requestCapacityMaintenance();
+      } else {
+        scheduleCapacityRetry();
+      }
+    }
+    return removed;
+  }
+
+  private void scheduleCapacityRetry() {
+    capacityRetryNanos = saturatingAdd(sampleMonotonicNow(), tuning.capacityRetryNanos);
+  }
+
+  private void sampleRetirementRates() {
+    long sampleNanos = sampleMonotonicNow();
+    if (!retirementRateSampler.shouldSample(sampleNanos)) {
+      return;
+    }
+    retirementRateSampler.observe(
+        sampleNanos,
+        retirements.generatedBytesTotal(),
+        retirements.completedBytesTotal());
+  }
+
+  private void updateMaintenanceBudget(long nowNanos) {
+    if (nextMaintenanceBudgetPressureNanos != Long.MIN_VALUE
+        && nowNanos - nextMaintenanceBudgetPressureNanos < 0L) {
+      return;
+    }
+    nextMaintenanceBudgetPressureNanos =
+        saturatingAdd(nowNanos, tuning.controllerSampleNanos);
+    WriterLifecycleJournal lifecycle = writerLifecycleJournal;
+    maintenanceBudgetController.updatePressure(
+        nowNanos,
+        retirements.retirementDebtBytes(),
+        nativeDebtBudgetBytes,
+        retirementRateSampler.generatedBytesPerSecond(),
+        retirementRateSampler.completedBytesPerSecond(),
+        lifecycle == null ? 0L : lifecycle.lagRecords(),
+        oldestSafeWaitNanos,
+        queueDepth());
+  }
+
+  private int drainRetirementTurn(WorkPlan plan, TurnCuts turn) {
+    FlushRequest flushRequestSnapshot = plan.flushRequest;
+    boolean forceCloseRetirementCut =
+        isStopping() && retirements.hasOpenProducerRecords();
+    long[] retirementWatermark =
+        plan.flush && flushRequestSnapshot != null
+            ? flushRequestSnapshot.retirementWatermark
+            : turn.retirementWatermark;
+    boolean retirementWork =
+        plan.seal
+            || plan.flush
+            || forceCloseRetirementCut
+            || retirements.hasSealedSegments()
+            || retirements.hasSafeSegments();
+    if (!retirementWork) {
+      return 0;
+    }
+    int sealed = 0;
+    if (forceCloseRetirementCut) {
+      retirements.cutAllProducersAtWatermark();
+    }
+    if (retirements.hasSealableSnapshot(retirementWatermark)) {
+      // The sealed batch owns E. Publish E+1 only after the fixed reservation watermark has
+      // been closed, so readers admitted after this cut cannot block the older batch.
+      long sealEpoch = epoch.get();
+      sealed = retirements.sealSnapshotSegments(sealEpoch, retirementWatermark);
+      if (sealed != 0) {
+        incrementEpoch();
+      }
+    }
+    int published = 0;
+    if (retirements.hasSealedSegments()) {
+      long notificationEpoch = epoch.get();
+      // The actor owns the wait protocol: mark active readers first, then take the confirmation
+      // snapshot. A reader exit/value downgrade only wakes us when it consumes this marker.
+      readers.markActiveReaderNotifications(notificationEpoch);
+      readers.minActiveEpochs(readerEpochs);
+      published = retirements.publishSafe(readerEpochs[0], readerEpochs[1]);
+      if (retirements.hasSealedSegments()) {
+        // A reader may consume the first marker, leave, and re-enter between the arm and the
+        // confirmation load. Re-arm after publishing so that a reader observed active by this
+        // pass cannot leave the actor parked without a notification.
+        readers.markActiveReaderNotifications(notificationEpoch);
+      }
+    }
+    long safePublishedAt = sampleMonotonicNow();
+    retirements.finishReadyDrains();
+    int reclaimed = 0;
+    // SAFE segments are actor-owned maintenance work. Reclaim a bounded batch in this turn so
+    // SAFE cannot create a second FIFO consumer or a self-requeueing mailbox message.
+    if (published != 0 || retirements.hasSafeSegments()) {
+      reclaimed = reclaimSafeSegmentsInline(Math.min(RECLAIM_MAX_SEGMENTS, plan.retirementQuota));
+    }
+    long safeHeadTicket = retirements.oldestSafeTicket();
+    if (safeHeadTicket == 0L) {
+      oldestSafeHeadTicket = 0L;
+      oldestSafeHeadNanos = Long.MAX_VALUE;
+      oldestSafeWaitNanos = 0L;
+    } else {
+      if (safeHeadTicket != oldestSafeHeadTicket) {
+        oldestSafeHeadTicket = safeHeadTicket;
+        oldestSafeHeadNanos = safePublishedAt;
+      }
+      oldestSafeWaitNanos =
+          oldestSafeHeadNanos == Long.MAX_VALUE
+              ? 0L
+              : Math.max(0L, safePublishedAt - oldestSafeHeadNanos);
+    }
+    updateReclaimPublicationState(sampleMonotonicNow());
+    return sealed + published + reclaimed;
+  }
+
+  /** Policy is actor-owned and is updated asynchronously from mutation hints. */
+  private long observedLiveWeight() {
+    return policy.usedWeight();
+  }
+
+  private boolean hasWriterLifecycleWork() {
+    WriterLifecycleJournal journal = writerLifecycleJournal;
+    if (journal == null) {
+      writerLifecycleReadinessGeneration = Long.MIN_VALUE;
+      writerLifecycleReady = false;
+      return false;
+    }
+    long observedGeneration = journal.readinessGeneration();
+    if (observedGeneration == writerLifecycleReadinessGeneration) {
+      return writerLifecycleReady;
+    }
+
+    boolean ready = journal.probeUnmanagedReadyRecords();
+    long finalGeneration = journal.readinessGeneration();
+    if (finalGeneration != observedGeneration) {
+      if (ready) {
+        // A ready head was observed while a producer or the probe rearmed a marker. Return runnable
+        // now, but do not cache it: the next actor check must confirm the new stable generation.
+        writerLifecycleReadinessGeneration = Long.MIN_VALUE;
+        writerLifecycleReady = true;
+        return true;
+      }
+      // Clearing a stale reservation-hole marker also advances the generation. Confirm that
+      // transition once before declaring the lane set idle; a producer racing this confirmation
+      // must keep the actor runnable for the next turn.
+      ready = journal.probeUnmanagedReadyRecords();
+      long confirmedGeneration = journal.readinessGeneration();
+      if (confirmedGeneration != finalGeneration) {
+        writerLifecycleReadinessGeneration = Long.MIN_VALUE;
+        writerLifecycleReady = true;
+        return true;
+      }
+      finalGeneration = confirmedGeneration;
+    }
+    writerLifecycleReadinessGeneration = finalGeneration;
+    writerLifecycleReady = ready;
+    return ready;
+  }
+
+  private boolean readerLifecycleWork(boolean force) {
+    FlushRequest flush = flushRequest.get();
+    boolean newFlush = flush != readerLifecycleFlushRequest;
+    if (!readers.hasRegisteredSlots()) {
+      readerLifecycleFlushRequest = flush;
+      readerLifecycleCheckActive = false;
+      readerLifecycleWrapped = false;
+      nextReaderLifecycleCheckNanos = Long.MAX_VALUE;
+      return false;
+    }
+    long now = sampleMonotonicNow();
+    if (!readerLifecycleCheckActive
+        && (force
+            || newFlush
+            || (nextReaderLifecycleCheckNanos != Long.MAX_VALUE
+                && nextReaderLifecycleCheckNanos <= now))) {
+      // Do not associate a newer flush with a sweep that was already active. Its bounded scan
+      // started before the newer FIFO boundary and cannot account for the newer boundary's slots.
+      readerLifecycleFlushRequest = flush;
+      startReaderLifecycleSweep();
+    }
+    return readerLifecycleCheckActive;
+  }
+
+  private void startReaderLifecycleSweep() {
+    int capacity = readers.slotCapacity();
+    readerLifecycleCursor = capacity == 0 ? 0 : readerLifecycleCursor % capacity;
+    readerLifecycleStart = readerLifecycleCursor;
+    readerLifecycleWrapped = false;
+    readerLifecycleCheckActive = capacity != 0;
+  }
+
+  private boolean hasRunnableWork() {
+    return captureWorkDecision(false).isRunnable();
+  }
+
+  private WorkDecision captureWorkDecision(boolean consumeRequestedWork) {
+    WorkDecision decision = workDecision;
+    decision.readersChecked = false;
+    decision.activeReaders = false;
+    long notificationSequence = readerNotificationSequence.get();
+    decision.readerNotificationWork =
+        notificationSequence != observedReaderNotificationSequence;
+    if (consumeRequestedWork) {
+      observedReaderNotificationSequence = notificationSequence;
+    }
+    decision.requested =
+        consumeRequestedWork ? requestedWork.getAndSet(0) : requestedWork.get();
+    decision.retirementState = retirements.workState();
+    decision.flushRequest = flushRequest.get();
+    LogicalAdmission admission = logicalAdmission;
+    if (admission != null) {
+      admission.refreshActorSnapshot();
+    }
+    decision.capacityOverTarget = admission != null && admission.isOverTarget();
+    long capacityRetry = capacityRetryNanos;
+    boolean capacityRequested = (decision.requested & WORK_CAPACITY) != 0;
+    decision.capacityRetryDue =
+        decision.capacityOverTarget
+            && (capacityRequested
+                || capacityRetry == Long.MAX_VALUE
+                || capacityRetry <= sampleMonotonicNow());
+    decision.writerLifecycleWork = hasWriterLifecycleWork();
+    decision.writerResourceWork =
+        writerResources != null && writerResources.hasRetirementWork();
+    decision.ghostRehash = policy.ghostRehashPending();
+    boolean accessHintRequested = (decision.requested & WORK_ACCESS_SCAN) != 0;
+    decision.accessScanActive =
+        !isStopping() && (accessScanActive || accessHintRequested);
+    decision.readerLifecycleWork =
+        readerLifecycleWork(
+            (decision.requested & WORK_READER_LIFECYCLE) != 0
+                || isStopping());
+    decision.durableMailboxWork = durableMailboxReady() && !mailboxFenceBlocked;
+    decision.ttlDue = ttlWorkDue();
+    decision.pendingSealed =
+        (decision.retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
+    decision.pendingSafe =
+        (decision.retirementState & RetirementJournal.WORK_STATE_SAFE) != 0;
+    decision.pendingWriterLifecycleWatermark =
+        decision.flushRequest != null
+            && hasPendingWriterLifecycleWatermark(decision.flushRequest);
+
+    WorkPlan plan = workPlan.reset(decision.requested);
+    plan.flush = (plan.requested & WORK_FLUSH) != 0 || decision.flushRequest != null;
+    plan.flushRequest = decision.flushRequest;
+    plan.capacity =
+        (plan.requested & WORK_CAPACITY) != 0
+            || decision.capacityRetryDue
+            || (plan.flush && decision.capacityOverTarget && !capacityBlocked);
+    plan.removals = (plan.requested & WORK_REMOVAL) != 0 || decision.writerLifecycleWork;
+    plan.resourceRetirements = decision.writerResourceWork;
+    plan.mutations = (plan.requested & WORK_MUTATION) != 0;
+    plan.ghostRehash = decision.ghostRehash;
+    plan.access = plan.flush || (!isStopping() && decision.accessScanActive);
+    plan.readerLifecycle =
+        (plan.requested & WORK_READER_LIFECYCLE) != 0
+            || plan.flush
+            || isStopping()
+            || decision.readerLifecycleWork;
+    plan.ttl = decision.ttlDue && (!isStopping() || plan.flush);
+    plan.seal =
+        (plan.requested & WORK_RETIREMENT) != 0
+            || (plan.requested & WORK_READER_NOTIFICATION) != 0
+            || decision.readerNotificationWork
+            || (decision.retirementState
+                    & (RetirementJournal.WORK_STATE_READY | RetirementJournal.WORK_STATE_SEALED))
+                != 0;
+    plan.safe = decision.pendingSafe;
+    plan.async = (plan.requested & WORK_ASYNC) != 0;
+    plan.refreshClock =
+        (plan.requested & WORK_CLOCK) != 0
+            || plan.flush
+            || plan.ttl
+            || plan.seal
+            || plan.readerLifecycle;
+    decision.plan = plan;
+    decision.runnableCheck = runnableCheck(decision);
+    return decision;
+  }
+
+  private int runnableCheck(WorkDecision decision) {
+    int requested = decision.requested;
+    // Mutation is the one actor-local control marker that must run even when its durable mailbox
+    // has already drained: it opens the next policy write batch. Every other requested bit is
+    // only a hint and must be backed by an authoritative source below.
+    int directlyRunnable = WORK_MUTATION;
+    if ((requested & directlyRunnable) != 0) {
+      return RUNNABLE_CHECK_WORK;
+    }
+    if (decision.capacityRetryDue) {
+      return RUNNABLE_CHECK_WORK;
+    }
+    if (decision.readerNotificationWork) {
+      return RUNNABLE_CHECK_WORK;
+    }
+    if (decision.durableMailboxWork
+        || (decision.retirementState & RetirementJournal.WORK_STATE_READY) != 0
+        || decision.writerLifecycleWork
+        || decision.writerResourceWork
+        || decision.ghostRehash
+        || decision.accessScanActive
+        || decision.readerLifecycleWork) {
+      return RUNNABLE_CHECK_WORK;
+    }
+
+    boolean pendingSealed = decision.pendingSealed;
+    boolean pendingSafe = decision.pendingSafe;
+    boolean pendingRetirement = pendingSealed || pendingSafe;
+    if (pendingSafe) {
+      return RUNNABLE_CHECK_WORK;
+    }
+    boolean capacityRunnable =
+        !decision.capacityOverTarget
+            || ((requested & WORK_CAPACITY) != 0 || decision.capacityRetryDue);
+    if (decision.flushRequest != null
+        && !decision.pendingWriterLifecycleWatermark
+        && capacityRunnable) {
+      if (retirements.watermarkComplete(decision.flushRequest.retirementWatermark)) {
+        return RUNNABLE_CHECK_WORK;
+      }
+      if (!pendingRetirement) {
+        return RUNNABLE_CHECK_WORK;
+      }
+      if (!pendingSealed) {
+        return RUNNABLE_CHECK_WORK;
+      }
+      decision.activeReaders = hasActiveReaders();
+      decision.readersChecked = true;
+      if (!decision.activeReaders) {
+        return RUNNABLE_CHECK_WORK | RUNNABLE_CHECK_READERS;
+      }
+    }
+
+    if (decision.ttlDue) {
+      int result = RUNNABLE_CHECK_WORK;
+      if (decision.readersChecked) {
+        result |= RUNNABLE_CHECK_READERS;
+        if (decision.activeReaders) {
+          result |= RUNNABLE_CHECK_ACTIVE_READERS;
+        }
+      }
+      return result;
+    }
+    if (!pendingSealed) {
+      return 0;
+    }
+    if (!decision.readersChecked) {
+      decision.activeReaders = hasActiveReaders();
+      decision.readersChecked = true;
+    }
+    int result =
+        RUNNABLE_CHECK_READERS
+            | (decision.activeReaders ? RUNNABLE_CHECK_ACTIVE_READERS : 0);
+    if (!decision.activeReaders
+        && (((decision.retirementState & RetirementJournal.WORK_STATE_SEALED) != 0)
+            || reclaimWorkDue(sampleMonotonicNow()))) {
+      result |= RUNNABLE_CHECK_WORK;
+    }
+    return result;
+  }
+
+  /** Rechecks the physical FIFO head so a prior MPSC publication gap cannot mask later work. */
+  private boolean durableMailboxReady() {
+    if (durableMailboxDepth.get() == 0L) {
+      mailboxHeadUnpublished = false;
+      return false;
+    }
+    boolean published = mailbox.relaxedPeek() != null;
+    mailboxHeadUnpublished = !published;
+    return published;
   }
 
   private void publishLiveWeight() {
@@ -921,152 +2099,201 @@ public final class MaintenanceEventLoop
     policyDirty = false;
   }
 
-  private boolean hasPendingWork() {
-    return requestedWork.get() != 0
-        || reclaimContinuation
-        || pendingRemovalRetirement
-        || weakValueCleanupContinuation
-        || !queue.isEmpty()
-        || (!stopping && accessScanActive)
-        || repairNeeded.get()
-        || allocationPressureRequested.get()
-        || budgetPressureRequested.get()
-        || retirements.hasReadyHint()
-        || retirements.hasPendingReclaim()
-        || reliableRemovals.hasCommittedHint()
-        || !asyncMutations.isEmpty()
-        || !deferredMutations.isEmpty()
-        || ((!stopping || flushRequest.get() != null) && ttlWorkDue())
-        || ((!stopping || flushRequest.get() != null) && policy.usedWeight() > capacity)
-        || flushRequest.get() != null;
+  /** Publishes actor-owned counters as one weakly consistent snapshot. */
+  private void publishActorSnapshots() {
+    publishedMaintenanceActiveNanosTotal = maintenanceActiveNanosTotal;
+    publishedMaintenanceParkNanosTotal = maintenanceParkNanosTotal;
+    publishedMaintenanceImmediateContinuationCount = maintenanceImmediateContinuationCount;
   }
 
   /** Close drains already-published work, but never waits for a future TTL deadline. */
   private boolean hasShutdownWork() {
-    return requestedWork.get() != 0
-        || reclaimContinuation
-        || pendingRemovalRetirement
-        || !queue.isEmpty()
-        || repairNeeded.get()
-        || allocationPressureRequested.get()
-        || budgetPressureRequested.get()
-        || retirements.hasReadyHint()
-        || retirements.hasPendingReclaim()
-        || reliableRemovals.hasCommittedHint()
-        || !asyncMutations.isEmpty()
-        || !deferredMutations.isEmpty()
-        || flushRequest.get() != null;
+    int retirementState = retirements.workState();
+    boolean pendingSealed =
+        (retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
+    boolean pendingRetirement =
+        pendingSealed || (retirementState & RetirementJournal.WORK_STATE_SAFE) != 0;
+    if (durableMailboxDepth.get() != 0L
+        || (retirementState & RetirementJournal.WORK_STATE_SAFE) != 0
+        || (retirementState & RetirementJournal.WORK_STATE_READY) != 0
+        || hasWriterLifecycleWork()
+        || (writerLifecycleJournal != null && writerLifecycleJournal.hasReadyRecords())
+        || (retirementState & RetirementJournal.WORK_STATE_OPEN) != 0
+        || (writerResources != null && writerResources.hasRetirementWork())) {
+      return true;
+    }
+
+    boolean readersChecked = false;
+    boolean activeReaders = false;
+    FlushRequest request = flushRequest.get();
+    if (request != null && !hasPendingWriterLifecycleWatermark(request)) {
+      if (retirements.watermarkComplete(request.retirementWatermark)) {
+        return true;
+      }
+      if (!pendingRetirement) {
+        return true;
+      }
+      activeReaders = hasActiveReaders();
+      readersChecked = true;
+      if (!activeReaders) {
+        return true;
+      }
+    }
+    if (!pendingSealed) {
+      return false;
+    }
+    if (!readersChecked) {
+      activeReaders = hasActiveReaders();
+    }
+    return !activeReaders
+        && (((retirementState & RetirementJournal.WORK_STATE_SEALED) != 0)
+            || reclaimWorkDue(sampleMonotonicNow()));
   }
 
-  /** Producer masks are consumed by the current plan; only actor state schedules a continuation. */
-  private boolean hasContinuationWork() {
-    return reclaimContinuation
-        || pendingRemovalRetirement
-        || weakValueCleanupContinuation
-        || !queue.isEmpty()
-        || (!stopping && accessScanActive)
-        || repairNeeded.get()
-        || allocationPressureRequested.get()
-        || budgetPressureRequested.get()
-        || retirements.hasReadyHint()
-        || retirements.hasPendingReclaim()
-        || reliableRemovals.hasCommittedHint()
-        || !asyncMutations.isEmpty()
-        || !deferredMutations.isEmpty()
-        || ((!stopping || flushRequest.get() != null) && ttlWorkDue())
-        || ((!stopping || flushRequest.get() != null) && policy.usedWeight() > capacity)
-        || flushRequest.get() != null;
+  /** A flush can run while work is available, but must not busy-spin on blocked QSBR work. */
+  private boolean flushWorkDue(int retirementState, WorkDecision decision) {
+    FlushRequest request = flushRequest.get();
+    if (request == null || hasPendingWriterLifecycleWatermark(request)) {
+      return false;
+    }
+    LogicalAdmission admission = logicalAdmission;
+    if (admission != null && admission.isOverTarget() && !capacityWorkDue()) {
+      return false;
+    }
+    if (capacityWorkDue()) {
+      return true;
+    }
+    if (retirements.watermarkComplete(request.retirementWatermark)) {
+      return true;
+    }
+    boolean pendingSealed =
+        (retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
+    boolean pendingSafe =
+        (retirementState & RetirementJournal.WORK_STATE_SAFE) != 0;
+    if (pendingSealed) {
+      boolean activeReaders =
+          decision != null && decision.readersChecked ? decision.activeReaders : hasActiveReaders();
+      return !activeReaders;
+    }
+    return !pendingSafe;
   }
 
-  private boolean pendingRemovalRetirementDue() {
-    return pendingRemovalRetirement
-        && (pendingRemovalRetryNanos == Long.MAX_VALUE || pendingRemovalRetryNanos <= nowNanos);
+  private boolean capacityWorkDue() {
+    LogicalAdmission admission = logicalAdmission;
+    if (admission == null || !admission.isOverTarget()) {
+      return false;
+    }
+    int requested = requestedWork.get();
+    return (requested & WORK_CAPACITY) != 0
+        || capacityRetryNanos == Long.MAX_VALUE
+        || capacityRetryNanos <= sampleMonotonicNow();
   }
 
-  private WorkPlan selectWorkPlan() {
-    WorkPlan plan = workPlan.reset(requestedWork.getAndSet(0));
-    plan.flush = (plan.requested & WORK_FLUSH) != 0 || flushRequest.get() != null;
-    plan.budget = (plan.requested & WORK_PRESSURE) != 0 || budgetPressureRequested.get();
-    plan.allocation = (plan.requested & WORK_PRESSURE) != 0 || allocationPressureRequested.get();
-    plan.removals =
-        (plan.requested & WORK_REMOVAL) != 0
-            || reliableRemovals.hasCommittedHint()
-            || pendingRemovalRetirementDue();
-    plan.mutations = (plan.requested & WORK_MUTATION) != 0 || !queue.isEmpty();
-    plan.repair = (plan.requested & WORK_MUTATION) != 0 || repairNeeded.get();
-    plan.deferred = !deferredMutations.isEmpty() && deferredMutationWorkDue();
-    plan.access =
-        (plan.requested & WORK_ACCESS_SCAN) != 0
-            || plan.flush
-            || (!stopping && accessScanActive);
-    plan.ttl = ttlWorkDue() && (!stopping || plan.flush);
-    plan.seal = (plan.requested & WORK_RETIREMENT) != 0 || retirements.hasReadyHint();
-    plan.reclaim =
-        (retirements.hasPendingReclaim() || reclaimContinuation) && reclaimWorkDue(nowNanos);
-    plan.eviction = (!stopping || plan.flush) && evictionWorkDue(nowNanos);
-    plan.async = (plan.requested & WORK_ASYNC) != 0 || !asyncMutations.isEmpty();
-    plan.weakValues =
-        (plan.requested & WORK_WEAK_VALUES) != 0 || weakValueCleanupContinuation;
-    plan.refreshClock =
-        (plan.requested & WORK_CLOCK) != 0
-            || plan.flush
-            || plan.ttl
-            || plan.seal
-            || (plan.requested & WORK_PRESSURE) != 0;
-    return plan;
+  private boolean hasPendingWriterLifecycleWatermark(FlushRequest request) {
+    WriterLifecycleJournal journal = writerLifecycleJournal;
+    return journal != null
+        && request.lifecycleWatermark != null
+        && !journal.watermarkComplete(request.lifecycleWatermark);
   }
 
   private void parkUntilWork() {
     if (!wakeGate.armIdle()) {
+      idleBackoff.reset();
       return;
     }
-    if (stopping || hasPendingWorkAfterIdleArm()) {
+    clearStaleWakeRequests();
+    if (hasPendingAccess()) {
+      // A publication can follow the last scan while its notification is still coalesced.
+      // Hand the observed work to the next turn; the wake gate alone cannot schedule a drain.
+      accessScanActive = true;
       wakeGate.requireProcessing();
+      idleBackoff.reset();
       return;
+    }
+    WorkDecision decision = captureWorkDecision(false);
+    if (cutIdleRetirementRecords(decision.retirementState)) {
+      wakeGate.requireProcessing();
+      idleBackoff.reset();
+      return;
+    }
+    if (isStopping() || decision.isRunnable()) {
+      wakeGate.requireProcessing();
+      idleBackoff.reset();
+      return;
+    }
+
+    long ttlWakeNanos = nextTtlWakeNanos();
+    long retryWakeNanos =
+        nextRetryDeadlineNanos(decision.retirementState, decision.runnableCheck);
+    long readerLifecycleWakeNanos = nextReaderLifecycleWakeNanos();
+    long wakeNanos = Math.min(Math.min(ttlWakeNanos, retryWakeNanos), readerLifecycleWakeNanos);
+    if (wakeNanos == Long.MAX_VALUE) {
+      while (idleBackoff.takeSpinTurn()) {
+        Thread.onSpinWait();
+      }
+      while (idleBackoff.takeYieldTurn()) {
+        Thread.yield();
+      }
     }
     if (!wakeGate.finishIdle()) {
+      idleBackoff.reset();
       return;
     }
+
+    long delay;
+    if (wakeNanos == Long.MAX_VALUE) {
+      delay = idleBackoff.nextParkNanos();
+    } else {
+      delay = wakeNanos - System.nanoTime();
+      if (delay <= 0L) {
+        // A deadline can expire between the final source check and the park setup. Return to the
+        // runnable check instead of turning the missed handoff into a 1ns polling loop.
+        idleBackoff.reset();
+        wakeGate.requireProcessing();
+        return;
+      }
+    }
+    delay = Math.min(delay, MAX_IDLE_PARK_NANOS);
+
     parked = true;
+    long parkStart = System.nanoTime();
     try {
-      long ttlWakeNanos = nextTtlWakeNanos();
-      if (ttlWakeNanos == Long.MAX_VALUE && weakValueQueue == null) {
-        LockSupport.park(this);
-      } else {
-        long delay =
-            ttlWakeNanos == Long.MAX_VALUE
-                ? WEAK_VALUE_CLEANUP_INTERVAL_NANOS
-                : ttlWakeNanos - System.nanoTime();
-        if (weakValueQueue != null) {
-          delay = Math.min(delay, WEAK_VALUE_CLEANUP_INTERVAL_NANOS);
-        }
-        LockSupport.parkNanos(this, Math.max(1L, delay));
-      }
-      if (weakValueQueue != null && !stopping) {
-        requestWork(WORK_WEAK_VALUES);
-      }
+      LockSupport.parkNanos(this, delay);
     } finally {
+      maintenanceParkNanosTotal =
+          saturatingAdd(maintenanceParkNanosTotal, Math.max(0L, System.nanoTime() - parkStart));
+      publishActorSnapshots();
       parked = false;
       wakeGate.requireProcessing();
     }
   }
 
-  /** Avoid repeating expensive source probes while the actor arms an otherwise idle park. */
-  private boolean hasPendingWorkAfterIdleArm() {
-    return requestedWork.get() != 0
-        || allocationPressureRequested.get()
-        || budgetPressureRequested.get()
-        || (!stopping && accessScanActive)
-        || repairNeeded.get()
-        || reliableRemovals.hasCommittedHint()
-        || retirements.hasReadyHint()
-        || !queue.isEmpty()
-        || !deferredMutations.isEmpty()
-        || ttlWorkDue()
-        || flushRequest.get() != null
-        || pendingRemovalRetirement
-        || reclaimContinuation
-        || policy.usedWeight() > capacity;
+  /** Removes advisory wake bits whose authoritative source is already empty before parking. */
+  private void clearStaleWakeRequests() {
+    int stale =
+        WORK_MUTATION
+            | WORK_REMOVAL
+            | WORK_RETIREMENT
+            | WORK_CLOCK
+            | WORK_READER_NOTIFICATION;
+    stale |= WORK_ACCESS_SCAN;
+    if (!readers.hasRegisteredSlots()) {
+      stale |= WORK_READER_LIFECYCLE;
+    }
+    LogicalAdmission admission = logicalAdmission;
+    if (admission == null || !admission.isOverTarget()) {
+      stale |= WORK_CAPACITY;
+    }
+    if (durableMailboxDepth.get() == 0L && flushRequest.get() == null) {
+      stale |= WORK_ASYNC | WORK_FLUSH;
+    }
+    int current;
+    do {
+      current = requestedWork.get();
+      if ((current & stale) == 0) {
+        return;
+      }
+    } while (!requestedWork.compareAndSet(current, current & ~stale));
   }
 
   private boolean ttlWorkDue() {
@@ -1077,7 +2304,9 @@ public final class MaintenanceEventLoop
       return true;
     }
     long nextTick = wheel.nextWakeTick();
-    return nextTick != Long.MAX_VALUE && nextTick <= ticker.currentTimeMillis() / 64L;
+    long nowNanos = sampleMonotonicNow();
+    long currentTick = nowNanos / TimerWheel.TICK_NANOS;
+    return nextTick != Long.MAX_VALUE && nextTick <= currentTick;
   }
 
   private long nextTtlWakeNanos() {
@@ -1088,138 +2317,188 @@ public final class MaintenanceEventLoop
     if (nextTick == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    long nextMillis = nextTick > Long.MAX_VALUE / 64L ? Long.MAX_VALUE : nextTick * 64L;
-    long nowMillis = ticker.currentTimeMillis();
-    if (nextMillis <= nowMillis) {
-      return System.nanoTime();
-    }
-    long delayMillis = nextMillis - nowMillis;
-    long delayNanos =
-        delayMillis > Long.MAX_VALUE / 1_000_000L
+    long logicalDeadline =
+        nextTick > Long.MAX_VALUE / TimerWheel.TICK_NANOS
             ? Long.MAX_VALUE
-            : delayMillis * 1_000_000L;
-    long nowNanos = System.nanoTime();
-    return Long.MAX_VALUE - nowNanos < delayNanos ? Long.MAX_VALUE : nowNanos + delayNanos;
+            : nextTick * TimerWheel.TICK_NANOS;
+    long logicalNow = sampleMonotonicNow();
+    long parkNow = System.nanoTime();
+    if (logicalDeadline <= logicalNow) {
+      return parkNow;
+    }
+    long delay = logicalDeadline - logicalNow;
+    return Long.MAX_VALUE - parkNow < delay ? Long.MAX_VALUE : parkNow + delay;
   }
 
-  private void parkUntilWindow(long nowNanos) {
-    long deadline = windowScheduler.nextPassNanos();
-    if (deadline == Long.MIN_VALUE) {
-      return;
+  private long nextReaderLifecycleWakeNanos() {
+    if (!readers.hasRegisteredSlots()) {
+      return Long.MAX_VALUE;
     }
-    long delay = deadline - nowNanos;
-    if (delay <= 0L) {
-      return;
+    if (readerLifecycleCheckActive) {
+      return System.nanoTime();
     }
-    parked = true;
-    try {
-      LockSupport.parkNanos(this, delay);
-    } finally {
-      parked = false;
+    if (nextReaderLifecycleCheckNanos == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
+    }
+    sampleMonotonicNow();
+    return retryDeadlineToWallClock(nextReaderLifecycleCheckNanos);
+  }
+
+  private boolean extendPendingFlushForActorRetirements() {
+    if (!actorRetirementNeedsFlushFence) {
+      return false;
+    }
+    // Serialize the actor watermark extension with flush() publication so a newer request cannot
+    // replace the request after the actor has read it.
+    synchronized (asyncFlushPublicationLock) {
+      if (!actorRetirementNeedsFlushFence) {
+        return false;
+      }
+      FlushRequest request = flushRequest.get();
+      if (request == null) {
+        // A flush created after this append captures the current actor lane itself.
+        actorRetirementNeedsFlushFence = false;
+        return false;
+      }
+      Runnable hook = flushRetirementExtensionHookForTest;
+      if (hook != null) {
+        hook.run();
+      }
+      if (!retirements.captureAndCutActorWatermark(request.retirementWatermark)) {
+        return false;
+      }
+      actorRetirementNeedsFlushFence = false;
+      return true;
     }
   }
 
   private void completeFlushIfIdle() {
-    if (flushRequest.get() == null) {
+    if (terminalFailure.get() != null) {
       return;
     }
-    readers.cleanupCollected(batchLimits.general);
-    FlushRequest completed;
-    synchronized (asyncSubmissionLock) {
-      FlushRequest request = flushRequest.get();
-      if (request == null) {
+    FlushRequest request = flushRequest.get();
+    if (request == null) {
+      return;
+    }
+    if (!flushMarkerReached(request)) {
+      // The marker is the FIFO boundary for mutation/lifecycle messages. A maintenance
+      // pass can run before it, but it must not complete the future early.
+      return;
+    }
+    boolean writerLifecyclePending = hasPendingWriterLifecycleWatermark(request);
+    boolean readerLifecyclePending =
+        readerLifecycleCheckActive || readerLifecycleFlushRequest != request;
+    RetirementJournal retirementJournal = retirements;
+    boolean retirementWatermarkPending =
+        retirementJournal != null
+            && !retirementJournal.watermarkComplete(request.retirementWatermark);
+    boolean sequencePending = sequenceAfter(request.sequence, asyncCompletedSequence);
+    boolean accessPending = hasPendingAccess();
+    boolean ttlPending = ttlWorkDue();
+    boolean capacityPending =
+        logicalAdmission != null && logicalAdmission.isOverTarget();
+    if (writerLifecyclePending
+        || readerLifecyclePending
+        || retirementWatermarkPending
+        || sequencePending
+        || accessPending
+        || ttlPending
+        || capacityPending) {
+      return;
+    }
+    synchronized (asyncFlushPublicationLock) {
+      // Flush publication, terminal transition, and actor completion share one control-plane
+      // boundary. A producer can therefore either extend this exact request or observe it already
+      // completed; it cannot leave a future behind a cleared request pointer.
+      if (terminalFailure.get() != null || flushRequest.get() != request) {
         return;
       }
-      // A bounded eviction scan may have deferred its next retry to protect the worker from
-      // repeated scans. Flush must retain its barrier until that retry brings the policy back under
-      // capacity, including when the previous scan was blocked by a writer.
-      if (policy.usedWeight() > capacity) {
-        return;
-      }
-      if (requestedWork.get() != 0) {
-        return;
-      }
-      if (reliableRemovals.size() != 0L
-          || !queue.isEmpty()
-          || !deferredMutations.isEmpty()
-          || repairNeeded.get()
+      if (hasPendingWriterLifecycleWatermark(request)
+          || readerLifecycleCheckActive
+          || readerLifecycleFlushRequest != request
+          || (retirementJournal != null
+              && !retirementJournal.watermarkComplete(request.retirementWatermark))
           || sequenceAfter(request.sequence, asyncCompletedSequence)
-          || allocationPressureRequested.get()
-          || budgetPressureRequested.get()
           || hasPendingAccess()
-          || retirements.hasReadyHint()
-          || retirements.hasPendingReclaim()
-          || reclaimContinuation
-          || pendingRemovalRetirement) {
+          || ttlWorkDue()
+          || (logicalAdmission != null && logicalAdmission.isOverTarget())) {
         return;
       }
       if (!flushRequest.compareAndSet(request, null)) {
         return;
       }
-      completed = request;
+      readerLifecycleFlushRequest = null;
+      request.future.complete(null);
     }
-    completed.future.complete(null);
   }
 
-  private int drainAsyncMutations(int limit) {
-    if (asyncMutations.isEmpty()) {
-      return 0;
+  private boolean flushMarkerReached(FlushRequest request) {
+    if (lastConsumedFlushMarker != null
+        && lastConsumedFlushMarker.future == request.future) {
+      return true;
     }
-    int work = 0;
-    while (work < limit) {
-      FlushRequest barrier = flushRequest.get();
-      AsyncMutationTask next = asyncMutations.peek();
-      if (next == null || (barrier != null && sequenceAfter(next.sequence, barrier.sequence))) {
-        break;
-      }
-      AsyncMutationTask task = asyncMutations.poll();
-      if (task == null) {
-        continue;
-      }
-      advanceAsyncDequeuedSequence(task.sequence);
-      Throwable unavailable = terminalFailure.get();
-      if (unavailable != null) {
-        asyncRejected.incrementAndGet();
-        notifyAsyncRejection(
-            task.reject,
-            new com.red.ohc.api.CacheMaintenanceException(unavailable));
-      } else if (closing || stopping) {
-        asyncRejected.incrementAndGet();
-        notifyAsyncRejection(task.reject, new IllegalStateException("cache is closing"));
-      } else {
-        try {
-          task.action.run();
-        } catch (Throwable failure) {
-          asyncFailed.incrementAndGet();
-          notifyAsyncRejection(task.reject, failure);
-        }
-      }
-      asyncCompletedSequence = task.sequence;
-      work++;
+    // Direct maintenance-pass tests do not run the actor consumer. Seeing this request's marker
+    // at the mailbox head is the same FIFO boundary: no earlier durable message remains.
+    Object next = mailbox.relaxedPeek();
+    if (!(next instanceof ActorMessage)) {
+      return false;
     }
-    return work;
+    ActorMessage actorMessage = (ActorMessage) next;
+    return actorMessage.kind == ActorMessage.FLUSH
+        && actorMessage.flush != null
+        && actorMessage.flush.future == request.future;
   }
 
-  private void rejectPendingAsync(Throwable failure) {
-    rejectAsyncTasks(drainPendingAsyncTasks(), failure);
-  }
 
-  private List<AsyncMutationTask> drainPendingAsyncTasks() {
-    List<AsyncMutationTask> pending = new ArrayList<>();
-    AsyncMutationTask task;
-    while ((task = asyncMutations.poll()) != null) {
-      advanceAsyncDequeuedSequence(task.sequence);
-      asyncCompletedSequence = task.sequence;
-      pending.add(task);
-    }
-    return pending;
-  }
-
-  private void rejectAsyncTasks(List<AsyncMutationTask> tasks, Throwable failure) {
-    for (AsyncMutationTask task : tasks) {
+  private void processAsyncMutation(AsyncMutationTask task) {
+    advanceAsyncDequeuedSequence(task.sequence);
+    Throwable unavailable = terminalFailure.get();
+    if (unavailable != null) {
       asyncRejected.incrementAndGet();
-      notifyAsyncRejection(task.reject, failure);
+      notifyAsyncRejection(
+          task.reject, new com.red.ohc.api.CacheMaintenanceException(unavailable));
+    } else if (closing || isStopping()) {
+      asyncRejected.incrementAndGet();
+      notifyAsyncRejection(task.reject, new IllegalStateException("cache is closing"));
+    } else {
+      try {
+        task.action.run();
+      } catch (Throwable failure) {
+        asyncFailed.incrementAndGet();
+        notifyAsyncRejection(task.reject, failure);
+      }
     }
+    advanceAsyncCompletedSequence(task.sequence);
+  }
+
+  private int failPendingMailbox(Throwable failure) {
+    int failed = 0;
+    Object message;
+    while ((message = pollMailbox()) != null) {
+      failed++;
+      failMailboxMessage(message, failure);
+    }
+    return failed;
+  }
+
+  private void failMailboxMessage(Object message, Throwable failure) {
+    if (!(message instanceof ActorMessage)) {
+      // A lifecycle slot remains owned by its lane until shutdown cleanup can dispatch and release
+      // the record. Keeping the reusable node attached to that slot prevents an old FIFO reference
+      // from being reused while its native lifecycle state is still pending.
+      return;
+    }
+    ActorMessage actorMessage = (ActorMessage) message;
+    if (actorMessage.async != null) {
+      advanceAsyncDequeuedSequence(actorMessage.async.sequence);
+      advanceAsyncCompletedSequence(actorMessage.async.sequence);
+      asyncRejected.incrementAndGet();
+      notifyAsyncRejection(actorMessage.async.reject, failure);
+    } else if (actorMessage.flush != null) {
+      actorMessage.flush.future.completeExceptionally(failure);
+    }
+    // Lifecycle, mutation, safe-reclaim, and advisory messages intentionally have no failure-side
+    // action. In particular, a lifecycle record must remain in its lane for shutdown cleanup.
   }
 
   private static void notifyAsyncRejection(Consumer<Throwable> reject, Throwable failure) {
@@ -1247,145 +2526,159 @@ public final class MaintenanceEventLoop
     }
   }
 
-  private int drainMutations(int limit) {
-    int work = 0;
-    while (work < limit) {
-      Entry entry = queue.poll();
-      if (entry == null) {
-        break;
+  private void advanceAsyncCompletedSequence(long sequence) {
+    long current = asyncCompletedSequence;
+    while (sequenceAfter(sequence, current)) {
+      if (ASYNC_COMPLETED_SEQUENCE_UPDATER.compareAndSet(this, current, sequence)) {
+        return;
       }
-      processEntry(entry);
-      work++;
+      current = asyncCompletedSequence;
     }
-    return work;
   }
 
-  private int drainReliableRemovals(int limit) {
+  private int drainWriterLifecycleJournal(long[] watermark) {
+    return drainWriterLifecycleJournal(watermark, Integer.MAX_VALUE, false);
+  }
+
+  private int drainAllWriterLifecycleJournal(long[] watermark) {
+    return drainWriterLifecycleJournal(watermark, Integer.MAX_VALUE, true);
+  }
+
+  private int drainWriterLifecycleJournal(long[] watermark, int maximumRecords) {
+    return drainWriterLifecycleJournal(watermark, maximumRecords, false);
+  }
+
+  private int drainWriterLifecycleJournal(
+      long[] watermark, int maximumRecords, boolean includeMailboxOwned) {
+    WriterLifecycleJournal journal = writerLifecycleJournal;
+    if (journal == null || watermark == null || watermark.length == 0 || maximumRecords <= 0) {
+      return 0;
+    }
     int work = 0;
-    while (work < limit) {
-      if (pendingRemovalRetirement) {
-        if (!commitPendingRemovalRetirement()) {
+    int laneCount = watermark.length;
+    int startLane = lifecycleLaneCursor >= laneCount ? 0 : lifecycleLaneCursor;
+    int laneIndex = startLane;
+    int lanesVisited = 0;
+    while (lanesVisited < laneCount && work < maximumRecords) {
+      WriterLifecycleLane lane = journal.lane(laneIndex);
+      while (!lane.watermarkComplete(watermark[laneIndex])) {
+        if (!(includeMailboxOwned ? lane.poll(writerRemovalRecord) : lane.pollUnmanaged(writerRemovalRecord))) {
           break;
         }
-        pendingRemovalRetirement = false;
-        resetPendingRemovalRetry();
-        Throwable failure = pendingRemovalFailure;
-        pendingRemovalFailure = null;
-        removalRecord.clear();
-        work++;
-        if (failure != null) {
-          throwUnchecked(failure);
-        }
-        continue;
-      }
-      if (!reliableRemovals.pollNext(removalRecord)) {
-        break;
-      }
-      Entry entry = removalRecord.entry;
-      if (entry == null) {
-        removalRecord.clear();
-        work++;
-        continue;
-      }
-      Throwable failure = null;
-      if (evictionNotifier != null && removalRecord.cause != null) {
         try {
-          evictionNotifier.notify(entry, removalRecord.valueAddress, removalRecord.cause);
-        } catch (Throwable listenerFailure) {
-          failure = listenerFailure;
+          processWriterLifecycleRecord(lane);
+        } finally {
+          lane.release(writerRemovalRecord);
+          writerRemovalRecord.clear();
+        }
+        work++;
+        if (work >= maximumRecords) {
+          break;
         }
       }
-      try {
-        processEntry(entry, true);
-      } catch (Throwable processingFailure) {
-        if (failure != null) {
-          processingFailure.addSuppressed(failure);
-        }
-        failure = processingFailure;
+      lane.finishReadyDrain();
+      lanesVisited++;
+      laneIndex++;
+      if (laneIndex == laneCount) {
+        laneIndex = 0;
       }
-      pendingRemovalFailure = failure;
-      if (!commitPendingRemovalRetirement()) {
-        pendingRemovalRetirement = true;
-        schedulePendingRemovalRetry();
-        break;
-      }
-      Throwable completedFailure = pendingRemovalFailure;
-      pendingRemovalFailure = null;
-      removalRecord.clear();
-      work++;
-      if (completedFailure != null) {
-        throwUnchecked(completedFailure);
-      }
+    }
+    lifecycleLaneCursor = laneIndex;
+    if (work != 0) {
+      requestWriterResourceScan();
     }
     return work;
   }
 
-  private boolean commitPendingRemovalRetirement() {
-    if (!prepareActorRetirement(2)) {
-      return false;
+  private void requestWriterResourceScan() {
+    WriterResourceRegistry resources = writerResources;
+    if (resources != null) {
+      resources.requestRetirementScan();
     }
-    Entry entry = removalRecord.entry;
-    if (weakValueStateStore != null) {
-      weakValueStateStore.remove(entry);
-    }
-    retireActorValueBlock(removalRecord.valueAddress, removalRecord.valueAllocation);
-    retireActorValue(entry.nativeKeyAddress, entry.keyAllocationLength());
-    return true;
   }
 
-  /** Repairs coalesced mutations whose advisory queue offer lost a race with a full queue. */
-  private int repairMutations(int limit) {
-    int work = 0;
-    int attempts = 0;
-    int shards = 0;
-    long observedVersion = repairVersion.get();
-    RepairShardToken token;
-    while (shards < limit
-        && attempts < limit
-        && (token = dirtyRepairShardQueue.poll()) != null) {
-      shards++;
-      ConcurrentLinkedQueue<Entry> repairQueue = repairQueues[token.index];
-      Entry entry;
-      while (attempts < limit && (entry = repairQueue.poll()) != null) {
-        attempts++;
-        if (entry.isRepairMarked()) {
-          processEntry(entry);
-          work++;
+  /** Applies exactly one already-published lifecycle record in mailbox order. */
+  private void processWriterLifecycleRecord(WriterLifecycleLane lane) {
+    if (writerRemovalRecord.operation == WriterLifecycleLane.REMOVE
+        && writerRemovalRecord.entry != null) {
+      if (evictionNotifier != null && writerRemovalRecord.cause != null) {
+        try {
+          evictionNotifier.notify(
+              writerRemovalRecord.entry,
+              writerRemovalRecord.valueAddress,
+              writerRemovalRecord.cause);
+        } catch (Throwable ignored) {
+          // Listener failures must not prevent native retirement.
         }
       }
-      repairShardDirty.set(token.index, 0);
-      if (!repairQueue.isEmpty()
-          && repairShardDirty.compareAndSet(token.index, 0, 1)) {
-        dirtyRepairShardQueue.offer(token);
-      }
+      processEntry(writerRemovalRecord.entry, Entry.PENDING_REMOVE);
+      // The reliable lifecycle record is the last owner allowed to touch this native metadata.
+      // Clear stale advisory queue/retry bits before the key block is retired; otherwise a later
+      // stale queue node can keep EntryLinks alive forever.
+      writerRemovalRecord.entry.clearStalePendingFlags();
+      retireActorValueBlock(writerRemovalRecord.valueAddress, writerRemovalRecord.allocation);
+      retireActorValue(
+          writerRemovalRecord.entry.nativeKeyAddress,
+          writerRemovalRecord.entry.nativeKeyAllocationLength());
+      links.maybeRelease(writerRemovalRecord.entry);
+    } else if (writerRemovalRecord.operation == WriterLifecycleLane.MUTATION
+        && writerRemovalRecord.entry != null) {
+      processEntry(
+          writerRemovalRecord.entry,
+          writerRemovalRecord.valueAddress,
+          writerRemovalRecord.allocation,
+          writerRemovalRecord.generation);
     }
-    if (observedVersion == repairVersion.get()
-        && repairDebtTotal.get() == 0L
-        && dirtyRepairShardQueue.isEmpty()) {
-      repairNeeded.set(false);
-    }
-    return work;
   }
 
   private void processEntry(Entry entry) {
     processEntry(entry, false);
   }
 
+  /** Applies a reliable mutation record carrying the actor's primitive publication seed. */
+  private void processEntry(
+      Entry entry, long seededKeyHash64, long seededValueAllocation, long seededMutationVersion) {
+    processEntry(
+        entry,
+        false,
+        seededKeyHash64,
+        seededValueAllocation,
+        seededMutationVersion,
+        true);
+  }
+
   private void processEntry(Entry entry, boolean allowRetired) {
+    processEntry(
+        entry,
+        allowRetired,
+        0L,
+        0L,
+        WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
+        false);
+  }
+
+  private void processEntry(
+      Entry entry,
+      boolean allowRetired,
+      long seededKeyHash64,
+      long seededValueAllocation,
+      long seededMutationVersion,
+      boolean hasSeed) {
+    if (terminalFailure.get() != null) {
+      return;
+    }
+    if (!allowRetired && !entry.isAlive()) {
+      // Advisory queues can retain an Entry after reliable removal has retired its native block.
+      // Check the heap lifecycle tag before touching the native state word.
+      return;
+    }
     int flags = entry.takePending();
     // tryBeginPending() holds this claim from reservation through pointer publication. It is
     // stronger than observing the writer mutex: a racing actor can never clear the merged
     // flags after a writer started but before the writer publishes its new value pointer.
     if (flags == Entry.PENDING_BUSY) {
-      deferMutation(entry);
-      return;
-    }
-    if (entry.clearRepairMarker()) {
-      decrementRepairDebt(entry);
-    }
-    if (!allowRetired && !entry.isAlive()) {
-      // Advisory queues can retain an Entry after reliable removal has retired its native block.
-      // Drop the heap marker without touching native metadata that may already be reused.
+      // Reliable removal owns this entry's lifecycle record. There is no advisory mutation to
+      // retry while the removal claim is active.
       return;
     }
     if (flags == 0) {
@@ -1395,130 +2688,47 @@ public final class MaintenanceEventLoop
     if (entry.isWriterLocked()) {
       // ADD/UPDATE no longer hold a pending claim. A worker may therefore dequeue the
       // advisory hint while the per-entry writer is between allocation and publication.
-      // Put the hint back into the bounded deferred path and let the retry deadline observe
-      // the fully published value.
-      if (entry.requeueMutation(flags)) {
-        deferredMutations.addLast(entry);
+      // Leave one native retry marker for the writer's publication epilogue. The actor never
+      // waits for the writer and never keeps a second Java queue of Entry references.
+      entry.requestMutationRetry(flags);
+      if (!entry.isWriterLocked()) {
+        // The writer may have released the mutex between the probe and the marker CAS. In that
+        // race the actor and writer compete for one retry handoff; only the CAS winner publishes.
+        if (entry.claimMutationRetry()) {
+          enqueueMutationHint(entry, true);
+        }
       }
-      scheduleDeferredMutationRetry();
       return;
     }
-    processEntry(entry, flags);
-  }
-
-  private int drainDeferredMutations(int limit) {
-    int attempts = Math.min(limit, deferredMutations.size());
-    int work = 0;
-    boolean progressed = false;
-    while (attempts-- > 0 && work < limit) {
-      Entry entry = deferredMutations.removeFirst();
-      int flags = entry.takePending();
-      if (flags == Entry.PENDING_BUSY) {
-        deferredMutations.addLast(entry);
-        continue;
-      }
-      if (entry.clearRepairMarker()) {
-        decrementRepairDebt(entry);
-      }
-      if (flags != 0 && !entry.isAlive()) {
-        // The reliable removal path has already retired this Entry's native block. The deferred
-        // transport item is stale and must not read or mutate the recycled metadata tail.
-        progressed = true;
-        work++;
-        continue;
-      }
-      if (flags != 0 && entry.isWriterLocked()) {
-        if (entry.requeueMutation(flags)) {
-          deferredMutations.addLast(entry);
-        }
-        continue;
-      }
-      if (flags != 0) {
-        processEntry(entry, flags);
-        work++;
-      }
-      progressed = true;
-    }
-    if (deferredMutations.isEmpty()) {
-      resetDeferredMutationRetry();
-    } else {
-      if (progressed) {
-        deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
-      }
-      scheduleDeferredMutationRetry();
-    }
-    return work;
-  }
-
-  private void deferMutation(Entry entry) {
-    deferredMutations.addLast(entry);
-    scheduleDeferredMutationRetry();
-  }
-
-  private void scheduleDeferredMutationRetry() {
-    deferredMutationRetryNanos =
-        saturatingAdd(sampleMonotonicNow(), deferredMutationRetryBackoffNanos);
-    deferredMutationRetryBackoffNanos =
-        Math.min(DEFERRED_MUTATION_RETRY_MAX_NANOS, deferredMutationRetryBackoffNanos << 1);
-  }
-
-  private int drainWeakValueReferences(int limit) {
-    ReferenceQueue<Object> queue = weakValueQueue;
-    if (queue == null || limit <= 0) {
-      weakValueCleanupContinuation = false;
-      return 0;
-    }
-    int processed = 0;
-    int cleared = 0;
-    while (processed < limit) {
-      Object reference = queue.poll();
-      if (reference == null) {
-        break;
-      }
-      processed++;
-      if (reference instanceof Entry.WeakValueSlot) {
-        Entry.WeakValueSlot slot = (Entry.WeakValueSlot) reference;
-        WeakValueStateStore store = weakValueStateStore;
-        if (store != null && store.clearWeakValueIfCurrent(slot)) {
-          cleared++;
-        }
-      }
-    }
-    weakValueCleanupContinuation = processed == limit;
-    return cleared;
-  }
-
-  private void resetDeferredMutationRetry() {
-    deferredMutationRetryNanos = Long.MAX_VALUE;
-    deferredMutationRetryBackoffNanos = DEFERRED_MUTATION_RETRY_INITIAL_NANOS;
-  }
-
-  private void schedulePendingRemovalRetry() {
-    pendingRemovalRetryNanos =
-        saturatingAdd(sampleMonotonicNow(), pendingRemovalRetryBackoffNanos);
-    pendingRemovalRetryBackoffNanos =
-        Math.min(RECLAIM_RETRY_MAX_NANOS, pendingRemovalRetryBackoffNanos << 1);
-  }
-
-  private void resetPendingRemovalRetry() {
-    pendingRemovalRetryNanos = Long.MAX_VALUE;
-    pendingRemovalRetryBackoffNanos = WINDOW_NANOS;
-  }
-
-  private void decrementRepairDebt(Entry entry) {
-    while (true) {
-      long current = repairDebtTotal.get();
-      if (current == 0L || repairDebtTotal.compareAndSet(current, current - 1L)) {
-        return;
-      }
-    }
-  }
-
-  private long repairDebt() {
-    return repairDebtTotal.get();
+    processEntry(
+        entry,
+        flags,
+        seededKeyHash64,
+        seededValueAllocation,
+        seededMutationVersion,
+        hasSeed);
   }
 
   private void processEntry(Entry entry, int flags) {
+    processEntry(
+        entry,
+        flags,
+        0L,
+        0L,
+        WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
+        false);
+  }
+
+  private void processEntry(
+      Entry entry,
+      int flags,
+      long seededKeyHash64,
+      long seededValueAllocation,
+      long seededMutationVersion,
+      boolean hasSeed) {
+    if (terminalFailure.get() != null) {
+      return;
+    }
     long version = entry.mutationVersion();
     if ((flags & Entry.PENDING_REMOVE) != 0) {
       wheel.remove(entry);
@@ -1529,29 +2739,81 @@ public final class MaintenanceEventLoop
       return;
     }
     if ((flags & (Entry.PENDING_ADD | Entry.PENDING_UPDATE)) != 0) {
-      applyEntry(entry, version, flags);
+      applyEntry(
+          entry,
+          version,
+          flags,
+          seededKeyHash64,
+          seededValueAllocation,
+          seededMutationVersion,
+          hasSeed);
       entry.tryRolloverMaintenanceVersion();
     }
   }
 
   private void applyEntry(Entry entry, long version, int flags) {
+    applyEntry(
+        entry,
+        version,
+        flags,
+        0L,
+        0L,
+        WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
+        false);
+  }
+
+  private void applyEntry(
+      Entry entry,
+      long version,
+      int flags,
+      long seededKeyHash64,
+      long seededValueAllocation,
+      long seededMutationVersion,
+      boolean hasSeed) {
     long taggedAddress = entry.valueAddress;
     long address = Entry.rawValueAddress(taggedAddress);
-    if (address == 0L || !isCurrent(entry)) {
+    long deadlineNanos =
+        address != 0L && Entry.hasTtl(taggedAddress)
+            ? ValueBlock.deadlineNanos(address)
+            : NO_DEADLINE;
+    if (address == 0L || !isCurrent(entry) || entry.isLogicallyAbsent()) {
       wheel.remove(entry);
       policy.remove(entry, false);
       policyDirty = true;
+      if (deadlineNanos != NO_DEADLINE && isCurrent(entry)) {
+        // A reader can mark an expired mapping logically absent before its ADD/UPDATE hint is
+        // drained. Keep the timer attached so the actor still owns the physical unlink and
+        // retirement; the entry must not contribute to the live policy weight in the meantime.
+        wheel.reschedule(entry, deadlineNanos);
+      }
       if (!entry.markAppliedVersion(version)) {
         republishMutation(entry, flags);
       }
       return;
     }
-    policy.add(entry);
+    long currentValueAllocation = entry.currentValueAllocation();
+    boolean reliableSeed =
+        hasSeed && seededMutationVersion != WriterLifecycleLane.UNSEEDED_MUTATION_VERSION;
+    // The 32-bit version freezes at saturation while further updates may still coalesce.
+    // Equality at that fence cannot establish freshness; the Entry remains authoritative.
+    long valueAllocation =
+        reliableSeed && seededMutationVersion == version && version != 0xffffffffL
+            ? seededValueAllocation
+            : currentValueAllocation;
+    if (!reliableSeed && valueAllocation == 0L) {
+      // Advisory and explicitly unseeded mutations do not carry a writer-owned allocation seed.
+      // Keep their historical cold fallback; reliable lane records use the current Entry
+      // allocation on a version mismatch.
+      valueAllocation = ValueBlock.allocationLength(ValueBlock.length(address));
+    }
+    long keyHash64 = reliableSeed ? seededKeyHash64 : entry.keyHash64();
+    policy.add(entry, valueAllocation, keyHash64);
+    int linkId = entry.policyLinkId();
     policyDirty = true;
-    if (Entry.hasTtl(taggedAddress)) {
-      wheel.reschedule(entry, ValueBlock.expireAtMillis(address));
+    if (deadlineNanos != NO_DEADLINE) {
+      wheel.reschedule(entry, deadlineNanos, linkId);
     } else {
-      wheel.remove(entry);
+      wheel.remove(entry, linkId);
     }
     if (!entry.markAppliedVersion(version)) {
       republishMutation(entry, flags);
@@ -1563,46 +2825,10 @@ public final class MaintenanceEventLoop
     applyEntry(entry, entry.mutationVersion(), Entry.PENDING_UPDATE);
   }
   private void republishMutation(Entry entry, int flags) {
-    if (!entry.requeueMutation(flags)) {
+    if (!entry.publishMutation(flags)) {
       return;
     }
-    if (!queue.offer(entry)) {
-      markMutationForRepair(entry);
-    }
-  }
-
-  private int sealRetirements(int limit) {
-    if (!retirements.consumeReadyHint()) {
-      return 0;
-    }
-    int sealed = retirements.seal(limit, epoch, this::recordValueResidence);
-    // The signal is coalesced. If the bounded pass consumed its complete budget, schedule
-    // another pass rather than re-scanning every native retirement stripe unconditionally.
-    if (sealed == limit) {
-      retirements.requestSeal();
-    }
-    if (sealed != 0) {
-      latestRetireEpoch = epoch;
-    }
-    return sealed;
-  }
-
-  /**
-   * Retirements are first marked with the current epoch and only then move readers forward. The
-   * cadence bounds the retry window in {@code ReaderGuard.enter()} without letting a new reader
-   * bypass an address that was made unreachable in its own epoch.
-   */
-  private boolean advanceEpochIfDue(long nowNanos) {
-    if (!retirements.hasPendingReclaim() || latestRetireEpoch < epoch) {
-      return false;
-    }
-    if (hasAdvancedEpoch && nowNanos - lastEpochAdvanceNanos < EPOCH_ADVANCE_INTERVAL_NANOS) {
-      return false;
-    }
-    epoch++;
-    lastEpochAdvanceNanos = nowNanos;
-    hasAdvancedEpoch = true;
-    return true;
+    enqueueMutationHint(entry, true);
   }
 
   private boolean refreshClock(WorkPlan plan) {
@@ -1627,35 +2853,29 @@ public final class MaintenanceEventLoop
         || reclaimRetryNanos <= nowNanos;
   }
 
-  private boolean deferredMutationWorkDue() {
-    return deferredMutationRetryNanos == Long.MAX_VALUE
-        || deferredMutationRetryNanos <= sampleMonotonicNow();
-  }
-
-  private boolean evictionWorkDue(long monotonicNow) {
-    if (policy.usedWeight() <= capacity) {
-      return false;
+  private long nextRetryDeadlineNanos(int retirementState, int runnableCheck) {
+    long tickerDeadline = Long.MAX_VALUE;
+    LogicalAdmission admission = logicalAdmission;
+    if (admission != null
+        && admission.isOverTarget()
+        && capacityRetryNanos != Long.MAX_VALUE) {
+      tickerDeadline = Math.min(tickerDeadline, capacityRetryNanos);
     }
-    return evictionRetryNanos == Long.MAX_VALUE || evictionRetryNanos <= monotonicNow;
-  }
-
-  /** A retry deadline can delay a later window, but no producer signal can make it earlier. */
-  private long nextRetryDeadlineNanos() {
-    long tickerDeadline = Long.MIN_VALUE;
-    if (!deferredMutations.isEmpty() && deferredMutationRetryNanos != Long.MAX_VALUE) {
-      tickerDeadline = Math.max(tickerDeadline, deferredMutationRetryNanos);
+    // An active reader makes reclaim non-runnable. Its actor-installed notification marker wakes
+    // the actor on exit, so exposing the retry deadline here would only create a redundant pass.
+    boolean pendingSealed =
+        (retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
+    if (pendingSealed && reclaimRetryNanos != Long.MAX_VALUE) {
+      boolean activeReaders =
+          (runnableCheck & RUNNABLE_CHECK_READERS) != 0
+              ? (runnableCheck & RUNNABLE_CHECK_ACTIVE_READERS) != 0
+              : hasActiveReaders();
+      if (!activeReaders) {
+        tickerDeadline = Math.min(tickerDeadline, reclaimRetryNanos);
+      }
     }
-    if (policy.usedWeight() > capacity && evictionRetryNanos != Long.MAX_VALUE) {
-      tickerDeadline = Math.max(tickerDeadline, evictionRetryNanos);
-    }
-    if (retirements.hasPendingReclaim() && reclaimRetryNanos != Long.MAX_VALUE) {
-      tickerDeadline = Math.max(tickerDeadline, reclaimRetryNanos);
-    }
-    if (pendingRemovalRetirement && pendingRemovalRetryNanos != Long.MAX_VALUE) {
-      tickerDeadline = Math.max(tickerDeadline, pendingRemovalRetryNanos);
-    }
-    return tickerDeadline == Long.MIN_VALUE
-        ? Long.MIN_VALUE
+    return tickerDeadline == Long.MAX_VALUE
+        ? Long.MAX_VALUE
         : retryDeadlineToWallClock(tickerDeadline);
   }
 
@@ -1664,122 +2884,231 @@ public final class MaintenanceEventLoop
     return remaining <= 0L ? System.nanoTime() : saturatingAdd(System.nanoTime(), remaining);
   }
 
-  private void scheduleEvictionRetry() {
-    long now = sampleMonotonicNow();
-    evictionRetryNanos = saturatingAdd(now, evictionRetryBackoffNanos);
-    evictionRetryBackoffNanos =
-        Math.min(EVICTION_RETRY_MAX_NANOS, evictionRetryBackoffNanos << 1);
-  }
-
-  private int drainAccesses(int limit) {
+  private int drainAccesses(ReaderRegistry.SlotTableSnapshot slots, int limit) {
     if (limit <= 0) {
       return 0;
     }
-    readers.cleanupCollected(limit);
-    WeakReference<ReaderSlot>[] snapshot = readers.accessScanSnapshot();
-    int length = snapshot.length;
-    if (length == 0) {
+    if (slots == null) {
+      throw new IllegalStateException("access turn has no reader slot snapshot");
+    }
+    int capacity = slots.slotCapacity();
+    if (capacity == 0) {
       accessScanCursor = 0;
       accessScanActive = false;
       return 0;
     }
-    int start = accessScanCursor;
-    if (start >= length) {
-      start %= length;
+    int start = accessScanCursor >= capacity ? 0 : accessScanCursor;
+    int work = drainAccessRange(slots, start, capacity, limit);
+    if (work < limit && start != 0) {
+      work += drainAccessRange(slots, 0, start, limit - work);
     }
-    int work = 0;
-    int scanned = 0;
-    boolean liveReader = false;
-    while (scanned < length && work < limit) {
-      int index = (start + scanned) % length;
-      accessScanCursor = (index + 1) % length;
-      ReaderSlot slot = snapshot[index].get();
-      if (slot != null) {
-        liveReader = true;
-        long hitDelta = slot.publishedHits - slot.consumedHits;
-        long missDelta = slot.publishedMisses - slot.consumedMisses;
-        if (hitDelta != 0L) {
-          hits += hitDelta;
-          slot.consumedHits += hitDelta;
-        }
-        if (missDelta != 0L) {
-          misses += missDelta;
-          slot.consumedMisses += missDelta;
-        }
-        AccessRing access = slot.access;
-        if (access != null) {
-          while (work < limit && access.poll(this)) {
-            work++;
-          }
-        }
-      }
-      scanned++;
-    }
-    accessScanActive = scanned < length || liveReader;
     return work;
   }
 
-  private boolean hasPendingAccess() {
-    readers.cleanupCollected(4_096);
-    for (WeakReference<ReaderSlot> reference : readers.accessScanSnapshot()) {
-      ReaderSlot slot = reference.get();
-      if (slot == null) {
+  private int drainAccessRange(
+      ReaderRegistry.SlotTableSnapshot slots,
+      int startInclusive,
+      int endExclusive,
+      int limit) {
+    int work = 0;
+    int cursor = startInclusive;
+    while (cursor < endExclusive && work < limit) {
+      int index = slots.firstLiveSlot(cursor, endExclusive);
+      if (index < 0) {
+        break;
+      }
+      accessScanCursor = index + 1;
+      if (accessScanCursor >= slots.slotCapacity()) {
+        accessScanCursor = 0;
+      }
+      ReaderSlot slot = slots.slotAt(index);
+      if (slot != null) {
+        long consumedHits = slots.consumedHits(index);
+        long hitDelta = slot.publishedHits - consumedHits;
+        if (hitDelta != 0L) {
+          hits += hitDelta;
+          slots.consumedHits(index, consumedHits + hitDelta);
+        }
+        long consumedMisses = slots.consumedMisses(index);
+        long missDelta = slot.publishedMisses - consumedMisses;
+        if (missDelta != 0L) {
+          misses += missDelta;
+          slots.consumedMisses(index, consumedMisses + missDelta);
+        }
+        AccessRing access = slot.access;
+        if (access != null) {
+          work += access.poll(limit - work, this);
+        }
+      }
+      cursor = index + 1;
+    }
+    return work;
+  }
+
+  /** Checks a bounded number of registered owners and retires slots whose threads have ended. */
+  private int scanTerminatedReaders(int limit) {
+    if (limit <= 0 || !readerLifecycleCheckActive) {
+      return 0;
+    }
+    if (!readers.hasRegisteredSlots()) {
+      finishReaderLifecycleSweep();
+      return 0;
+    }
+    ReaderRegistry.SlotTableSnapshot slots = readers.slotTableSnapshot();
+    int capacity = slots.slotCapacity();
+    if (capacity == 0) {
+      finishReaderLifecycleSweep();
+      return 0;
+    }
+    if (readerLifecycleCursor >= capacity) {
+      readerLifecycleCursor = 0;
+      readerLifecycleWrapped = true;
+    }
+    int checked = 0;
+    int retired = 0;
+    while (checked < limit && readerLifecycleCheckActive) {
+      int endExclusive = readerLifecycleWrapped ? readerLifecycleStart : capacity;
+      int index = slots.firstLiveSlot(readerLifecycleCursor, endExclusive);
+      if (index < 0) {
+        if (readerLifecycleWrapped || readerLifecycleStart == 0) {
+          finishReaderLifecycleSweep();
+        } else {
+          readerLifecycleWrapped = true;
+          readerLifecycleCursor = 0;
+        }
         continue;
       }
-      AccessRing access = slot.access;
-      if (slot.publishedHits != slot.consumedHits
-          || slot.publishedMisses != slot.consumedMisses
-          || (access != null && !access.isEmpty())) {
-        return true;
+      checked++;
+      readerLifecycleCursor = index + 1;
+      if (readerLifecycleCursor >= capacity) {
+        readerLifecycleCursor = 0;
+        readerLifecycleWrapped = true;
+      }
+      ReaderSlot slot = slots.slotAt(index);
+      if (slot == null || !readers.isTerminated(slot)) {
+        continue;
+      }
+      collectFinalAccess(slots, index, slot);
+      com.red.ohc.runtime.WriterResource resource =
+          readers.detachTerminated(index);
+      if (resource != null && writerResources != null) {
+        writerResources.requestRetirement(resource);
+      }
+      retired++;
+    }
+    if (readerLifecycleCheckActive
+        && readerLifecycleWrapped
+        && slots.firstLiveSlot(readerLifecycleCursor, readerLifecycleStart) < 0) {
+      finishReaderLifecycleSweep();
+    }
+    // A bounded lifecycle sweep advances its cursor even when every inspected owner is still
+    // live. Count that scan as progress so the adaptive controller does not mistake a real
+    // registry walk for an empty, immediately-repeatable maintenance pass.
+    return Math.max(retired, checked);
+  }
+
+  private void collectFinalAccess(
+      ReaderRegistry.SlotTableSnapshot slots, int index, ReaderSlot slot) {
+    long consumedHits = slots.consumedHits(index);
+    long hitDelta = slot.publishedHits - consumedHits;
+    if (hitDelta != 0L) {
+      hits += hitDelta;
+      slots.consumedHits(index, consumedHits + hitDelta);
+    }
+    long consumedMisses = slots.consumedMisses(index);
+    long missDelta = slot.publishedMisses - consumedMisses;
+    if (missDelta != 0L) {
+      misses += missDelta;
+      slots.consumedMisses(index, consumedMisses + missDelta);
+    }
+    AccessRing access = slot.access;
+    if (access != null) {
+      access.poll(Integer.MAX_VALUE, this);
+    }
+  }
+
+  private void finishReaderLifecycleSweep() {
+    readerLifecycleCheckActive = false;
+    readerLifecycleWrapped = false;
+    nextReaderLifecycleCheckNanos =
+        readers.hasRegisteredSlots()
+            ? saturatingAdd(sampleMonotonicNow(), tuning.readerLifecyclePeriodNanos)
+            : Long.MAX_VALUE;
+  }
+
+  private boolean hasPendingAccess() {
+    ReaderRegistry.SlotTableSnapshot slots = readers.slotTableSnapshot();
+    for (int chunkIndex = 0; chunkIndex < slots.slotChunkCount(); chunkIndex++) {
+      long bits = slots.liveBitmap(chunkIndex);
+      while (bits != 0L) {
+        int offset = Long.numberOfTrailingZeros(bits);
+        int index = (chunkIndex << ReaderRegistry.SLOT_CHUNK_SHIFT) + offset;
+        ReaderSlot slot = slots.slotAt(index);
+        if (slot != null) {
+          AccessRing access = slot.access;
+          boolean ringPending =
+              access != null && access.armNotificationAndCheckPending();
+          if (slot.publishedHits != slots.consumedHits(index)
+              || slot.publishedMisses != slots.consumedMisses(index)
+              || ringPending) {
+            return true;
+          }
+        }
+        bits &= bits - 1L;
       }
     }
     return false;
   }
 
   @Override
-  public void accept(Entry entry, long generation) {
-    if (entry.generation() == generation && isCurrent(entry)) {
-      policy.access(entry);
+  public void accept(
+      Entry entry,
+      long observedValueAddress,
+      long observedGeneration,
+      int observedPolicyState) {
+    if (isCurrent(entry)
+        && entry.valueAddress == observedValueAddress
+        && entry.generation() == observedGeneration) {
+      policy.access(entry, observedPolicyState);
       policy.recordAccessHit();
     }
   }
 
-  private int reclaim(int limit) {
-    long before = retirements.retiredBytes();
-    int reclaimed = retirements.reclaim(readers, limit);
-    if (!countBounded) {
-      budget.release(before - retirements.retiredBytes());
-    }
-    // An active reader cannot be observed through a write-side queue event. Keep a bounded
-    // QSBR deadline while it remains active so its ordinary exit need not perform a WakeGate
-    // CAS on every cache operation. This is deadline-driven reclaim work, not idle polling.
-    // A reclaim pass can make progress in one stripe and then stop at the first record in a
-    // later stripe whose reader is still active. Treat that partial-progress case as blocked
-    // too; otherwise a blocked retirement could lose its bounded reclaim retry and the worker
-    // could park forever with a full retirement ring.
-    boolean pending = retirements.hasPendingReclaim();
-    reclaimContinuation = reclaimed == limit && pending;
-    reclaimBlocked = !reclaimContinuation && pending;
-    if (!pending || reclaimContinuation) {
-      resetReclaimRetry();
-    } else {
-      if (reclaimed != 0) {
-        reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
+  /** Tracks a QSBR-blocked sealed queue without releasing any SAFE native memory on the actor. */
+  private void updateReclaimPublicationState(long blockSample) {
+    boolean wasBlocked = reclaimBlocked;
+    if (!retirements.hasSealedSegments()) {
+      reclaimBlocked = false;
+      if (wasBlocked && retirementReclaimBlockedSinceNanos != Long.MIN_VALUE) {
+        retirementReclaimBlockedNanos =
+            saturatingAdd(
+                retirementReclaimBlockedNanos,
+                Math.max(0L, blockSample - retirementReclaimBlockedSinceNanos));
+        retirementReclaimBlockedSinceNanos = Long.MIN_VALUE;
       }
-      scheduleReclaimRetry();
+      resetReclaimRetry();
+      return;
     }
-    return reclaimed;
+    // The actor may not release SAFE segments, but it still owns the QSBR observation that makes
+    // a sealed segment eligible for publication. Keep the existing bounded retry/wake protocol.
+    reclaimBlocked = true;
+    if (!wasBlocked) {
+      retirementReclaimBlockedCount =
+          saturatingAdd(retirementReclaimBlockedCount, 1L);
+      retirementReclaimBlockedSinceNanos = blockSample;
+    }
+    scheduleReclaimRetry();
   }
 
   private void scheduleReclaimRetry() {
     reclaimRetryNanos = saturatingAdd(sampleMonotonicNow(), reclaimRetryBackoffNanos);
     reclaimRetryBackoffNanos =
-        Math.min(RECLAIM_RETRY_MAX_NANOS, reclaimRetryBackoffNanos << 1);
+        Math.min(tuning.reclaimRetryMaxNanos, reclaimRetryBackoffNanos << 1);
   }
 
   private void resetReclaimRetry() {
     reclaimRetryNanos = Long.MAX_VALUE;
-    reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
+    reclaimRetryBackoffNanos = tuning.reclaimRetryInitialNanos;
   }
 
   @Override
@@ -1789,89 +3118,40 @@ public final class MaintenanceEventLoop
     if (taggedAddress != expectedValueAddress
         || address == 0L
         || !Entry.hasTtl(taggedAddress)) {
+      rescheduleCurrentTimerAfterValueRace(entry, taggedAddress);
       return;
     }
-    long expiry = ValueBlock.expireAtMillis(address);
-    if (expiry <= 0L || expiry > nowMillis) {
+    long deadline = ValueBlock.deadlineNanos(address);
+    if (deadline == NO_DEADLINE || deadline > nowNanos) {
       return;
     }
-    timeoutLagMillis = Math.max(timeoutLagMillis, Math.max(0L, nowMillis - expiry));
+    long lagNanos = Math.max(0L, nowNanos - deadline);
+    long lagMillis = lagNanos / 1_000_000L;
+    timeoutLagMillis = Math.max(timeoutLagMillis, lagMillis);
     if (removeFromMap(
         entry, false, expectedGeneration, expectedValueAddress, RemovalCause.EXPIRED)) {
       physicalExpired++;
     } else {
       if (entry.valueAddress == expectedValueAddress && isCurrent(entry)) {
-        wheel.add(entry, expiry);
+        wheel.add(entry, deadline);
       }
     }
   }
 
-  private int evictIfNeeded(int limit) {
-    int work = 0;
-    int scans = 0;
-    long target = capacity;
-    boolean scanExhausted = false;
-    boolean removed = false;
-    while (work < limit && scans < limit && policy.usedWeight() > target) {
-      MaintenancePolicy.Selection selection = policy.selectVictim(limit - scans);
-      int selectionScans = policy.lastVictimScanCount();
-      scans += selectionScans;
-      if (selection.kind == MaintenancePolicy.Selection.Kind.SCAN_EXHAUSTED) {
-        scanExhausted = true;
-        break;
-      }
-      if (selection.kind == MaintenancePolicy.Selection.Kind.NONE) {
-        break;
-      }
-      Entry victim = selection.entry;
-      long victimHash = victim.keyHash64();
-      long expectedGeneration = victim.generation();
-      long expectedValueAddress = victim.valueAddress;
-      boolean removedCurrent =
-          removeFromMap(
-              victim,
-              true,
-              expectedGeneration,
-              expectedValueAddress,
-              victimHash,
-              RemovalCause.SIZE);
-      if (!removedCurrent
-          && (victim.valueAddress == 0L || !isCurrent(victim))) {
-        policy.remove(victim, false);
-        policyDirty = true;
-        removed = true;
-        work++;
-      } else {
-        if (removedCurrent) {
-          removed = true;
-        }
-        if (!removedCurrent
-            && victim.valueAddress != 0L
-            && isCurrent(victim)
-            && victim.isWriterLocked()) {
-          policy.skipLocked(victim);
-          scheduleEvictionRetry();
-        } else if (!removedCurrent) {
-          scheduleEvictionRetry();
-          break;
-        }
-      }
+  /** The timer node was detached before expiry validation, so restore a concurrently published value. */
+  private void rescheduleCurrentTimerAfterValueRace(Entry entry, long taggedAddress) {
+    if (!entry.isAlive() || taggedAddress == 0L || !Entry.hasTtl(taggedAddress)) {
+      return;
     }
-    if (removed || policy.usedWeight() <= target) {
-      evictionRetryNanos = Long.MAX_VALUE;
-      evictionRetryBackoffNanos = EVICTION_RETRY_INITIAL_NANOS;
-    } else {
-      if (scanExhausted || evictionRetryNanos == Long.MAX_VALUE) {
-        scheduleEvictionRetry();
-      }
+    long address = Entry.rawValueAddress(taggedAddress);
+    if (address != 0L) {
+      wheel.add(entry, ValueBlock.deadlineNanos(address));
     }
-    return work;
   }
 
   public boolean removeFromMap(
       Entry entry, boolean eviction, long expectedGeneration, long expectedValueAddress) {
-    return removeFromMap(
-        entry, eviction, expectedGeneration, expectedValueAddress, 0L, false, null);
+    return removeFromMap(entry, eviction, expectedGeneration, expectedValueAddress, null);
   }
 
   private boolean removeFromMap(
@@ -1879,64 +3159,93 @@ public final class MaintenanceEventLoop
       boolean eviction,
       long expectedGeneration,
       long expectedValueAddress,
-      RemovalCause cause) {
-    return removeFromMap(
-        entry, eviction, expectedGeneration, expectedValueAddress, 0L, false, cause);
-  }
-
-  private boolean removeFromMap(
-      Entry entry,
-      boolean eviction,
-      long expectedGeneration,
-      long expectedValueAddress,
-      long evictionHash,
-      RemovalCause cause) {
-    return removeFromMap(
-        entry, eviction, expectedGeneration, expectedValueAddress, evictionHash, true, cause);
-  }
-
-  private boolean removeFromMap(
-      Entry entry,
-      boolean eviction,
-      long expectedGeneration,
-      long expectedValueAddress,
-      long evictionHash,
-      boolean hashProvided,
       RemovalCause cause) {
     if (expectedValueAddress == 0L) {
       return false;
     }
-    if (!entry.claimWriter()) {
-      return false;
-    }
+    boolean writerHeld = false;
     boolean removed = false;
     long value = 0L;
     try {
+      if (!entry.claimWriter()) {
+        return false;
+      }
+      writerHeld = true;
       if (entry.generation() != expectedGeneration || entry.valueAddress != expectedValueAddress) {
         return false;
       }
-      if (!prepareActorRetirement(2)) {
+      entry.markRetired();
+      boolean physicallyRemoved;
+      int policyLinkId = entry.policyLinkId();
+      if (eviction) {
+        // Capacity victims are policy-owned.  A missing or timer-only link has no reliable hash
+        // seed, so fail the conditional removal instead of falling back to Entry.hashCode().
+        physicallyRemoved =
+            policyLinkId != 0
+                && links.policyState(policyLinkId) != Entry.POLICY_NONE
+                && data.remove(evictionKey.reset(entry, links.keyHash64(policyLinkId))) == entry;
+      } else {
+        // Expiry can encounter a timer-only record before its policy mutation is applied.  Keep
+        // the existing identity helper for that cold path; it is not the capacity eviction hot
+        // path and does not assume an initialized policy mirror.
+        physicallyRemoved = identityRemoval.remove(data, entry);
+      }
+      if (!physicallyRemoved) {
+        entry.restoreAlive();
+        releaseWriter(entry);
+        writerHeld = false;
         return false;
       }
-      removed = removeCurrent(entry);
-      if (removed) {
-        value = Entry.rawValueAddress(entry.valueAddress);
-        clearValue(entry);
-        clearRepairWork(entry);
+      removed = true;
+      value = Entry.rawValueAddress(entry.valueAddress);
+      if (eviction) {
+        long valueAllocation =
+            value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
+        recordSizeEviction(entry.keyAllocationLength(), valueAllocation);
       }
+      markLogicallyAbsentByActor(entry);
+      clearValue(entry);
+      releaseWriter(entry);
+      writerHeld = false;
+    } catch (Throwable failure) {
+      // A CHM implementation may unlink the node and throw afterwards. The unlink is already
+      // durable in that case: finish the victim's accounting and retirement, then propagate the
+      // original failure so the cache enters its terminal state. Never restore this victim.
+      if (writerHeld && physicallyUnlinked(entry)) {
+        try {
+          removed = true;
+          value = Entry.rawValueAddress(entry.valueAddress);
+          if (eviction) {
+            long valueAllocation =
+                value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
+            recordSizeEviction(entry.keyAllocationLength(), valueAllocation);
+          }
+          markLogicallyAbsentByActor(entry);
+          clearValue(entry);
+          releaseWriter(entry);
+          writerHeld = false;
+          wheel.remove(entry);
+          policy.remove(entry, eviction);
+          policyDirty = true;
+          retireEntryBlocks(entry, value);
+        } catch (Throwable cleanupFailure) {
+          if (cleanupFailure != failure) {
+            failure.addSuppressed(cleanupFailure);
+          }
+          recordTerminalFailure(cleanupFailure);
+        }
+      }
+      throw failure;
     } finally {
-      entry.finishWriter();
+      if (writerHeld) {
+        releaseWriter(entry);
+      }
     }
     if (!removed) {
-      finishActorRetirementBatch();
       return false;
     }
     wheel.remove(entry);
-    if (hashProvided) {
-      policy.remove(entry, eviction, evictionHash);
-    } else {
-      policy.remove(entry, eviction);
-    }
+    policy.remove(entry, eviction);
     policyDirty = true;
     Throwable listenerFailure = null;
     if (cause != null && evictionNotifier != null) {
@@ -1953,127 +3262,287 @@ public final class MaintenanceEventLoop
     return true;
   }
 
+  private boolean physicallyUnlinked(Entry entry) {
+    try {
+      return !isMappedEntry(entry);
+    } catch (Throwable ignored) {
+      return false;
+    }
+  }
+
+  /** Checks map ownership with one identity-safe CHM lookup and no table-wide scan. */
+  private boolean isMappedEntry(Entry target) {
+    if (target == null) {
+      return false;
+    }
+    try {
+      int linkId = target.policyLinkId();
+      long keyHash64 =
+          linkId != 0 && links.policyState(linkId) != Entry.POLICY_NONE
+              ? links.keyHash64(linkId)
+              : target.keyHash64();
+      return data.get(evictionKey.reset(target, keyHash64)) == target;
+    } catch (Throwable ignored) {
+      // A failure during exceptional cleanup must not free a possibly still-mapped native entry.
+      return true;
+    }
+  }
+
   private void retireEntryBlocks(Entry entry, long value) {
     long valueAllocation = value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
     retireActorValueBlock(value, valueAllocation);
-    long keyAllocation = entry.keyAllocationLength();
+    long keyAllocation = entry.nativeKeyAllocationLength();
     retireActorValue(entry.nativeKeyAddress, keyAllocation);
-    if (weakValueStateStore != null) {
-      weakValueStateStore.remove(entry);
-    }
+    links.maybeRelease(entry);
   }
 
-  /** Records one retired value version using the actor's last published maintenance time. */
-  private void recordValueResidence(long valueAddress) {
-    if (valueAddress == 0L) {
-      return;
-    }
-    long createdAtMillis = ValueBlock.createdAtMillis(valueAddress);
-    long residenceMillis = nowMillis - createdAtMillis;
+  /** Records a low-frequency writer-side replacement sample at pointer publication time. */
+  public void recordResidenceSample(long createdAtMillis, long publishedAtMillis) {
+    long residenceMillis = publishedAtMillis - createdAtMillis;
     if (residenceMillis < 0L) {
       residenceMillis = 0L;
     }
-    entryResidenceCount.incrementAndGet();
-    totalEntryResidenceTimeMillis.addAndGet(residenceMillis);
+    residenceSampleCount.incrementAndGet();
+    residenceSampleTotalMillis.addAndGet(residenceMillis);
   }
 
-  private void clearRepairWork(Entry entry) {
-    if (entry.clearRepairMarker()) {
-      decrementRepairDebt(entry);
-    }
+  private double averageResidenceSampleMillis() {
+    long count = residenceSampleCount.get();
+    return count == 0L ? 0.0d : (double) residenceSampleTotalMillis.get() / count;
   }
 
   private boolean isCurrent(Entry entry) {
     return entry.isAlive();
   }
 
-  private boolean removeCurrent(Entry entry) {
-    if (!entry.isAlive()) {
-      return false;
+  private void markLogicallyAbsent(Entry entry) {
+    LogicalAdmission admission = logicalAdmission;
+    if (admission != null) {
+      admission.markAbsent(entry);
+      return;
     }
-    entry.markRetired();
-    if (data.remove(entry, entry)) {
-      return true;
+    entry.markLogicallyAbsent();
+  }
+
+  /** Completes the actor-owned logical transition after a successful identity unlink. */
+  private long markLogicallyAbsentByActor(Entry entry) {
+    LogicalAdmission admission = logicalAdmission;
+    if (admission == null) {
+      entry.markLogicallyAbsentAfterWriterClaim();
+      return 0L;
     }
-    entry.restoreAlive();
-    return false;
+    return admission.markAbsentByActor(entry);
+  }
+
+  /** Completes the native writer transition and wakes an application waiter, if any. */
+  private void releaseWriter(Entry entry) {
+    entry.finishWriter();
+    if (closing || isStopping()) {
+      // The normal live-entry handoff uses notify(). Once shutdown starts, every waiter must
+      // observe the terminal state and leave rather than relying on another writer turnover.
+      synchronized (entry) {
+        entry.notifyAll();
+      }
+    }
   }
 
   private void shutdownAndFree() {
-    rejectPendingAsync(new IllegalStateException("cache is closed"));
-    finishActorRetirementBatch();
-    readers.cleanupCollected(4_096);
-    while (hasActiveReaders()) {
-      LockSupport.parkNanos(this, WINDOW_NANOS);
+    Throwable failure = null;
+    try {
+      failPendingMailbox(new IllegalStateException("cache is closed"));
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
     }
-    drainAllAccesses();
-    while (reliableRemovals.pollNext(removalRecord)) {
-      releaseReliableRemovalRecord();
-      removalRecord.clear();
-    }
-    if (pendingRemovalRetirement) {
-      releaseReliableRemovalRecord();
-      pendingRemovalRetirement = false;
-      pendingRemovalFailure = null;
-      removalRecord.clear();
-    }
-    while (retirements.consumeReadyHint()) {
-      int sealed = retirements.seal(Integer.MAX_VALUE, epoch);
-      if (sealed != 0) {
-        latestRetireEpoch = epoch;
+    WriterResourceRegistry resources = writerResources;
+    if (resources != null) {
+      try {
+        resources.detachAll();
+      } catch (Throwable cleanupFailure) {
+        failure = appendShutdownFailure(failure, cleanupFailure);
+      }
+      try {
+        resources.processRetirements();
+      } catch (Throwable cleanupFailure) {
+        failure = appendShutdownFailure(failure, cleanupFailure);
       }
     }
-    clearPendingMutationQueues();
-    drainWeakValueReferences(Integer.MAX_VALUE);
+
+    try {
+      startReaderLifecycleSweep();
+      scanTerminatedReaders(READER_LIFECYCLE_SCAN_LIMIT);
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    try {
+      awaitActiveReaders();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    try {
+      while (readerLifecycleCheckActive) {
+        scanTerminatedReaders(READER_LIFECYCLE_SCAN_LIMIT);
+        if (resources != null) {
+          resources.processRetirements();
+        }
+      }
+      drainAllAccesses();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    WriterLifecycleJournal writerJournal = writerLifecycleJournal;
+    if (writerJournal != null) {
+      try {
+        while (writerJournal.hasCommittedRecords()) {
+          long[] watermark = writerJournal.captureWatermark();
+          if (drainAllWriterLifecycleJournal(watermark) == 0) {
+            break;
+          }
+        }
+      } catch (Throwable cleanupFailure) {
+        failure = appendShutdownFailure(failure, cleanupFailure);
+      }
+    }
+
+    try {
+      retirements.cutAllProducersAtWatermark();
+      retirements.sealReadySegments(epoch.get());
+      retirements.publishSafe(Long.MAX_VALUE);
+      retirements.reclaimActorResult(memory, Integer.MAX_VALUE);
+      while (retirements.consumeReadyHint()) {
+        int sealed = retirements.sealReadySegments(epoch.get());
+        if (sealed != 0) {
+          incrementEpoch();
+        }
+      }
+      if (resources != null) {
+        resources.processRetirements();
+      }
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    try {
+      clearPendingActorMessages(new IllegalStateException("cache is closed"));
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
     for (Entry entry : data.values()) {
       long value = Entry.rawValueAddress(entry.valueAddress);
-      clearValue(entry);
-      if (value != 0L) {
-        memory.releaseEntry(value, ValueBlock.allocationLength(ValueBlock.length(value)));
+      try {
+        // The close barrier owns the final ledger transition before clearing the Java map. This
+        // keeps the LongAdder pair quiescent and lets the cache-side cold assertion reconcile to
+        // an empty mapping set.
+        markLogicallyAbsent(entry);
+        clearValue(entry);
+      } catch (Throwable cleanupFailure) {
+        failure = appendShutdownFailure(failure, cleanupFailure);
       }
-      memory.releaseEntry(entry.nativeKeyAddress, entry.keyAllocationLength());
+      if (value != 0L) {
+        try {
+          memory.releaseEntry(value, ValueBlock.allocationLength(ValueBlock.length(value)));
+        } catch (Throwable cleanupFailure) {
+          failure = appendShutdownFailure(failure, cleanupFailure);
+        }
+      }
+      try {
+        memory.releaseEntry(entry.nativeKeyAddress, entry.nativeKeyAllocationLength());
+      } catch (Throwable cleanupFailure) {
+        failure = appendShutdownFailure(failure, cleanupFailure);
+      }
     }
-    data.clear();
-    if (weakValueStateStore != null) {
-      weakValueStateStore.clear();
+    try {
+      data.clear();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
     }
-    retirements.freeAll();
-    retirements.close();
-    memory.closeArenas();
-    if (!countBounded) {
-      budget.reclaimIdleCredits();
-      budget.clear();
+    // Every teardown step is independent. In particular, a failed final retirement release must
+    // not prevent closing the journal, policy, links, and native arenas below.
+    try {
+      retirements.close();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
     }
-    readers.clear();
-    evictionNotifier = null;
+    try {
+      policy.close();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    try {
+      links.close();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    try {
+      memory.closeArenas();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    }
+    try {
+      readers.clear();
+    } catch (Throwable cleanupFailure) {
+      failure = appendShutdownFailure(failure, cleanupFailure);
+    } finally {
+      evictionNotifier = null;
+    }
+    if (failure != null) {
+      recordTerminalFailure(failure);
+    }
+  }
+
+  private static Throwable appendShutdownFailure(Throwable first, Throwable next) {
+    if (first == null) {
+      return next;
+    }
+    if (first != next) {
+      first.addSuppressed(next);
+    }
+    return first;
+  }
+
+  private void awaitActiveReaders() {
+    boolean interrupted = false;
+    setReaderExitSignal(READER_SIGNAL_HAS_SHUTDOWN_WAITER);
+    try {
+      while (hasActiveReaders()) {
+        if (!readerLifecycleCheckActive) {
+          startReaderLifecycleSweep();
+        }
+        scanTerminatedReaders(READER_LIFECYCLE_SCAN_LIMIT);
+        WriterResourceRegistry resources = writerResources;
+        if (resources != null) {
+          resources.processRetirements();
+        }
+        if (!hasActiveReaders()) {
+          break;
+        }
+        shutdownWaitLock.lock();
+        try {
+          if (hasActiveReaders()) {
+            try {
+              shutdownProgress.awaitNanos(1_000_000L);
+            } catch (InterruptedException interruption) {
+              interrupted = true;
+            }
+          }
+        } finally {
+          shutdownWaitLock.unlock();
+        }
+      }
+    } finally {
+      clearReaderExitSignal(READER_SIGNAL_HAS_SHUTDOWN_WAITER);
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   private void drainAllAccesses() {
     while (hasPendingAccess()) {
-      drainAccesses(Integer.MAX_VALUE);
+      drainAccesses(readers.slotTableSnapshot(), Integer.MAX_VALUE);
     }
-  }
-
-  private void releaseReliableRemovalRecord() {
-    Entry entry = removalRecord.entry;
-    if (entry == null) {
-      return;
-    }
-    if (weakValueStateStore != null) {
-      weakValueStateStore.remove(entry);
-    }
-    if (removalRecord.valueAddress != 0L) {
-      memory.releaseEntry(removalRecord.valueAddress, removalRecord.valueAllocation);
-    }
-    memory.releaseEntry(entry.nativeKeyAddress, entry.keyAllocationLength());
   }
 
   private void clearValue(Entry entry) {
-    if (weakValueStateStore == null) {
-      entry.valueAddress = 0L;
-    } else {
-      weakValueStateStore.clearValue(entry);
-    }
+    entry.clearValue();
   }
 
   private static void throwUnchecked(Throwable failure) {
@@ -2086,55 +3555,22 @@ public final class MaintenanceEventLoop
     throw new RuntimeException(failure);
   }
 
-  private void clearPendingMutationQueues() {
-    while (queue.poll() != null) {
-      // Drop the transport reference without touching entry ownership.
-    }
-    for (ConcurrentLinkedQueue<Entry> repairQueue : repairQueues) {
-      repairQueue.clear();
-    }
-    dirtyRepairShardQueue.clear();
-    for (int shard = 0; shard <= repairShardMask; shard++) {
-      repairShardDirty.set(shard, 0);
-    }
-    deferredMutations.clear();
-    repairNeeded.set(false);
-    repairDebtTotal.set(0L);
+  private void clearPendingActorMessages(Throwable failure) {
+    failPendingMailbox(failure);
   }
 
   private boolean hasActiveReaders() {
     return readers.hasActiveReader();
   }
 
-  private boolean prepareActorRetirement(int records) {
-    int batchRecords =
-        Math.max(records, actorRetirementBatchRecords);
-    if (actorRetirement.active()) {
-      if (retirements.remaining(actorRetirement) >= records) {
-        return true;
-      }
-      retirements.cancel(actorRetirement);
-    }
-    if (retirements.reserve(actorRetirement, Math.max(records, batchRecords))) {
-      return true;
-    }
-    // Recovery is a separately planned action in the next window. Running seal/reclaim here
-    // would let a single eviction candidate bypass both the work-plan budget and the cadence.
-    return false;
-  }
-
-  private void finishActorRetirementBatch() {
-    if (actorRetirement.active()) {
-      retirements.cancel(actorRetirement);
-    }
-  }
-
   private void retireActorValue(long address, long allocation) {
-    retirements.append(actorRetirement, address, allocation);
+    retirements.appendStructural(address, allocation);
+    actorRetirementNeedsFlushFence |= flushRequest.get() != null;
   }
 
   private void retireActorValueBlock(long address, long allocation) {
-    retirements.appendValue(actorRetirement, address, allocation);
+    retirements.append(address, allocation);
+    actorRetirementNeedsFlushFence |= flushRequest.get() != null;
   }
 
   private void signal() {
@@ -2143,83 +3579,195 @@ public final class MaintenanceEventLoop
     }
   }
 
-  /**
-   * A producer publishes only the class of work it made visible. The actor consumes the mask at a
-   * window boundary, where it can combine it with actor-owned continuations into one work plan.
-   */
+  private boolean isStopping() {
+    return (readerExitSignals.get() & READER_SIGNAL_STOPPING) != 0L;
+  }
+
+  private void setReaderExitSignal(long signal) {
+    for (;;) {
+      long current = readerExitSignals.get();
+      if ((current & signal) != 0L) {
+        return;
+      }
+      if (readerExitSignals.compareAndSet(current, current | signal)) {
+        return;
+      }
+    }
+  }
+
+  private void clearReaderExitSignal(long signal) {
+    for (;;) {
+      long current = readerExitSignals.get();
+      if ((current & signal) == 0L) {
+        return;
+      }
+      if (readerExitSignals.compareAndSet(current, current & ~signal)) {
+        return;
+      }
+    }
+  }
+
+  private void signalShutdownProgress() {
+    signalShutdownProgress(readerExitSignals.get());
+  }
+
+  private void signalShutdownProgress(long signals) {
+    if ((signals & READER_SIGNAL_HAS_SHUTDOWN_WAITER) == 0L) {
+      return;
+    }
+    shutdownWaitLock.lock();
+    try {
+      shutdownProgress.signalAll();
+    } finally {
+      shutdownWaitLock.unlock();
+    }
+  }
+
+  private void offerDurable(Object message) {
+    durableMailboxDepth.incrementAndGet();
+    boolean offered = false;
+    try {
+      if (!mailbox.offer(message)) {
+        throw new IllegalStateException("actor mailbox rejected a durable message");
+      }
+      offered = true;
+    } finally {
+      if (!offered) {
+        durableMailboxDepth.decrementAndGet();
+      }
+    }
+  }
+
+  private Object pollMailbox() {
+    Object message = mailbox.relaxedPoll();
+    if (message != null
+        && (!(message instanceof ActorMessage)
+            || ((ActorMessage) message).kind != ActorMessage.ADVISORY)) {
+      durableMailboxDepth.decrementAndGet();
+    }
+    return message;
+  }
+
+  /** Publishes a coalesced advisory marker; durable transaction messages are never merged. */
   private void requestWork(int work) {
+    if (work == 0) {
+      return;
+    }
+    int advisoryWork = work & WORK_ACCESS_SCAN;
+    boolean markerRequired = false;
     while (true) {
       int current = requestedWork.get();
       int updated = current | work;
-      if (current == updated || requestedWork.compareAndSet(current, updated)) {
+      if (current == updated) {
         break;
+      }
+      if (requestedWork.compareAndSet(current, updated)) {
+        // Durable mutation/lifecycle/retirement sources wake the actor directly and are already
+        // represented by their own mailbox item or journal state. Only standalone access hints
+        // need a coalesced mailbox marker to make an otherwise invisible side queue visible to the
+        // actor.
+        markerRequired = advisoryWork != 0 && (current & advisoryWork) == 0;
+        break;
+      }
+    }
+    if (markerRequired) {
+      try {
+        if (!mailbox.offer(ActorMessage.advisory(work))) {
+          throw new IllegalStateException("actor mailbox rejected an advisory marker");
+        }
+      } catch (Throwable failure) {
+        recordTerminalFailure(failure);
+        return;
       }
     }
     signal();
   }
 
-  static final class WindowScheduler {
-    private long nextPassNanos = Long.MIN_VALUE;
-
-    void request(long nowNanos) {
-      if (nextPassNanos == Long.MIN_VALUE) {
-        nextPassNanos = saturatingAdd(nowNanos, WINDOW_NANOS);
-      }
+  /** Captures reusable source cuts once so one actor turn cannot chase a growing source. */
+  private TurnCuts captureTurnCuts(WorkPlan plan) {
+    WriterLifecycleJournal lifecycle = writerLifecycleJournal;
+    turnCuts.ensureLifecycleLanes(lifecycle == null ? 0 : lifecycle.laneCount());
+    if (lifecycle != null) {
+      lifecycle.captureWatermark(turnCuts.lifecycleWatermark);
     }
-
-    boolean isDue(long nowNanos) {
-      return nextPassNanos != Long.MIN_VALUE && nowNanos >= nextPassNanos;
+    if (plan.access || plan.flush) {
+      turnCuts.accessSlots = readers.slotTableSnapshot();
+      captureAccessTurnCut(turnCuts.accessSlots, turnCuts);
+    } else {
+      turnCuts.accessSlots = null;
+      turnCuts.accessRecords = 0;
     }
-
-    long nextPassNanos() {
-      return nextPassNanos;
+    turnCuts.ensureRetirementLanes(retirements.laneCount() + 1);
+    if (isStopping()) {
+      retirements.captureAndCutWatermark(turnCuts.retirementWatermark);
+    } else if (plan.seal) {
+      retirements.captureAndCutReadyWatermark(turnCuts.retirementWatermark);
+    } else {
+      retirements.captureTurnWatermark(turnCuts.retirementWatermark);
     }
-
-    void complete(long passEndNanos, boolean continued, long retryDeadlineNanos) {
-      if (!continued) {
-        nextPassNanos = Long.MIN_VALUE;
-        return;
-      }
-      long next = saturatingAdd(passEndNanos, WINDOW_NANOS);
-      if (retryDeadlineNanos != Long.MIN_VALUE && retryDeadlineNanos > next) {
-        next = retryDeadlineNanos;
-      }
-      nextPassNanos = next;
-    }
-
-    void clear() {
-      nextPassNanos = Long.MIN_VALUE;
-    }
+    WriterResourceRegistry resources = writerResources;
+    turnCuts.resourceVersion =
+        resources == null ? Long.MAX_VALUE : resources.captureRegistrationVersion();
+    return turnCuts;
   }
 
-  static final class BatchLimits {
-    final int general;
-    final int access;
-    final int eviction;
-    final int async;
-
-    private BatchLimits(int general, int access, int eviction, int async) {
-      this.general = general;
-      this.access = access;
-      this.eviction = eviction;
-      this.async = async;
+  /** Cuts partial retirement producers only at the event-loop's natural idle boundary. */
+  private boolean cutIdleRetirementRecords(int retirementState) {
+    if ((retirementState & RetirementJournal.WORK_STATE_OPEN) == 0) {
+      return false;
     }
+    retirements.cutAllProducersAtWatermark();
+    retirements.requestSeal();
+    requestWork(WORK_RETIREMENT);
+    return true;
+  }
 
-    static BatchLimits forCpu(int logicalCpuCount) {
-      // The final cap means values above sixteen cores cannot increase a batch. Clamp before
-      // rounding so the Caffeine-style power-of-two calculation cannot overflow.
-      int cores = Math.min(16, Math.max(1, logicalCpuCount));
-      int powerOfTwo = 1;
-      while (powerOfTwo < cores) {
-        powerOfTwo <<= 1;
+  private void captureAccessTurnCut(
+      ReaderRegistry.SlotTableSnapshot slots, TurnCuts turn) {
+    int pendingRecords = 0;
+    long dropped = 0L;
+    for (int chunkIndex = 0; chunkIndex < slots.slotChunkCount(); chunkIndex++) {
+      long bits = slots.liveBitmap(chunkIndex);
+      while (bits != 0L) {
+        int offset = Long.numberOfTrailingZeros(bits);
+        int index = (chunkIndex << ReaderRegistry.SLOT_CHUNK_SHIFT) + offset;
+        ReaderSlot slot = slots.slotAt(index);
+        if (slot != null) {
+          pendingRecords =
+              saturatingIntAdd(
+                  pendingRecords,
+                  boundedWorkCount(
+                      Math.max(0L, slot.publishedHits - slots.consumedHits(index))));
+          pendingRecords =
+              saturatingIntAdd(
+                  pendingRecords,
+                  boundedWorkCount(
+                      Math.max(0L, slot.publishedMisses - slots.consumedMisses(index))));
+          AccessRing access = slot.access;
+          if (access != null) {
+            int depth = access.size();
+            pendingRecords = saturatingIntAdd(pendingRecords, depth);
+            dropped = saturatingAdd(dropped, access.droppedCount());
+          }
+        }
+        bits &= bits - 1L;
       }
-      int general = Math.min(16 * powerOfTwo, 256);
-      return new BatchLimits(
-          general,
-          Math.min(general * 2, 256),
-          Math.min(general / 4, 64),
-          Math.min(general / 4, 64));
     }
+    turn.accessRecords = pendingRecords;
+    turn.accessDropped = dropped;
+    accessRingDroppedCount = turn.accessDropped;
+    accessScanActive = pendingRecords != 0;
+  }
+
+  private static int boundedWorkCount(long count) {
+    return (int) Math.min(Integer.MAX_VALUE, Math.max(0L, count));
+  }
+
+  private static int saturatingIntAdd(int left, int right) {
+    if (right > 0 && left > Integer.MAX_VALUE - right) {
+      return Integer.MAX_VALUE;
+    }
+    return left + right;
   }
 
   private static long saturatingAdd(long left, long right) {
@@ -2229,71 +3777,148 @@ public final class MaintenanceEventLoop
     return left + right;
   }
 
-  private static final class WorkPlan {
-    private int requested;
-    private boolean budget;
-    private boolean removals;
-    private boolean mutations;
-    private boolean repair;
-    private boolean deferred;
-    private boolean access;
-    private boolean ttl;
-    private boolean seal;
-    private boolean reclaim;
-    private boolean eviction;
-    private boolean allocation;
-    private boolean async;
-    private boolean weakValues;
-    private boolean flush;
-    private boolean refreshClock;
+  /** Actor-local CHM key adapter that compares by Entry identity and uses the mirrored hash. */
+  private static final class EvictionKey {
+    private Entry victim;
+    private int hash;
 
-    private WorkPlan reset(int requested) {
-      this.requested = requested;
-      budget = false;
-      removals = false;
-      mutations = false;
-      repair = false;
-      deferred = false;
-      access = false;
-      ttl = false;
-      seal = false;
-      reclaim = false;
-      eviction = false;
-      allocation = false;
-      async = false;
-      weakValues = false;
-      flush = false;
-      refreshClock = false;
+    private EvictionKey reset(Entry victim, long keyHash64) {
+      this.victim = victim;
+      this.hash = (int) (keyHash64 ^ (keyHash64 >>> 32));
       return this;
     }
 
-    private boolean hasPolicyMutations() {
-      return removals || mutations || repair || deferred;
+    @Override
+    public int hashCode() {
+      return hash;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other == victim;
+    }
+  }
+
+  private static final class WorkDecision {
+    private int requested;
+    private int retirementState;
+    private int runnableCheck;
+    private FlushRequest flushRequest;
+    private boolean capacityOverTarget;
+    private boolean capacityRetryDue;
+    private boolean writerLifecycleWork;
+    private boolean writerResourceWork;
+    private boolean ghostRehash;
+    private boolean accessScanActive;
+    private boolean readerLifecycleWork;
+    private boolean readerNotificationWork;
+    private boolean durableMailboxWork;
+    private boolean ttlDue;
+    private boolean pendingSealed;
+    private boolean pendingSafe;
+    private boolean pendingWriterLifecycleWatermark;
+    private boolean readersChecked;
+    private boolean activeReaders;
+    private WorkPlan plan;
+
+    private boolean isRunnable() {
+      return (runnableCheck & RUNNABLE_CHECK_WORK) != 0;
+    }
+  }
+
+  private static final class WorkPlan {
+    private int requested;
+    private FlushRequest flushRequest;
+    private boolean removals;
+    private boolean resourceRetirements;
+    private boolean mutations;
+    private boolean capacity;
+    private boolean access;
+    private boolean readerLifecycle;
+    private boolean ttl;
+    private boolean seal;
+    private boolean safe;
+    private boolean async;
+    private boolean ghostRehash;
+    private boolean flush;
+    private boolean refreshClock;
+    private int lifecycleQuota;
+    private int capacityQuota;
+    private int retirementQuota;
+    private int accessQuota;
+    private int ttlQuota;
+    private int readerLifecycleQuota;
+    private int advisoryQuota;
+
+    private WorkPlan reset(int requested) {
+      this.requested = requested;
+      flushRequest = null;
+      removals = false;
+      resourceRetirements = false;
+      mutations = false;
+      capacity = false;
+      access = false;
+      readerLifecycle = false;
+      ttl = false;
+      seal = false;
+      safe = false;
+      async = false;
+      ghostRehash = false;
+      flush = false;
+      refreshClock = false;
+      lifecycleQuota = 0;
+      capacityQuota = 0;
+      retirementQuota = 0;
+      accessQuota = 0;
+      ttlQuota = 0;
+      readerLifecycleQuota = 0;
+      advisoryQuota = 0;
+      return this;
+    }
+
+    private boolean hasAdvisoryPolicyMutations() {
+      return mutations;
     }
 
     private boolean hasActions() {
-      return budget
-          || removals
+      return removals
+          || resourceRetirements
           || mutations
-          || repair
-          || deferred
+          || capacity
           || access
+          || readerLifecycle
           || ttl
           || seal
-          || reclaim
-          || eviction
-          || allocation
+          || safe
           || async
-          || weakValues
+          || ghostRehash
           || flush;
     }
   }
 
-  private static final class RepairShardToken {
-    private final int index;
+  private static final class TurnCuts {
+    private long[] lifecycleWatermark;
+    private ReaderRegistry.SlotTableSnapshot accessSlots;
+    private int accessRecords;
+    private long accessDropped;
+    private long resourceVersion;
+    private long[] retirementWatermark;
 
-    private RepairShardToken(int index) {
-      this.index = index;
+    private TurnCuts(int laneCount) {
+      this.lifecycleWatermark = new long[0];
+      this.retirementWatermark = new long[laneCount];
+    }
+
+    private void ensureLifecycleLanes(int laneCount) {
+      if (lifecycleWatermark.length != laneCount) {
+        lifecycleWatermark = new long[laneCount];
+      }
+    }
+
+    private void ensureRetirementLanes(int laneCount) {
+      if (retirementWatermark.length != laneCount) {
+        retirementWatermark = new long[laneCount];
+      }
     }
   }
 
@@ -2309,13 +3934,67 @@ public final class MaintenanceEventLoop
     }
   }
 
-  private static final class FlushRequest {
-    private volatile long sequence;
-    private final CompletableFuture<Void> future;
+  /** FIFO mailbox item; only the actor consumes the message payload. */
+  private static final class ActorMessage {
+    private static final int ADVISORY = 1;
+    private static final int MUTATION = 2;
+    private static final int ASYNC = 4;
+    private static final int FLUSH = 5;
+    private static final ActorMessage ADVISORY_MESSAGE =
+        new ActorMessage(ADVISORY, null, null, null, 0);
 
-    private FlushRequest(long sequence, CompletableFuture<Void> future) {
+    private final int kind;
+    private final Entry entry;
+    private final AsyncMutationTask async;
+    private final FlushRequest flush;
+    private final int advisoryWork;
+
+    private ActorMessage(
+        int kind,
+        Entry entry,
+        AsyncMutationTask async,
+        FlushRequest flush,
+        int advisoryWork) {
+      this.kind = kind;
+      this.entry = entry;
+      this.async = async;
+      this.flush = flush;
+      this.advisoryWork = advisoryWork;
+    }
+
+    private static ActorMessage advisory(int work) {
+      return ADVISORY_MESSAGE;
+    }
+
+    private static ActorMessage mutation(Entry entry) {
+      return new ActorMessage(MUTATION, entry, null, null, 0);
+    }
+
+    private static ActorMessage async(AsyncMutationTask task) {
+      return new ActorMessage(ASYNC, null, task, null, 0);
+    }
+
+    private static ActorMessage flush(FlushRequest flush) {
+      return new ActorMessage(FLUSH, null, null, flush, 0);
+    }
+
+  }
+
+  private static final class FlushRequest {
+    private final long sequence;
+    private final CompletableFuture<Void> future;
+    private final long[] lifecycleWatermark;
+    private final long[] retirementWatermark;
+
+    private FlushRequest(
+        long sequence,
+        CompletableFuture<Void> future,
+        long[] lifecycleWatermark,
+        long[] retirementWatermark) {
       this.sequence = sequence;
       this.future = future;
+      this.lifecycleWatermark = lifecycleWatermark;
+      this.retirementWatermark = retirementWatermark;
     }
   }
 
@@ -2331,8 +4010,71 @@ public final class MaintenanceEventLoop
     public final long queueDepth;
     public final long ttlBacklog;
     public final long nativeAllocationFailureCount;
-    public final long entryResidenceCount;
-    public final long totalEntryResidenceTimeMillis;
+    public final long residenceSampleCount;
+    public final double residenceSampleRate;
+    public final double sampledAverageResidenceTimeMillis;
+    public final long maintenancePassWorkNanos;
+    public final long maintenanceActiveNanosTotal;
+    public final long maintenanceParkNanosTotal;
+    public final long maintenanceImmediateContinuationCount;
+    public final long retirementSealScannedLanes;
+    public final long retirementSealSealedLanes;
+    public final long retirementSealRecords;
+    public final long retirementSealRecordsTotal;
+    public final long retirementReclaimRecordsTotal;
+    public final long retirementSealScannedLanesTotal;
+    public final long retirementSealHeadOfLineStops;
+    public final long retirementReclaimBlockedCount;
+    public final long retirementReclaimBlockedNanos;
+    public final long retirementRetryWakeCount;
+    public final long activeReaderCount;
+    public final long accessRingDroppedCount;
+    public final long retirementQueueDepth;
+    public final long retirementPublishedRecordsTotal;
+    public final long retirementCompletedRecordsTotal;
+    public final long retirementLagRecords;
+    public final long retirementUnsafeRecords;
+    public final long retirementUnsafeBytes;
+    public final long retirementSafeRecords;
+    public final long retirementSafeBytes;
+    public final long retirementClaimedRecords;
+    public final long retirementClaimedBytes;
+    public final long retirementActorReclaimedRecords;
+    public final long retirementAllocatedSegments;
+    public final long retirementReusedSegments;
+    public final long retirementTrimmedSegments;
+    public final long asyncMutationQueueDepth;
+    public final long asyncMutationPublishedRecords;
+    public final long asyncMutationCompletedRecords;
+    public final long asyncMutationLagRecords;
+    public final long ghostNativeBytes;
+    public final long ghostAllocationTrimCount;
+    public final long ghostAllocationDropCount;
+    public final boolean ghostRehashPending;
+    public final long skipSuppressedAccessCount;
+    public final long ghostDeferredPromotionCount;
+    public final long lifecycleJournalPublishedRecords;
+    public final long lifecycleJournalCompletedRecords;
+    public final long lifecycleJournalLagRecords;
+    public final long lifecycleJournalAllocatedSegments;
+    public final long lifecycleJournalHeadOfLineStopCount;
+    public final long allocatorPageAllocatedCount;
+    public final long allocatorPageReusedCount;
+    public final long allocatorPageReadyCount;
+    public final long allocatorPageTrimmedCount;
+    public final long writerResourceActiveCount;
+    public final long writerResourceRetiringCount;
+    public final long writerResourcePooledCount;
+    public final long retirementGeneratedBytesTotal;
+    public final long retirementCompletedBytesTotal;
+    public final double retirementGeneratedBytesPerSecond;
+    public final double retirementCompletedBytesPerSecond;
+    public final long nativeDebtBudgetBytes;
+    public final long nativeDebtHeadroomBytes;
+    public final long retirementSafeSegmentCount;
+    public final long retirementReclaimBatchCount;
+    public final long retirementOldestSafeWaitNanos;
+    public final long mailboxHeadUnpublishedCount;
 
     Snapshot(
         long hits,
@@ -2346,8 +4088,71 @@ public final class MaintenanceEventLoop
         long queueDepth,
         long ttlBacklog,
         long nativeAllocationFailureCount,
-        long entryResidenceCount,
-        long totalEntryResidenceTimeMillis) {
+        long residenceSampleCount,
+        double residenceSampleRate,
+        double sampledAverageResidenceTimeMillis,
+        long maintenancePassWorkNanos,
+        long maintenanceActiveNanosTotal,
+        long maintenanceParkNanosTotal,
+        long maintenanceImmediateContinuationCount,
+        long retirementSealScannedLanes,
+        long retirementSealSealedLanes,
+        long retirementSealRecords,
+        long retirementSealRecordsTotal,
+        long retirementReclaimRecordsTotal,
+        long retirementSealScannedLanesTotal,
+        long retirementSealHeadOfLineStops,
+        long retirementReclaimBlockedCount,
+        long retirementReclaimBlockedNanos,
+        long retirementRetryWakeCount,
+        long activeReaderCount,
+        long accessRingDroppedCount,
+        long retirementQueueDepth,
+        long retirementPublishedRecordsTotal,
+        long retirementCompletedRecordsTotal,
+        long retirementLagRecords,
+        long retirementUnsafeRecords,
+        long retirementUnsafeBytes,
+        long retirementSafeRecords,
+        long retirementSafeBytes,
+        long retirementClaimedRecords,
+        long retirementClaimedBytes,
+        long retirementActorReclaimedRecords,
+        long retirementAllocatedSegments,
+        long retirementReusedSegments,
+        long retirementTrimmedSegments,
+        long asyncMutationQueueDepth,
+        long asyncMutationPublishedRecords,
+        long asyncMutationCompletedRecords,
+        long asyncMutationLagRecords,
+        long ghostNativeBytes,
+        long ghostAllocationTrimCount,
+        long ghostAllocationDropCount,
+        boolean ghostRehashPending,
+        long skipSuppressedAccessCount,
+        long ghostDeferredPromotionCount,
+        long lifecycleJournalPublishedRecords,
+        long lifecycleJournalCompletedRecords,
+        long lifecycleJournalLagRecords,
+        long lifecycleJournalAllocatedSegments,
+        long lifecycleJournalHeadOfLineStopCount,
+        long allocatorPageAllocatedCount,
+        long allocatorPageReusedCount,
+        long allocatorPageReadyCount,
+        long allocatorPageTrimmedCount,
+        long writerResourceActiveCount,
+        long writerResourceRetiringCount,
+        long writerResourcePooledCount,
+        long retirementGeneratedBytesTotal,
+        long retirementCompletedBytesTotal,
+        double retirementGeneratedBytesPerSecond,
+        double retirementCompletedBytesPerSecond,
+        long nativeDebtBudgetBytes,
+        long nativeDebtHeadroomBytes,
+        long retirementSafeSegmentCount,
+        long retirementReclaimBatchCount,
+        long retirementOldestSafeWaitNanos,
+        long mailboxHeadUnpublishedCount) {
       this.hits = hits;
       this.misses = misses;
       this.evictionCount = evictionCount;
@@ -2359,8 +4164,71 @@ public final class MaintenanceEventLoop
       this.queueDepth = queueDepth;
       this.ttlBacklog = ttlBacklog;
       this.nativeAllocationFailureCount = nativeAllocationFailureCount;
-      this.entryResidenceCount = entryResidenceCount;
-      this.totalEntryResidenceTimeMillis = totalEntryResidenceTimeMillis;
+      this.residenceSampleCount = residenceSampleCount;
+      this.residenceSampleRate = residenceSampleRate;
+      this.sampledAverageResidenceTimeMillis = sampledAverageResidenceTimeMillis;
+      this.maintenancePassWorkNanos = maintenancePassWorkNanos;
+      this.maintenanceActiveNanosTotal = maintenanceActiveNanosTotal;
+      this.maintenanceParkNanosTotal = maintenanceParkNanosTotal;
+      this.maintenanceImmediateContinuationCount = maintenanceImmediateContinuationCount;
+      this.retirementSealScannedLanes = retirementSealScannedLanes;
+      this.retirementSealSealedLanes = retirementSealSealedLanes;
+      this.retirementSealRecords = retirementSealRecords;
+      this.retirementSealRecordsTotal = retirementSealRecordsTotal;
+      this.retirementReclaimRecordsTotal = retirementReclaimRecordsTotal;
+      this.retirementSealScannedLanesTotal = retirementSealScannedLanesTotal;
+      this.retirementSealHeadOfLineStops = retirementSealHeadOfLineStops;
+      this.retirementReclaimBlockedCount = retirementReclaimBlockedCount;
+      this.retirementReclaimBlockedNanos = retirementReclaimBlockedNanos;
+      this.retirementRetryWakeCount = retirementRetryWakeCount;
+      this.activeReaderCount = activeReaderCount;
+      this.accessRingDroppedCount = accessRingDroppedCount;
+      this.retirementQueueDepth = retirementQueueDepth;
+      this.retirementPublishedRecordsTotal = retirementPublishedRecordsTotal;
+      this.retirementCompletedRecordsTotal = retirementCompletedRecordsTotal;
+      this.retirementLagRecords = retirementLagRecords;
+      this.retirementUnsafeRecords = retirementUnsafeRecords;
+      this.retirementUnsafeBytes = retirementUnsafeBytes;
+      this.retirementSafeRecords = retirementSafeRecords;
+      this.retirementSafeBytes = retirementSafeBytes;
+      this.retirementClaimedRecords = retirementClaimedRecords;
+      this.retirementClaimedBytes = retirementClaimedBytes;
+      this.retirementActorReclaimedRecords = retirementActorReclaimedRecords;
+      this.retirementAllocatedSegments = retirementAllocatedSegments;
+      this.retirementReusedSegments = retirementReusedSegments;
+      this.retirementTrimmedSegments = retirementTrimmedSegments;
+      this.asyncMutationQueueDepth = asyncMutationQueueDepth;
+      this.asyncMutationPublishedRecords = asyncMutationPublishedRecords;
+      this.asyncMutationCompletedRecords = asyncMutationCompletedRecords;
+      this.asyncMutationLagRecords = asyncMutationLagRecords;
+      this.ghostNativeBytes = ghostNativeBytes;
+      this.ghostAllocationTrimCount = ghostAllocationTrimCount;
+      this.ghostAllocationDropCount = ghostAllocationDropCount;
+      this.ghostRehashPending = ghostRehashPending;
+      this.skipSuppressedAccessCount = skipSuppressedAccessCount;
+      this.ghostDeferredPromotionCount = ghostDeferredPromotionCount;
+      this.lifecycleJournalPublishedRecords = lifecycleJournalPublishedRecords;
+      this.lifecycleJournalCompletedRecords = lifecycleJournalCompletedRecords;
+      this.lifecycleJournalLagRecords = lifecycleJournalLagRecords;
+      this.lifecycleJournalAllocatedSegments = lifecycleJournalAllocatedSegments;
+      this.lifecycleJournalHeadOfLineStopCount = lifecycleJournalHeadOfLineStopCount;
+      this.allocatorPageAllocatedCount = allocatorPageAllocatedCount;
+      this.allocatorPageReusedCount = allocatorPageReusedCount;
+      this.allocatorPageReadyCount = allocatorPageReadyCount;
+      this.allocatorPageTrimmedCount = allocatorPageTrimmedCount;
+      this.writerResourceActiveCount = writerResourceActiveCount;
+      this.writerResourceRetiringCount = writerResourceRetiringCount;
+      this.writerResourcePooledCount = writerResourcePooledCount;
+      this.retirementGeneratedBytesTotal = retirementGeneratedBytesTotal;
+      this.retirementCompletedBytesTotal = retirementCompletedBytesTotal;
+      this.retirementGeneratedBytesPerSecond = retirementGeneratedBytesPerSecond;
+      this.retirementCompletedBytesPerSecond = retirementCompletedBytesPerSecond;
+      this.nativeDebtBudgetBytes = nativeDebtBudgetBytes;
+      this.nativeDebtHeadroomBytes = nativeDebtHeadroomBytes;
+      this.retirementSafeSegmentCount = retirementSafeSegmentCount;
+      this.retirementReclaimBatchCount = retirementReclaimBatchCount;
+      this.retirementOldestSafeWaitNanos = retirementOldestSafeWaitNanos;
+      this.mailboxHeadUnpublishedCount = mailboxHeadUnpublishedCount;
     }
   }
 }

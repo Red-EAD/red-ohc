@@ -85,16 +85,7 @@ public class OHCTimeoutDrainBenchmark {
                 .defaultTTLmillis(TTL_MILLIS)
                 .build();
     for (int index = 0; index < entries; index++) {
-      if (!cache.put(keys[index], values[index])) {
-        OHCacheStats stats = cache.stats();
-        throw new IllegalStateException(
-            "OHC TTL setup rejected entry "
-                + index
-                + ": queueDepth="
-                + stats.maintenanceQueueDepth()
-                + ", nativeAllocated="
-                + stats.nativeAllocatedBytes());
-      }
+      cache.put(keys[index], values[index]);
     }
     cache.flushAsync().join();
     physicalExpiredBefore = cache.stats().expirationCount();

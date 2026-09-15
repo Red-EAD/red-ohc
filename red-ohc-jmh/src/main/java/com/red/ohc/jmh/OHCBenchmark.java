@@ -28,8 +28,8 @@ import com.red.ohc.api.ValueView;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.cache.OffHeapCache;
 import com.red.ohc.index.Entry;
+import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
-import com.red.ohc.storage.WriterArena;
 
 /**
  * OHC-only direct-read benchmark. Caffeine runs in a separate benchmark process so its result
@@ -122,20 +122,27 @@ public class OHCBenchmark {
   @Benchmark
   @Threads(1)
   public void ohcDirectOneThread(
-      ThreadState state, Blackhole blackhole, WriteResults results) {
+      ThreadState state,
+      Blackhole blackhole,
+      WriteResults results,
+      BenchmarkWindowResults window) {
     accessOHC(state, blackhole, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   public void ohcDirectCpuThreads(
-      ThreadState state, Blackhole blackhole, WriteResults results) {
+      ThreadState state,
+      Blackhole blackhole,
+      WriteResults results,
+      BenchmarkWindowResults window) {
     accessOHC(state, blackhole, results);
   }
 
   @Benchmark
   @Threads(1)
-  public void ohcDirectAllOneThread(ThreadState state, Blackhole blackhole) {
+  public void ohcDirectAllOneThread(
+      ThreadState state, Blackhole blackhole, BenchmarkWindowResults window) {
     state.blackhole = blackhole;
     blackhole.consume(ohc.getDirectAll(directBatchKeys, state));
   }
@@ -143,7 +150,8 @@ public class OHCBenchmark {
   private void accessOHC(ThreadState state, Blackhole blackhole, WriteResults results) {
     int index = state.next(accessSequence);
     if (state.write(workload)) {
-      results.record(ohc.put(rawKeys[index], values[index]));
+      ohc.put(rawKeys[index], values[index]);
+      results.record(true);
       return;
     }
     state.blackhole = blackhole;
@@ -195,11 +203,10 @@ public class OHCBenchmark {
   static long capacityFor(String residency, int keyBytes, int valueBytes) {
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
-    long allocationWeightPerEntry =
-        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
+    long logicalEntryBytes = CacheMath.logicalEntryBytes(keyAllocation, valueAllocation);
     long residentEntries = "HIT_ONLY".equals(residency) ? WORKING_SET : WORKING_SET * 5L / 6L;
-    // Match MaintenancePolicy's allocator-weight accounting and leave 25% headroom for churn.
-    return residentEntries * allocationWeightPerEntry * 4L / 3L + allocationWeightPerEntry;
+    // Match MaintenancePolicy's logical-entry accounting and leave 25% headroom for churn.
+    return residentEntries * logicalEntryBytes * 4L / 3L + logicalEntryBytes;
   }
 
   private static int[] uniformSequence(int bound) {

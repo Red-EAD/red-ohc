@@ -1,22 +1,93 @@
 package com.red.ohc.storage;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
+import org.openjdk.jol.info.ClassLayout;
+import org.openjdk.jol.info.FieldLayout;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.AllocatorType;
-import com.red.ohc.maintenance.RetirementQueue;
-import com.red.ohc.runtime.ReaderRegistry;
+import com.red.ohc.runtime.ThreadContext;
 
 public class WriterArenaTest {
+  @Test
+  public void availablePagesUseOneDirectLifoStackPerSizeClass() {
+    Field[] memoryFields = NativeMemory.Memory.class.getDeclaredFields();
+    boolean hasDirectReadyStacks = false;
+    boolean hasOwnerQueues = false;
+    for (Field field : memoryFields) {
+      if (field.getName().equals("readyPageStacks")) {
+        hasDirectReadyStacks = true;
+      }
+      if (field.getName().equals("availableOwnerQueues")) {
+        hasOwnerQueues = true;
+      }
+    }
+    Assert.assertTrue(hasDirectReadyStacks, "memory must index ready pages directly by size class");
+    Assert.assertFalse(hasOwnerQueues, "owner indirection must not remain on the allocation path");
+    for (Method method : NativeMemory.Memory.class.getDeclaredMethods()) {
+      Assert.assertNotEquals(
+          method.getName(), "scanAvailablePage", "the page table scan fallback must be removed");
+    }
+  }
+
+  @Test
+  public void slotClassesAre64ByteAlignedAndUseBoundedPageSizing() {
+    for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
+      int slotBytes = SizeClasses.slotBytes(sizeClass);
+      Assert.assertEquals(
+          slotBytes & 63,
+          0,
+          "slot bytes must be rounded up to the native header alignment");
+
+      int expectedPageBytes;
+      if (slotBytes < 4 * 1024) {
+        long required = Math.max(64L * 1024L, 256L * slotBytes);
+        expectedPageBytes = 64 * 1024;
+        while (expectedPageBytes < required) {
+          expectedPageBytes <<= 1;
+        }
+      } else {
+        expectedPageBytes = 2 * 1024 * 1024;
+      }
+      Assert.assertEquals(SizeClasses.pageBytes(sizeClass), expectedPageBytes);
+    }
+  }
+
+  @Test
+  public void pooledSmallAllocationDoesNotUseDirectFallback() throws Exception {
+    Method counter = null;
+    for (Method method : NativeMemory.Memory.class.getDeclaredMethods()) {
+      if (method.getName().equals("smallAllocationFallbackCount")
+          && method.getParameterCount() == 0) {
+        counter = method;
+        break;
+      }
+    }
+    Assert.assertNotNull(counter, "small allocation fallback must be observable");
+
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long entry = arena.allocate(112L);
+      Assert.assertEquals(((Number) counter.invoke(memory)).longValue(), 0L);
+      memory.releaseEntry(entry, 112L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
   @Test
   public void smallEntryReuseDoesNotAllocateANativeBlockPerEntry() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
@@ -59,7 +130,8 @@ public class WriterArenaTest {
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
-      int slotBytes = 128;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotBytes = SizeClasses.slotBytes(sizeClass);
       int count = 1_025;
       List<Long> entries = new ArrayList<>(count);
 
@@ -68,7 +140,8 @@ public class WriterArenaTest {
       }
 
       long requiredPages =
-          (count * (long) slotBytes + SizeClasses.PAGE_BYTES - 1L) / SizeClasses.PAGE_BYTES;
+          (count + (long) SizeClasses.pageBytes(sizeClass) / slotBytes - 1L)
+              / (SizeClasses.pageBytes(sizeClass) / slotBytes);
       Assert.assertTrue(
           memory.rawAllocationCount() <= requiredPages,
           "small writes must consume pooled pages rather than one native allocation per entry");
@@ -81,45 +154,328 @@ public class WriterArenaTest {
   }
 
   @Test
-  public void aCompletelyFreePageIsReusedByAnotherAllocatorStripe() throws Exception {
+  public void boundedFiveKEntriesStayOnPooledPagesWhenTheBudgetFits() {
+    long valueBytes = ValueBlock.allocationLength(5_120);
+    int slotBytes = SizeClasses.slotBytes(SizeClasses.indexForEntry(valueBytes));
+    int entries = 6_000;
+    int slotsPerPage = SizeClasses.pageBytes(SizeClasses.indexForEntry(valueBytes)) / slotBytes;
+    long requiredPages = (entries + (long) slotsPerPage - 1L) / slotsPerPage;
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    List<Long> allocations = new ArrayList<>(entries);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      for (int index = 0; index < entries; index++) {
+        allocations.add(arena.allocate(valueBytes));
+      }
+      Assert.assertEquals(memory.smallAllocationFallbackCount(), 0L);
+    } finally {
+      for (long allocation : allocations) {
+        memory.releaseEntry(allocation, valueBytes);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void aCompletelyFreePageCanRebalanceAcrossWriterResources() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     try {
       long bytes = 112L;
-      int slotsPerPage =
-          SizeClasses.PAGE_BYTES / SizeClasses.slotBytes(SizeClasses.indexForEntry(bytes));
-      WriterArena first = arena(memory, 0);
-      WriterArena second = arena(memory, 1);
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena first = memory.newWriterArena();
+      WriterArena second = memory.newWriterArena();
       List<Long> entries = new ArrayList<>(slotsPerPage);
 
       for (int i = 0; i < slotsPerPage; i++) {
         entries.add(first.allocate(bytes));
       }
+      long firstCurrentPageEntry = first.allocate(bytes);
       for (long entry : entries) {
         memory.releaseEntry(entry, bytes);
       }
 
-      Assert.assertEquals(memory.rawAllocationCount(), 1L);
-      long reused = second.allocate(bytes);
+      Assert.assertEquals(memory.rawAllocationCount(), 2L);
+      long reusedBefore = memory.pageReusedCount();
+      long secondEntry = second.allocate(bytes);
       Assert.assertEquals(
           memory.rawAllocationCount(),
-          1L,
-          "a full idle page must leave its stripe and be reused before allocating another native"
-              + " page");
-      memory.releaseEntry(reused, bytes);
+          2L,
+          "a writer with no local page must reuse a fully empty page before allocating native");
+      Assert.assertEquals(memory.pageReusedCount(), reusedBefore + 1L);
+      memory.releaseEntry(firstCurrentPageEntry, bytes);
+      memory.releaseEntry(secondEntry, bytes);
     } finally {
       memory.closeArenas();
     }
   }
 
   @Test
-  public void idlePageDepotIsBoundedAndReturnsExcessPagesToTheNativeAllocator() throws Exception {
+  public void anAvailablePartialPageCanRebalanceWhileItsOldSlotIsStillLive() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     try {
-      WriterArena arena = arena(memory, 0);
-      long bytes = 32_752L;
-      int pages = memory.pooledPageLimit() + 1;
-      List<Long> entries = new ArrayList<>(pages * 2);
-      for (int index = 0; index < pages * 2; index++) {
+      long bytes = 32_700L;
+      WriterArena first = memory.newWriterArena();
+      WriterArena second = memory.newWriterArena();
+      long oldLiveEntry = first.allocate(bytes);
+      long releasedEntry = first.allocate(bytes);
+      long firstCurrentPageEntry = first.allocate(bytes);
+      long availablePageKey =
+          NativeMemory.getLong(oldLiveEntry - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      first.detach();
+      memory.releaseEntry(releasedEntry, bytes);
+
+      long allocationsBefore = memory.rawAllocationCount();
+      long rebalancedEntry = second.allocate(bytes);
+      Assert.assertEquals(
+          NativeMemory.getLong(rebalancedEntry - 8L) >>> WriterArena.HANDLE_SLOT_BITS,
+          availablePageKey,
+          "a writer must claim an available page even while an old slot remains live");
+      Assert.assertEquals(memory.rawAllocationCount(), allocationsBefore);
+
+      memory.releaseEntry(oldLiveEntry, bytes);
+      memory.releaseEntry(rebalancedEntry, bytes);
+      memory.releaseEntry(firstCurrentPageEntry, bytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void staleLocalReadyEntryCannotReactivateAPageAfterOwnerTransfer() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      long bytes = 32_700L;
+      WriterArena first = memory.newWriterArena();
+      WriterArena second = memory.newWriterArena();
+
+      long firstPageEntry = first.allocate(bytes);
+      long firstPageEntry2 = first.allocate(bytes);
+      long firstCurrentPageEntry = first.allocate(bytes);
+      long firstPageKey =
+          NativeMemory.getLong(firstPageEntry - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      long firstCurrentPageKey =
+          NativeMemory.getLong(firstCurrentPageEntry - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      first.detach();
+      memory.releaseEntry(firstPageEntry, bytes);
+      memory.releaseEntry(firstPageEntry2, bytes);
+
+      long secondEntry = second.allocate(bytes);
+      Assert.assertEquals(
+          NativeMemory.getLong(secondEntry - 8L) >>> WriterArena.HANDLE_SLOT_BITS,
+          firstPageKey,
+          "the second writer must claim the globally empty page");
+      Assert.assertEquals(
+          NativeMemory.getLong(firstCurrentPageEntry - 8L) >>> WriterArena.HANDLE_SLOT_BITS,
+          firstCurrentPageKey);
+      memory.releaseEntry(firstCurrentPageEntry, bytes);
+      memory.releaseEntry(secondEntry, bytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void readyPagesArePoppedInLifoOrderWithinOneSizeClass() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena source = memory.newWriterArena();
+      WriterArena firstTarget = memory.newWriterArena();
+      WriterArena secondTarget = memory.newWriterArena();
+      long[] entries = new long[slotsPerPage * 2];
+      for (int index = 0; index < entries.length; index++) {
+        entries[index] = source.allocate(bytes);
+      }
+      long firstPageKey =
+          NativeMemory.getLong(entries[0] - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      long secondPageKey =
+          NativeMemory.getLong(entries[slotsPerPage] - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      Assert.assertNotEquals(firstPageKey, secondPageKey);
+      source.detach();
+
+      // Publish the second page first, then the first page. The first page must be the stack top.
+      for (int index = slotsPerPage; index < entries.length; index++) {
+        memory.releaseEntry(entries[index], bytes);
+      }
+      for (int index = 0; index < slotsPerPage; index++) {
+        memory.releaseEntry(entries[index], bytes);
+      }
+
+      WriterArena.Page first =
+          memory.tryStealAvailablePage(sizeClass, firstTarget.sizeClassState(sizeClass));
+      WriterArena.Page second =
+          memory.tryStealAvailablePage(sizeClass, secondTarget.sizeClassState(sizeClass));
+      Assert.assertNotNull(first);
+      Assert.assertNotNull(second);
+      Assert.assertEquals(first.pageKey, firstPageKey);
+      Assert.assertEquals(second.pageKey, secondPageKey);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void trimSkipsPartialStackTopAndReachesEmptyPageBelow() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena source = memory.newWriterArena();
+      long[] firstPageEntries = new long[slotsPerPage];
+      for (int index = 0; index < firstPageEntries.length; index++) {
+        firstPageEntries[index] = source.allocate(bytes);
+      }
+      long partialPageEntry = source.allocate(bytes);
+      for (long entry : firstPageEntries) {
+        memory.releaseEntry(entry, bytes);
+      }
+      source.detach();
+
+      Assert.assertEquals(memory.pageReadyCount(), 2L);
+      long trimmed = memory.trimAvailablePages();
+
+      Assert.assertEquals(trimmed, (long) SizeClasses.pageBytes(sizeClass));
+      Assert.assertEquals(memory.pageTrimmedCount(), 1L);
+      Assert.assertEquals(
+          memory.pageReadyCount(),
+          1L,
+          "the partial stack-top page must be restored after the lower empty page is trimmed");
+      memory.releaseEntry(partialPageEntry, bytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void trimmedReadyTokenCannotActivateAReusedPageId() {
+    FailingAllocator allocator = new FailingAllocator();
+    NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
+    try {
+      long bytes = 32_700L;
+      WriterArena source = memory.newWriterArena();
+      WriterArena target = memory.newWriterArena();
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      long[] firstPageEntries = new long[slotsPerPage];
+      for (int index = 0; index < firstPageEntries.length; index++) {
+        firstPageEntries[index] = source.allocate(bytes);
+      }
+      long sourceCurrent = source.allocate(bytes);
+      long trimmedPageKey =
+          NativeMemory.getLong(firstPageEntries[0] - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      source.detach();
+      for (long entry : firstPageEntries) {
+        memory.releaseEntry(entry, bytes);
+      }
+
+      allocator.failNextAllocations(1);
+      long pressureAllocation = target.allocate(112L);
+      Assert.assertNotEquals(pressureAllocation, 0L);
+      Assert.assertEquals(memory.pageTrimmedCount(), 1L);
+
+      long replacement = target.allocate(bytes);
+      long replacementPageKey =
+          NativeMemory.getLong(replacement - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      Assert.assertNotEquals(
+          replacementPageKey,
+          trimmedPageKey,
+          "a stale token must not activate the page after it was trimmed");
+      memory.releaseEntry(sourceCurrent, bytes);
+      memory.releaseEntry(pressureAllocation, 112L);
+      memory.releaseEntry(replacement, bytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void oneAvailablePageCannotBeActivatedByTwoWriters() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      long bytes = 32_700L;
+      WriterArena producer = memory.newWriterArena();
+      WriterArena firstConsumer = memory.newWriterArena();
+      WriterArena secondConsumer = memory.newWriterArena();
+      long released = producer.allocate(bytes);
+      long stillLive = producer.allocate(bytes);
+      long producerCurrent = producer.allocate(bytes);
+      long availablePageKey =
+          NativeMemory.getLong(released - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      producer.detach();
+      memory.releaseEntry(released, bytes);
+
+      CountDownLatch start = new CountDownLatch(1);
+      AtomicReference<Long> firstResult = new AtomicReference<>();
+      AtomicReference<Long> secondResult = new AtomicReference<>();
+      AtomicReference<Throwable> failure = new AtomicReference<>();
+      Thread first =
+          new Thread(
+              () -> {
+                await(start);
+                try {
+                  firstResult.set(firstConsumer.allocate(bytes));
+                } catch (Throwable error) {
+                  failure.compareAndSet(null, error);
+                }
+              });
+      Thread second =
+          new Thread(
+              () -> {
+                await(start);
+                try {
+                  secondResult.set(secondConsumer.allocate(bytes));
+                } catch (Throwable error) {
+                  failure.compareAndSet(null, error);
+                }
+              });
+      first.start();
+      second.start();
+      start.countDown();
+      first.join(2_000L);
+      second.join(2_000L);
+
+      Assert.assertFalse(first.isAlive());
+      Assert.assertFalse(second.isAlive());
+      Assert.assertNull(failure.get());
+      Assert.assertNotEquals(firstResult.get().longValue(), secondResult.get().longValue());
+      int consumersOfAvailablePage = 0;
+      if ((NativeMemory.getLong(firstResult.get() - 8L) >>> WriterArena.HANDLE_SLOT_BITS)
+          == availablePageKey) {
+        consumersOfAvailablePage++;
+      }
+      if ((NativeMemory.getLong(secondResult.get() - 8L) >>> WriterArena.HANDLE_SLOT_BITS)
+          == availablePageKey) {
+        consumersOfAvailablePage++;
+      }
+      Assert.assertEquals(
+          consumersOfAvailablePage,
+          1,
+          "AVAILABLE -> REBALANCING must have exactly one CAS winner");
+
+      memory.releaseEntry(stillLive, bytes);
+      memory.releaseEntry(producerCurrent, bytes);
+      memory.releaseEntry(firstResult.get(), bytes);
+      memory.releaseEntry(secondResult.get(), bytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void idlePagesRemainAllocatedAtTheArenaHighWaterMark() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      int pages = 3;
+      List<Long> entries = new ArrayList<>(pages * slotsPerPage);
+      for (int index = 0; index < pages * slotsPerPage; index++) {
         entries.add(arena.allocate(bytes));
       }
       for (long entry : entries) {
@@ -128,8 +484,8 @@ public class WriterArenaTest {
 
       Assert.assertEquals(
           memory.allocated(),
-          (long) memory.pooledPageLimit() * SizeClasses.PAGE_BYTES,
-          "only the bounded shared idle-page reserve may remain physically allocated");
+          (long) pages * (SizeClasses.pageBytes(sizeClass) + 128L),
+          "normal frees must retain pages for high-water reuse instead of physically trimming");
     } finally {
       memory.closeArenas();
     }
@@ -137,11 +493,176 @@ public class WriterArenaTest {
 
   @Test
   public void sizeClassLookupCoversEachSmallAllocationBoundary() {
-    Assert.assertEquals(SizeClasses.indexForEntry(112L), 0);
-    Assert.assertEquals(SizeClasses.indexForEntry(113L), 1);
-    Assert.assertEquals(SizeClasses.indexForEntry(1_008L), 28);
-    Assert.assertEquals(SizeClasses.indexForEntry(32_752L), 85);
-    Assert.assertEquals(SizeClasses.indexForEntry(32_753L), -1);
+    for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
+      long largestEntry = SizeClasses.slotBytes(sizeClass) - WriterArena.PREFIX_BYTES;
+      Assert.assertEquals(SizeClasses.indexForEntry(largestEntry), sizeClass);
+      if (sizeClass + 1 < SizeClasses.count()) {
+        Assert.assertEquals(SizeClasses.indexForEntry(largestEntry + 1L), sizeClass + 1);
+      } else {
+        Assert.assertEquals(SizeClasses.indexForEntry(largestEntry + 1L), -1);
+      }
+    }
+  }
+
+  @Test
+  public void fiveKiBValuesUseAnExactPooledSizeClass() {
+    long valueAllocation = ValueBlock.allocationLength(5_120);
+    int sizeClass = SizeClasses.indexForEntry(valueAllocation);
+    Assert.assertEquals(SizeClasses.slotBytes(sizeClass), 5_632);
+    Assert.assertEquals(SizeClasses.pageBytes(sizeClass), 2 * 1024 * 1024);
+    Assert.assertEquals(
+        SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass), 372);
+  }
+
+  @Test
+  public void pageCountersArePrimitiveFieldsRatherThanAtomicWrapperObjects() {
+    Field allocatedSlots = requirePageField("allocatedSlots");
+    Field freedSlots = requirePageField("freedSlots");
+    Assert.assertEquals(allocatedSlots.getType(), long.class);
+    Assert.assertEquals(freedSlots.getType(), long.class);
+    Assert.assertEquals(allocatedSlots.getDeclaringClass(), WriterArena.PageOwnerLine.class);
+    Assert.assertEquals(freedSlots.getDeclaringClass(), WriterArena.PageSharedLine.class);
+    Assert.assertEquals(
+        requirePageField("state").getDeclaringClass(), WriterArena.PageSharedLine.class);
+    Assert.assertEquals(
+        requirePageField("ownerClass").getDeclaringClass(), WriterArena.PageSharedLine.class);
+    for (Class<?> type = WriterArena.Page.class;
+        type != null;
+        type = type.getSuperclass()) {
+      for (Field field : type.getDeclaredFields()) {
+        if (Modifier.isStatic(field.getModifiers())) {
+          continue;
+        }
+        if (field.getName().equals("nextSlot")
+            || field.getName().equals("allocatedSlots")
+            || field.getName().equals("freedSlots")
+            || field.getName().equals("inFlight")
+            || field.getName().equals("freeHead")
+            || field.getName().equals("state")) {
+          Assert.assertTrue(
+              field.getType().isPrimitive(), field.getName() + " must be stored as a primitive");
+        }
+        Assert.assertNotEquals(
+            field.getName(), "LIVE_SLOTS", "the legacy shared live counter must be removed");
+        Assert.assertNotEquals(
+            field.getName(), "liveSlots", "the allocation path must not update a shared live RMW");
+      }
+    }
+  }
+
+  @Test
+  public void pageCountersUseSeparateCacheLinesForOwnerAndReclaimerState() {
+    ClassLayout layout = ClassLayout.parseClass(WriterArena.Page.class);
+    Map<String, FieldLayout> fields = new HashMap<>();
+    for (FieldLayout field : layout.fields()) {
+      fields.put(field.name(), field);
+    }
+    FieldLayout nextSlot = requirePageLayoutField(fields, "nextSlot");
+    FieldLayout allocatedSlots = requirePageLayoutField(fields, "allocatedSlots");
+    long ownerLine = allocatedSlots.offset() / 64L;
+    Assert.assertEquals(
+        nextSlot.offset() / 64L,
+        ownerLine,
+        "owner allocation fields must share the owner cache line");
+
+    String[] sharedFields = {
+      "freedSlots",
+      "freeSummary",
+      "freeBits0",
+      "freeBits1",
+      "freeBits2",
+      "freeBits3",
+      "freeBits4",
+      "freeBits5",
+      "freeBits6",
+      "freeBits7",
+      "state",
+      "ownerClass"
+    };
+    for (String name : sharedFields) {
+      Assert.assertNotEquals(
+          requirePageLayoutField(fields, name).offset() / 64L,
+          ownerLine,
+          name + " must not share the owner cache line");
+    }
+  }
+
+  @Test
+  public void splitPageCountersPreserveLiveCountAcrossLongWraparound() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      long entry = arena.allocate(bytes);
+      long block = entry - WriterArena.PREFIX_BYTES;
+      long handle = NativeMemory.getLong(block + 56L);
+      WriterArena.Page page = arena.sizeClassState(sizeClass).currentPage;
+      Field allocatedSlots = requirePageField("allocatedSlots");
+      Field freedSlots = requirePageField("freedSlots");
+      allocatedSlots.setAccessible(true);
+      freedSlots.setAccessible(true);
+      allocatedSlots.setLong(page, Long.MIN_VALUE);
+      freedSlots.setLong(page, Long.MAX_VALUE);
+
+      Assert.assertEquals(page.freeSlot(block, handle), 0);
+      arena.detach();
+      Assert.assertTrue(
+          page.beginTrimming(), "a wrapped zero live-count page must remain trimmable");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void splitPageCountersStillDetectUnderflowAfterLongWraparound() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      long entry = arena.allocate(bytes);
+      long block = entry - WriterArena.PREFIX_BYTES;
+      long handle = NativeMemory.getLong(block + 56L);
+      WriterArena.Page page = arena.sizeClassState(sizeClass).currentPage;
+      Field allocatedSlots = requirePageField("allocatedSlots");
+      Field freedSlots = requirePageField("freedSlots");
+      allocatedSlots.setAccessible(true);
+      freedSlots.setAccessible(true);
+      allocatedSlots.setLong(page, Long.MIN_VALUE);
+      freedSlots.setLong(page, Long.MAX_VALUE);
+
+      Assert.assertEquals(page.freeSlot(block, handle), 0);
+      try {
+        page.freeSlot(block, handle);
+        Assert.fail("a duplicate free must underflow after the cumulative counters wrap");
+      } catch (IllegalStateException expected) {
+        Assert.assertTrue(expected.getMessage().contains("live-slot underflow"));
+      }
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  private static Field requirePageField(String name) {
+    for (Class<?> type = WriterArena.Page.class;
+        type != null;
+        type = type.getSuperclass()) {
+      for (Field field : type.getDeclaredFields()) {
+        if (field.getName().equals(name)) {
+          return field;
+        }
+      }
+    }
+    Assert.fail("allocator page must expose the split primitive counter " + name);
+    throw new AssertionError(name);
+  }
+
+  private static FieldLayout requirePageLayoutField(
+      Map<String, FieldLayout> fields, String name) {
+    FieldLayout field = fields.get(name);
+    Assert.assertNotNull(field, "allocator page layout must expose " + name);
+    return field;
   }
 
   @Test
@@ -174,19 +695,304 @@ public class WriterArenaTest {
   }
 
   @Test
-  public void cacheOwnsAFixedPowerOfTwoSetOfAllocatorStripes() {
+  public void actorReleaseBatchReusesSlotsFromOnePage() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     try {
-      int expected = 1;
-      int target = NativeMemory.LOGICAL_CPU_COUNT * 4;
-      while (expected < target) {
-        expected <<= 1;
+      WriterArena arena = memory.newWriterArena();
+      ThreadContext context = new ThreadContext(null);
+      long bytes = 112L;
+      int count = 8;
+      long[] entries = new long[count];
+      long[] allocations = new long[count];
+      long[] handles = new long[count];
+      for (int index = 0; index < count; index++) {
+        entries[index] = arena.allocate(bytes);
+        allocations[index] = bytes;
       }
-      Assert.assertEquals(memory.writerStripeCount(), expected);
-      Assert.assertSame(
-          memory.newWriterArena(),
-          memory.newWriterArena(),
-          "a calling thread must select a cache-owned stripe rather than create a permanent arena");
+      long rawAllocations = memory.rawAllocationCount();
+
+      memory.releaseEntryBatch(context, entries, allocations, handles, count);
+      assertReleaseGroupKeysCleared(context);
+
+      Assert.assertEquals(
+          memory.rawAllocationCount(),
+          rawAllocations,
+          "a page batch release must return the page to the cache-owned reuse path");
+      for (int index = 0; index < count; index++) {
+        entries[index] = arena.allocate(bytes);
+      }
+      memory.releaseEntryBatch(context, entries, allocations, handles, count);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void actorReleaseBatchRetrySkipsRecordsFreedBeforeAvailabilityFailure() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      ThreadContext context = new ThreadContext(null);
+      long bytes = 112L;
+      long[] entries = {arena.allocate(bytes), arena.allocate(bytes)};
+      long[] allocations = {bytes, bytes};
+      long[] handles = new long[entries.length];
+      AtomicBoolean failOnce = new AtomicBoolean(true);
+      arena.setRetirementHookForTest(
+          () -> {
+            if (failOnce.getAndSet(false)) {
+              throw new IllegalStateException("availability callback failure");
+            }
+          });
+
+      try {
+        memory.releaseEntryBatch(context, entries, allocations, handles, entries.length);
+        Assert.fail("the injected availability failure must reach the grouped caller");
+      } catch (IllegalStateException expected) {
+        // The allocator group was accepted before the optional availability callback failed.
+      }
+      assertReleaseGroupKeysCleared(context);
+      Assert.assertEquals(entries[0], 0L);
+      Assert.assertEquals(entries[1], 0L);
+      Assert.assertEquals(handles[0], 0L);
+      Assert.assertEquals(handles[1], 0L);
+
+      // The retry must not free either slot a second time, and the page remains reusable.
+      memory.releaseEntryBatch(context, entries, allocations, handles, entries.length);
+      entries[0] = arena.allocate(bytes);
+      entries[1] = arena.allocate(bytes);
+      memory.releaseEntryBatch(context, entries, allocations, handles, entries.length);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  private static void assertReleaseGroupKeysCleared(ThreadContext context) {
+    for (long pageKey : context.releaseGroupKeys()) {
+      Assert.assertEquals(
+          pageKey, 0L, "a completed or failed batch must clear touched group keys");
+    }
+  }
+
+  @Test
+  public void actorReleaseBatchHandlesPooledAndDirectEntries() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      ThreadContext context = new ThreadContext(null);
+      long pooledBytes = 112L;
+      long directBytes = 32_769L;
+      long[] entries = {arena.allocate(pooledBytes), arena.allocate(directBytes)};
+      long[] allocations = {pooledBytes, directBytes};
+      long[] handles = new long[entries.length];
+
+      memory.releaseEntryBatch(context, entries, allocations, handles, entries.length);
+
+      Assert.assertTrue(memory.allocated() >= SizeClasses.MIN_PAGE_BYTES);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void actorReleaseBatchGroupsMixedPagesArenasAndDirectEntries() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena first = memory.newWriterArena();
+      WriterArena second = memory.newWriterArena();
+      ThreadContext context = new ThreadContext(null);
+      long pooledBytes = 112L;
+      long directBytes = 32_769L;
+      int pooledClass = SizeClasses.indexForEntry(pooledBytes);
+      int slotsPerPage = SizeClasses.pageBytes(pooledClass) / SizeClasses.slotBytes(pooledClass);
+      int firstCount = slotsPerPage + 1;
+      int secondCount = 2;
+      int count = firstCount + secondCount + 1;
+      long[] entries = new long[count];
+      long[] allocations = new long[count];
+      long[] handles = new long[count];
+
+      int index = 0;
+      for (int entry = 0; entry < firstCount; entry++) {
+        entries[index] = first.allocate(pooledBytes);
+        allocations[index++] = pooledBytes;
+      }
+      for (int entry = 0; entry < secondCount; entry++) {
+        entries[index] = second.allocate(pooledBytes);
+        allocations[index++] = pooledBytes;
+      }
+      entries[index] = first.allocate(directBytes);
+      allocations[index] = directBytes;
+
+      long firstPageKey = NativeMemory.getLong(entries[0] - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      long secondPageKey =
+          NativeMemory.getLong(entries[slotsPerPage] - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      long otherArenaPageKey =
+          NativeMemory.getLong(entries[firstCount] - 8L) >>> WriterArena.HANDLE_SLOT_BITS;
+      Assert.assertTrue(
+          firstPageKey != secondPageKey,
+          "first page=" + firstPageKey + ", second page=" + secondPageKey);
+      Assert.assertTrue(
+          firstPageKey != otherArenaPageKey,
+          "first page=" + firstPageKey + ", other arena page=" + otherArenaPageKey);
+      Assert.assertNotEquals(
+          NativeMemory.getLong(entries[0] - WriterArena.PREFIX_BYTES + 48L) & 0xffff_ffffL,
+          NativeMemory.getLong(entries[firstCount] - WriterArena.PREFIX_BYTES + 48L)
+              & 0xffff_ffffL,
+          "records from different writer arenas must retain their owner metadata");
+
+      long rawAllocations = memory.rawAllocationCount();
+      memory.releaseEntryBatch(context, entries, allocations, handles, count);
+
+      long[] reused = new long[firstCount];
+      for (int entry = 0; entry < reused.length; entry++) {
+        reused[entry] = first.allocate(pooledBytes);
+      }
+      Assert.assertEquals(
+          memory.rawAllocationCount(),
+          rawAllocations,
+          "a mixed batch must return every pooled page to the shared reuse path");
+      for (long entry : reused) {
+        memory.releaseEntry(entry, pooledBytes);
+      }
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void concurrentPageBatchesPublishFreeSlotsWithoutCorruptingHandles() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int count = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      count -= count & 1;
+      int half = count / 2;
+      long[] firstEntries = new long[half];
+      long[] secondEntries = new long[half];
+      long[] firstBytes = new long[half];
+      long[] secondBytes = new long[half];
+      long[] firstHandles = new long[half];
+      long[] secondHandles = new long[half];
+      ThreadContext firstContext = new ThreadContext(null);
+      ThreadContext secondContext = new ThreadContext(null);
+      for (int index = 0; index < count; index++) {
+        if (index < half) {
+          firstEntries[index] = arena.allocate(bytes);
+          firstBytes[index] = bytes;
+        } else {
+          secondEntries[index - half] = arena.allocate(bytes);
+          secondBytes[index - half] = bytes;
+        }
+      }
+      long rawAllocations = memory.rawAllocationCount();
+      CountDownLatch start = new CountDownLatch(1);
+      AtomicReference<Throwable> failure = new AtomicReference<>();
+      Thread first =
+          new Thread(
+              () -> {
+                await(start);
+                try {
+                  memory.releaseEntryBatch(
+                      firstContext, firstEntries, firstBytes, firstHandles, half);
+                } catch (Throwable error) {
+                  failure.compareAndSet(null, error);
+                }
+              });
+      Thread second =
+          new Thread(
+              () -> {
+                await(start);
+                try {
+                  memory.releaseEntryBatch(
+                      secondContext, secondEntries, secondBytes, secondHandles, half);
+                } catch (Throwable error) {
+                  failure.compareAndSet(null, error);
+                }
+              });
+      first.start();
+      second.start();
+      start.countDown();
+      first.join(2_000L);
+      second.join(2_000L);
+      Assert.assertFalse(first.isAlive());
+      Assert.assertFalse(second.isAlive());
+      Assert.assertNull(failure.get());
+
+      long[] reused = new long[count];
+      long[] reusedBytes = new long[count];
+      long[] reusedHandles = new long[count];
+      for (int index = 0; index < count; index++) {
+        reused[index] = arena.allocate(bytes);
+        reusedBytes[index] = bytes;
+      }
+      Assert.assertEquals(memory.rawAllocationCount(), rawAllocations);
+      memory.releaseEntryBatch(firstContext, reused, reusedBytes, reusedHandles, count);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void eachWriterResourceCanOwnADistinctAllocator() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      List<WriterArena> arenas = new ArrayList<>();
+      for (int index = 0; index < NativeMemory.LOGICAL_CPU_COUNT * 2; index++) {
+        WriterArena arena = memory.newWriterArena();
+        Assert.assertFalse(arenas.contains(arena), "writer allocators must not be round-robin shared");
+        arenas.add(arena);
+      }
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void allocationFailureTrimsOnlyAnEmptyAvailablePageAndRetriesOnce() {
+    FailingAllocator allocator = new FailingAllocator();
+    NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
+    try {
+      long idleBytes = 32_700L;
+      long pressureBytes = 112L;
+      WriterArena idleOwner = memory.newWriterArena();
+      long first = idleOwner.allocate(idleBytes);
+      long second = idleOwner.allocate(idleBytes);
+      idleOwner.detach();
+      memory.releaseEntry(first, idleBytes);
+      memory.releaseEntry(second, idleBytes);
+      Assert.assertEquals(memory.pageReadyCount(), 1L);
+
+      allocator.failNextAllocations(1);
+      WriterArena pressureWriter = memory.newWriterArena();
+      long retried = pressureWriter.allocate(pressureBytes);
+
+      Assert.assertNotEquals(retried, 0L);
+      Assert.assertEquals(memory.pageTrimmedCount(), 1L);
+      Assert.assertEquals(memory.pageReadyCount(), 0L);
+      Assert.assertEquals(memory.smallAllocationFallbackCount(), 0L);
+      memory.releaseEntry(retried, pressureBytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void repeatedNativeFailurePropagatesAfterTheSingleColdTrimRetry() {
+    FailingAllocator allocator = new FailingAllocator();
+    NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
+    try {
+      allocator.failNextAllocations(2);
+      try {
+        memory.newWriterArena().allocate(112L);
+        Assert.fail("the second native allocation failure must propagate");
+      } catch (OutOfMemoryError expected) {
+        Assert.assertEquals(expected.getMessage(), "injected native allocation failure");
+      }
+      Assert.assertEquals(memory.pageTrimmedCount(), 0L);
+      Assert.assertEquals(memory.smallAllocationFallbackCount(), 0L);
     } finally {
       memory.closeArenas();
     }
@@ -247,9 +1053,12 @@ public class WriterArenaTest {
       freeing.join(2_000L);
       Assert.assertFalse(freeing.isAlive());
 
-      Field pagesField = WriterArena.class.getDeclaredField("currentPages");
+      Field pagesField = WriterArena.class.getDeclaredField("sizeClasses");
       pagesField.setAccessible(true);
-      Assert.assertNotNull(((AtomicReferenceArray<?>) pagesField.get(arena)).get(sizeClass));
+      Object[] classes = (Object[]) pagesField.get(arena);
+      Field currentPage = classes[sizeClass].getClass().getDeclaredField("currentPage");
+      currentPage.setAccessible(true);
+      Assert.assertNotNull(currentPage.get(classes[sizeClass]));
 
       memory.releaseEntry(second, bytes);
     } finally {
@@ -257,111 +1066,34 @@ public class WriterArenaTest {
     }
   }
 
-  @Test
-  public void pooledPageLimitFallsBackToDirectAllocationForSmallEntries() {
-    long hardLimit = 512L * SizeClasses.PAGE_BYTES + WriterArena.directAllocationBytes(32_752L);
-    NativeMemory.Memory memory =
-        new NativeMemory.Memory(AllocatorType.JNA, hardLimit);
-    int pooledPageLimit = memory.pooledPageLimit();
-    Assert.assertTrue(pooledPageLimit > 128, "the page pool must exceed the legacy global cap");
-    List<Long> entries = new ArrayList<>(pooledPageLimit + 1);
-    long bytes = 32_752L;
+  private static void await(CountDownLatch latch) {
     try {
-      int entriesPerPage =
-          SizeClasses.PAGE_BYTES / SizeClasses.slotBytes(SizeClasses.indexForEntry(bytes));
-      int total = pooledPageLimit * entriesPerPage + 1;
-      for (int i = 0; i < total; i++) {
-        entries.add(memory.newWriterArena().allocate(bytes));
-      }
-      for (long entry : entries) {
-        memory.releaseEntry(entry, bytes);
-      }
-      Assert.assertEquals(
-          memory.allocated(),
-          (long) pooledPageLimit * SizeClasses.PAGE_BYTES,
-          "small allocations must use direct fallback once pooled pages hit their hard cap");
-    } finally {
-      memory.closeArenas();
+      latch.await(2L, TimeUnit.SECONDS);
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(interrupted);
     }
   }
 
-  @Test
-  public void subPageHardLimitUsesDirectFallbackWithoutAllocatingAPage() {
-    long bytes = 112L;
-    long hardLimit = WriterArena.directAllocationBytes(bytes);
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA, hardLimit);
-    try {
-      Assert.assertEquals(memory.pooledPageLimit(), 0);
-      long entry = memory.newWriterArena().allocate(bytes);
-      Assert.assertEquals(memory.allocated(), hardLimit);
-      memory.releaseEntry(entry, bytes);
-      Assert.assertEquals(memory.allocated(), 0L);
-    } finally {
-      memory.closeArenas();
+  private static final class FailingAllocator extends NativeAllocator {
+    private int failures;
+
+    private FailingAllocator() {
+      super(AllocatorType.UNSAFE);
     }
-  }
 
-  @Test
-  public void retirementConsumesARecordWhenDepotOfferFallsBackToFree() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
-    RetirementQueue retirements = new RetirementQueue(memory, 1, 2);
-    long allocation = ValueBlock.allocationLength(8);
-    int sizeClass = SizeClasses.indexForEntry(allocation);
-    Field depotField = NativeMemory.Memory.class.getDeclaredField("pageDepot");
-    depotField.setAccessible(true);
-    PageDepot depot = (PageDepot) depotField.get(memory);
-    Field pagesField = PageDepot.class.getDeclaredField("pages");
-    pagesField.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    ConcurrentLinkedQueue<WriterArena.Page>[] pages =
-        (ConcurrentLinkedQueue<WriterArena.Page>[]) pagesField.get(depot);
-    ConcurrentLinkedQueue<WriterArena.Page> original = pages[sizeClass];
-    pages[sizeClass] = new ThrowingOfferQueue<>();
-    try {
-      long address = memory.newWriterArena().allocate(allocation);
-      RetirementQueue.Reservation reservation = new RetirementQueue.Reservation();
-      Assert.assertTrue(retirements.reserve(reservation, 1));
-      retirements.append(reservation, address, allocation);
-      Assert.assertEquals(retirements.seal(1, 1L), 1);
-
-      Assert.assertEquals(retirements.reclaim(new ReaderRegistry(), 1), 1);
-      Assert.assertEquals(retirements.queuedRecords(), 0L);
-      Assert.assertEquals(retirements.retiredEntries(), 0);
-      Assert.assertEquals(
-          memory.allocated(),
-          retirements.allocatedBytes(),
-          "a failed depot enqueue must consume the empty page without stranding its retirement"
-              + " record");
-      Field idleField = PageDepot.class.getDeclaredField("idlePages");
-      idleField.setAccessible(true);
-      Assert.assertEquals(((java.util.concurrent.atomic.AtomicInteger) idleField.get(depot)).get(), 0);
-      Assert.assertNull(depot.acquire(sizeClass));
-    } finally {
-      pages[sizeClass] = original;
-      retirements.close();
-      memory.closeArenas();
+    private void failNextAllocations(int count) {
+      failures = count;
     }
-  }
 
-  private static long headState(WriterArena arena, int sizeClass) throws Exception {
-    Field pagesField = WriterArena.class.getDeclaredField("currentPages");
-    pagesField.setAccessible(true);
-    Object page = ((AtomicReferenceArray<?>) pagesField.get(arena)).get(sizeClass);
-    Field headField = page.getClass().getDeclaredField("freeHead");
-    headField.setAccessible(true);
-    return ((AtomicLong) headField.get(page)).get();
-  }
-
-  private static WriterArena arena(NativeMemory.Memory memory, int index) throws Exception {
-    Field field = NativeMemory.Memory.class.getDeclaredField("arenas");
-    field.setAccessible(true);
-    return ((WriterArena[]) field.get(memory))[index];
-  }
-
-  private static final class ThrowingOfferQueue<E> extends ConcurrentLinkedQueue<E> {
     @Override
-    public boolean offer(E element) {
-      throw new OutOfMemoryError("injected page depot offer failure");
+    public long allocate(long bytes) {
+      if (failures > 0) {
+        failures--;
+        throw new OutOfMemoryError("injected native allocation failure");
+      }
+      return super.allocate(bytes);
     }
   }
+
 }

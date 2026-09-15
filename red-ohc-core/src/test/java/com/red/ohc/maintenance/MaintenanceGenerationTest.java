@@ -14,7 +14,7 @@ import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
 import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.runtime.ReaderRegistry;
-import com.red.ohc.storage.Budget;
+import com.red.ohc.runtime.ThreadContext;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 
@@ -23,9 +23,9 @@ public class MaintenanceGenerationTest {
   public void staleRemovalCannotDeleteAValuePublishedAfterTheMaintenanceSnapshot() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long oldValue = memory.allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(oldValue, 1L, 1, 0L);
+    ValueBlock.initialize(oldValue, 0L, 1, 0L);
     long newValue = memory.allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(newValue, 2L, 1, 0L);
+    ValueBlock.initialize(newValue, 0L, 1, 0L);
     Entry entry = EntryTestSupport.entry(memory, 0, 7, oldValue);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
@@ -33,11 +33,10 @@ public class MaintenanceGenerationTest {
         new MaintenanceEventLoop(
             data,
             memory,
-            new Budget(1 << 20),
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry());
+            new ReaderRegistry(), Long.MAX_VALUE);
 
     long generation = entry.generation();
     assertTrue(entry.claimWriter());
@@ -62,11 +61,10 @@ public class MaintenanceGenerationTest {
         new MaintenanceEventLoop(
             data,
             memory,
-            new Budget(1 << 20),
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry());
+            new ReaderRegistry(), Long.MAX_VALUE);
 
     assertFalse(worker.removeFromMap(entry, false, entry.generation(), 0L));
     assertSame(data.get(entry), entry);
@@ -74,11 +72,26 @@ public class MaintenanceGenerationTest {
     memory.closeArenas();
   }
 
+  @Test
+  public void identityRemovalDoesNotDeleteAReinsertedSameKey() {
+    Entry stale = EntryTestSupport.entry(0, 17, 0x1717L, 1L);
+    Entry current = EntryTestSupport.entry(0, 17, 0x1717L, 2L);
+    ConcurrentHashMap<Entry, Entry> data = index();
+    data.put(stale, stale);
+    data.put(current, current);
+
+    ThreadContext context = new ThreadContext(null);
+    assertFalse(context.removeEntryIfSame(data, stale));
+    assertSame(data.get(stale), current);
+    assertTrue(context.removeEntryIfSame(data, current));
+    assertEquals(data.get(stale), null);
+  }
+
   @Test(timeOut = 500L)
   public void evictionSkipsAnEntryWhoseWriterMutexIsHeld() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     long value = memory.allocate(ValueBlock.allocationLength(1));
-    ValueBlock.initialize(value, Long.MAX_VALUE, 1, 0L);
+    ValueBlock.initialize(value, 0L, 1, 0L);
     Entry entry = EntryTestSupport.entry(memory, 0, 9, value);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.put(entry, entry);
@@ -86,11 +99,10 @@ public class MaintenanceGenerationTest {
         new MaintenanceEventLoop(
             data,
             memory,
-            new Budget(1 << 20),
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            new ReaderRegistry());
+            new ReaderRegistry(), Long.MAX_VALUE);
     try {
       assertTrue(entry.claimWriter());
       assertFalse(worker.removeFromMap(entry, true, entry.generation(), entry.valueAddress));

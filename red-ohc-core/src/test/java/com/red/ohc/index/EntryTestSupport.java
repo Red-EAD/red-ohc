@@ -5,6 +5,7 @@ import java.util.List;
 
 import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
+import com.red.ohc.storage.WriterArena;
 
 /** Native-key fixture used by tests that exercise Entry metadata accessors. */
 public final class EntryTestSupport {
@@ -14,10 +15,10 @@ public final class EntryTestSupport {
   private EntryTestSupport() {}
 
   public static Entry entry(int keyLength, int chmHash, long keyHash64, long valueAddress) {
-    long allocation = Entry.keyAllocationLengthForKeyLength(keyLength);
-    long address = MEMORY.allocate(allocation);
+    long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
+    long address = MEMORY.newWriterArena().allocate(allocation);
     NativeMemory.putLong(address, keyHash64);
-    Entry entry = new Entry(address, keyLength, chmHash, keyHash64, valueAddress);
+    Entry entry = new Entry(address, keyLength, valueAddress);
     entry.initializeNativeMetadata();
     synchronized (BLOCKS) {
       BLOCKS.add(new Block(address, allocation));
@@ -31,10 +32,15 @@ public final class EntryTestSupport {
 
   public static Entry entry(
       NativeMemory.Memory memory, int keyLength, int chmHash, long keyHash64, long valueAddress) {
-    long allocation = Entry.keyAllocationLengthForKeyLength(keyLength);
-    long address = memory.newWriterArena().allocate(allocation);
+    return entry(memory.newWriterArena(), keyLength, chmHash, keyHash64, valueAddress);
+  }
+
+  public static Entry entry(
+      WriterArena arena, int keyLength, int chmHash, long keyHash64, long valueAddress) {
+    long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
+    long address = arena.allocate(allocation);
     NativeMemory.putLong(address, keyHash64);
-    Entry entry = new Entry(address, keyLength, chmHash, keyHash64, valueAddress);
+    Entry entry = new Entry(address, keyLength, valueAddress);
     entry.initializeNativeMetadata();
     return entry;
   }
@@ -43,10 +49,14 @@ public final class EntryTestSupport {
     return entry(memory, keyLength, chmHash, chmHash & 0xffff_ffffL, valueAddress);
   }
 
+  public static Entry entry(WriterArena arena, int keyLength, int chmHash, long valueAddress) {
+    return entry(arena, keyLength, chmHash, chmHash & 0xffff_ffffL, valueAddress);
+  }
+
   public static void close() {
     synchronized (BLOCKS) {
       for (Block block : BLOCKS) {
-        MEMORY.free(block.address, block.allocation);
+        MEMORY.releaseEntry(block.address, block.allocation);
       }
       BLOCKS.clear();
     }
@@ -54,7 +64,7 @@ public final class EntryTestSupport {
   }
 
   public static void maintenanceMeta(Entry entry, long value) {
-    long metadata = entry.nativeKeyAddress + Entry.keyDataAllocationLength(entry.keyLength());
+    long metadata = entry.nativeKeyAddress - Entry.NATIVE_METADATA_BYTES;
     NativeMemory.putLong(metadata + 16L, value);
   }
 

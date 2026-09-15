@@ -1,0 +1,191 @@
+package com.red.ohc.maintenance;
+
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.testng.annotations.DataProvider;
+import org.testng.annotations.Test;
+
+import com.red.ohc.api.AllocatorType;
+import com.red.ohc.api.Eviction;
+import com.red.ohc.api.Ticker;
+import com.red.ohc.index.Entry;
+import com.red.ohc.index.EntryTestSupport;
+import com.red.ohc.runtime.AccessRing;
+import com.red.ohc.runtime.ReaderRegistry;
+import com.red.ohc.runtime.ReaderSlot;
+import com.red.ohc.storage.NativeMemory;
+
+public final class MaintenanceIdleHandoffTest {
+  @DataProvider
+  public Object[][] pendingSources() {
+    return new Object[][] {{"ring"}, {"hits"}, {"misses"}};
+  }
+
+  @Test(dataProvider = "pendingSources", timeOut = 5_000L)
+  public void idleCheckHandsObservedAccessToTheNextTurn(String source) throws Exception {
+    try (Fixture fixture = new Fixture()) {
+      fixture.publishAfterCompletedScan(source);
+      assertFalse((Boolean) call(fixture.loop, "hasRunnableWork"));
+
+      call(fixture.loop, "parkUntilWork");
+
+      assertTrue(
+          (Boolean) call(fixture.loop, "hasRunnableWork"),
+          "the idle check must schedule the observed source, not just keep the wake gate running");
+      call(fixture.loop, "maintenancePass");
+      assertTrue(fixture.slot.access.isEmpty(), "the next turn must drain the observed ring");
+      ReaderRegistry.SlotTableSnapshot slots = fixture.readers.slotTableSnapshot();
+      int index = slots.firstLiveSlot(0, slots.slotCapacity());
+      assertEquals(slots.consumedHits(index), fixture.slot.publishedHits);
+      assertEquals(slots.consumedMisses(index), fixture.slot.publishedMisses);
+      assertFalse((Boolean) call(fixture.loop, "hasRunnableWork"));
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void registeredReaderSelfHealsAfterAccessSignalIsDropped() throws Exception {
+    try (Fixture fixture = new Fixture()) {
+      // The lifecycle sweep is not the deadline under test. Keep the actor in the no-deadline
+      // idle path so this test reaches the capped park transition deterministically.
+      Field lifecycleDeadline =
+          MaintenanceEventLoop.class.getDeclaredField("nextReaderLifecycleCheckNanos");
+      lifecycleDeadline.setAccessible(true);
+      lifecycleDeadline.setLong(fixture.loop, Long.MAX_VALUE);
+      fixture.slot.access = new AccessRing(() -> {});
+      fixture.loop.start();
+
+      long parkDeadline = System.nanoTime() + 1_000_000_000L;
+      while ((Long) field(field(fixture.loop, "idleBackoff"), "parkNanos")
+              != 10_000_000L
+          && System.nanoTime() < parkDeadline) {
+        Thread.yield();
+      }
+      assertEquals(
+          field(field(fixture.loop, "idleBackoff"), "parkNanos"),
+          10_000_000L,
+          "the actor must reach the capped idle park before the dropped notification is injected");
+      boolean observedParked = fixture.loop.isParked();
+      while (!observedParked && System.nanoTime() < parkDeadline) {
+        Thread.yield();
+        observedParked = fixture.loop.isParked();
+      }
+      assertTrue(observedParked);
+
+      assertTrue(fixture.slot.access.offer(fixture.entry, 0L, 0L, 0));
+      long drainDeadline = System.nanoTime() + 1_000_000_000L;
+      while (!fixture.slot.access.isEmpty() && System.nanoTime() < drainDeadline) {
+        Thread.yield();
+      }
+      assertTrue(
+          fixture.slot.access.isEmpty(),
+          "a registered reader must eventually drain an accepted record even when its signal is dropped");
+      assertFalse(
+          ((java.util.concurrent.atomic.AtomicBoolean) field(fixture.loop, "unhealthy")).get());
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void actorWithoutReadersUsesCappedIdlePark() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            new ConcurrentHashMap<>(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            new ReaderRegistry(),
+            Long.MAX_VALUE);
+    try {
+      loop.start();
+      long deadline = System.nanoTime() + 1_000_000_000L;
+      while ((Long) field(field(loop, "idleBackoff"), "parkNanos") != 10_000_000L
+          && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
+      assertEquals(field(field(loop, "idleBackoff"), "parkNanos"), 10_000_000L);
+      long parkedDeadline = System.nanoTime() + 1_000_000_000L;
+      boolean observedParked = loop.isParked();
+      while (!observedParked && System.nanoTime() < parkedDeadline) {
+        Thread.yield();
+        observedParked = loop.isParked();
+      }
+      assertTrue(observedParked);
+    } finally {
+      loop.stop();
+      loop.join(2_000L);
+      assertFalse(loop.isAlive());
+      memory.closeArenas();
+    }
+  }
+
+  static final class Fixture implements AutoCloseable {
+    final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    final ReaderRegistry readers = new ReaderRegistry();
+    final ReaderSlot slot = new ReaderSlot();
+    final MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            new ConcurrentHashMap<>(), memory, Ticker.DEFAULT, 1 << 20,
+            Eviction.LRU, readers, Long.MAX_VALUE);
+    final Entry entry = EntryTestSupport.entry(memory, 0, 1, 0L);
+
+    Fixture() throws Exception {
+      loop.registerReader(slot);
+      slot.access = new AccessRing(slot::signalAccess);
+      assertTrue(slot.access.offer(entry, 0L, 0L, 0));
+      Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainMailbox", int.class);
+      drain.setAccessible(true);
+      drain.invoke(loop, Integer.MAX_VALUE);
+      call(loop, "maintenancePass");
+      assertTrue(slot.access.isEmpty());
+      assertEquals(((AtomicInteger) field(loop, "requestedWork")).get(), 0);
+      assertFalse((Boolean) field(loop, "accessScanActive"));
+      // The previous offer signaled, but the actor has not yet armed the final idle check.
+      ((WakeGate) field(loop, "wakeGate")).requireProcessing();
+    }
+
+    void publishAfterCompletedScan(String source) throws Exception {
+      if (source.equals("ring")) {
+        // This publication is coalesced with the already-consumed notification. There is no
+        // further producer operation to rescue the actor if the idle check forgets the source.
+        assertTrue(slot.access.offer(entry, 0L, 0L, 0));
+      } else if (source.equals("hits")) {
+        // A producer can be paused between publishing its counters and signaling the actor.
+        slot.publishedHits++;
+      } else {
+        slot.publishedMisses++;
+      }
+      assertEquals(((AtomicInteger) field(loop, "requestedWork")).get(), 0);
+    }
+
+    @Override
+    public void close() throws InterruptedException {
+      loop.stop();
+      if (loop.thread().getState() == Thread.State.NEW) {
+        loop.start();
+      }
+      loop.join(2_000L);
+      assertFalse(loop.isAlive(), "actor cleanup did not finish");
+      memory.closeArenas();
+    }
+  }
+
+  static Object field(Object target, String name) throws Exception {
+    Field field = target.getClass().getDeclaredField(name);
+    field.setAccessible(true);
+    return field.get(target);
+  }
+
+  static Object call(Object target, String name) throws Exception {
+    Method method = target.getClass().getDeclaredMethod(name);
+    method.setAccessible(true);
+    return method.invoke(target);
+  }
+}

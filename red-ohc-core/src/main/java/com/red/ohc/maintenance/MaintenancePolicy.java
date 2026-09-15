@@ -1,17 +1,24 @@
 package com.red.ohc.maintenance;
 
-import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
-
 import com.red.ohc.api.Eviction;
 import com.red.ohc.index.Entry;
+import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
-import com.red.ohc.storage.WriterArena;
 
 /**
- * Maintenance-actor-only eviction policy state. Every list is intrusive in {@link Entry}; no
- * producer or reader mutates a policy link.
+ * Maintenance-actor-only eviction policy state. List links are stored in the actor-owned native
+ * link arena; no producer or reader mutates a policy link.
  */
-public final class MaintenancePolicy {
+public final class MaintenancePolicy implements AutoCloseable {
+  /**
+   * Fixed S4-FIFO-lite profile applied to the existing S3_FIFO selector: rhoS=.10, kappa=.25,
+   * tauS=2, tauG=1.
+   */
+  private static final long S3_SMALL_TARGET_DIVISOR = 10L;
+  private static final long S3_SKIP_WEIGHT_DIVISOR = 4L;
+  private static final int S3_SMALL_PROMOTION_HITS = 2;
+  private static final int S3_GHOST_TO_MAIN_HITS = 1;
+  private static final int GHOST_INSERT_TRIM_ATTEMPTS = 8;
   private static final double HILL_INITIAL_STEP_PERCENT = 0.0625d;
   private static final double HILL_STEP_DECAY = 0.98d;
   private static final double HILL_RESTART_THRESHOLD = 0.05d;
@@ -25,29 +32,36 @@ public final class MaintenancePolicy {
   private final Eviction eviction;
   private final long capacity;
   private final boolean countBounded;
+  private final EntryLinks links;
+  private final boolean ownsLinks;
   private final FrequencySketch sketch;
-  private final EntryDeque lru = new EntryDeque();
-  private final EntryDeque small = new EntryDeque();
-  private final EntryDeque main = new EntryDeque();
-  private final EntryDeque window = new EntryDeque();
-  private final EntryDeque probation = new EntryDeque();
-  private final EntryDeque protectedQueue = new EntryDeque();
-  private final GhostMap ghost;
+  private final EntryDeque lru;
+  private final EntryDeque small;
+  private final EntryDeque main;
+  private final EntryDeque window;
+  private final EntryDeque probation;
+  private final EntryDeque protectedQueue;
+  private final NativeS3GhostMap ghost;
   private final long ghostMaximum;
   private final long smallMaximum;
+  private final long smallSkipMaximum;
   private long windowMaximum;
   private long protectedMaximum;
 
   private long weightedSize;
   private long liveBytes;
   private long smallWeight;
+  private long smallSkipWeight;
+  private Entry smallSkipTail;
   private long mainWeight;
   private long windowWeight;
   private long probationWeight;
   private long protectedWeight;
-  private volatile long evictions;
-  private volatile long evictionWeight;
   private long ghostWeight;
+  private long ghostAllocationTrims;
+  private long ghostAllocationDrops;
+  private long skipSuppressedAccesses;
+  private long ghostDeferredPromotions;
   private long hitsInSample;
   private long missesInSample;
   private double previousSampleHitRate;
@@ -58,62 +72,114 @@ public final class MaintenancePolicy {
 
   private long admissionSequence;
   private final Selection selection = new Selection();
+  private final NativeS3GhostMap.Record ghostRecord = new NativeS3GhostMap.Record();
 
   /** Actor-visible work consumed while finding the latest victim. */
   private int lastVictimScanCount;
 
   public MaintenancePolicy(Eviction eviction, long capacity) {
-    this(eviction, capacity, false);
+    this(eviction, capacity, false, new EntryLinks(), true);
   }
 
   public MaintenancePolicy(Eviction eviction, long capacity, boolean countBounded) {
+    this(eviction, capacity, countBounded, new EntryLinks(), true);
+  }
+
+  MaintenancePolicy(
+      Eviction eviction, long capacity, boolean countBounded, EntryLinks links) {
+    this(eviction, capacity, countBounded, links, false);
+  }
+
+  private MaintenancePolicy(
+      Eviction eviction,
+      long capacity,
+      boolean countBounded,
+      EntryLinks links,
+      boolean ownsLinks) {
     this.eviction = eviction;
     this.capacity = capacity;
     this.countBounded = countBounded;
+    this.links = links;
+    this.ownsLinks = ownsLinks;
+    this.lru = new EntryDeque();
+    this.small = new EntryDeque();
+    this.main = new EntryDeque();
+    this.window = new EntryDeque();
+    this.probation = new EntryDeque();
+    this.protectedQueue = new EntryDeque();
     long plannedEntries = Math.max(256L, capacity / 128L);
     this.sketch = eviction == Eviction.W_TINY_LFU ? new FrequencySketch(plannedEntries) : null;
-    this.smallMaximum = Math.max(1L, capacity / 10L);
+    this.smallMaximum = Math.max(1L, capacity / S3_SMALL_TARGET_DIVISOR);
+    this.smallSkipMaximum = smallMaximum / S3_SKIP_WEIGHT_DIVISOR;
     this.windowMaximum = Math.max(1L, capacity / 100L);
     long mainMaximum = mainMaximum();
     this.protectedMaximum = Math.max(1L, mainMaximum * 80L / 100L);
     this.hillStep = -Math.max(HILL_MIN_STEP, capacity * HILL_INITIAL_STEP_PERCENT);
     this.ghostMaximum = Math.max(1L, capacity - smallMaximum);
     if (eviction == Eviction.S3_FIFO) {
-      this.ghost = new GhostMap();
-      this.ghost.defaultReturnValue(Long.MIN_VALUE);
+      this.ghost = new NativeS3GhostMap(links.memory());
     } else {
       this.ghost = null;
     }
   }
 
+  @Override
+  public void close() {
+    if (ghost != null) {
+      ghost.close();
+    }
+    if (ownsLinks) {
+      links.close();
+    }
+  }
+
   public void add(Entry entry) {
-    if (entry.policyState() != Entry.POLICY_NONE) {
-      updateWeight(entry);
+    long valueAddress = Entry.rawValueAddress(entry.valueAddress);
+    long valueAllocation =
+        valueAddress == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(valueAddress));
+    add(entry, valueAllocation, entry.keyHash64());
+  }
+
+  /** Applies an actor-captured value allocation and immutable hash seed. */
+  void add(Entry entry, long valueAllocation, long keyHash64) {
+    int linkId = entry.policyLinkId();
+    int state = linkId == 0 ? Entry.POLICY_NONE : links.policyState(linkId);
+    if (state != Entry.POLICY_NONE) {
+      updateWeight(entry, valueAllocation);
       return;
     }
-    long bytes = byteWeightOf(entry);
-    entry.policyByteWeight(bytes);
-    long weight = weightOf(entry);
+    long bytes = normalizedByteWeight(
+        CacheMath.logicalEntryBytes(entry.keyAllocationLength(), valueAllocation));
+    long weight = countBounded ? 1L : bytes;
+    linkId = links.ensure(entry);
+    links.keyHash64(linkId, keyHash64);
+    setPolicyByteWeight(entry, bytes);
+    setPolicyAccessCount(entry, 0);
     weightedSize += weight;
     liveBytes += bytes;
     switch (eviction) {
       case S3_FIFO:
-        long hash = entry.keyHash64();
-        long ghostEntryWeight = ghost.remove(hash);
-        if (ghostEntryWeight != Long.MIN_VALUE) {
-          ghostWeight -= ghostEntryWeight;
-          link(main, entry, Entry.POLICY_S3_MAIN);
-          mainWeight += weight;
+        if (ghost.observe(keyHash64, ghostRecord)) {
+          long ghostEntryWeight =
+              ghostRecord.frequency >= S3_GHOST_TO_MAIN_HITS
+                  ? ghost.remove(keyHash64)
+                  : Long.MIN_VALUE;
+          if (ghostEntryWeight != Long.MIN_VALUE) {
+            ghostWeight -= ghostEntryWeight;
+            link(main, entry, Entry.POLICY_S3_MAIN);
+            mainWeight += weight;
+          } else {
+            ghostDeferredPromotions++;
+            addSmall(entry, weight);
+          }
         } else {
-          link(small, entry, Entry.POLICY_S3_SMALL);
-          smallWeight += weight;
+          addSmall(entry, weight);
         }
-        entry.policyAccessCount(0);
         break;
       case W_TINY_LFU:
         link(window, entry, Entry.POLICY_TINY_WINDOW);
         windowWeight += weight;
-        sketch.increment(entry.keyHash64());
+        sketch.increment(keyHash64);
         recordWriteMiss();
         drainWindow();
         break;
@@ -133,20 +199,32 @@ public final class MaintenancePolicy {
   }
 
   public void access(Entry entry) {
-    switch (entry.policyState()) {
+    access(entry, stateOf(entry));
+  }
+
+  /** Applies a hit using the policy-state snapshot captured by the business-thread sampler. */
+  void access(Entry entry, int observedPolicyState) {
+    if (eviction == Eviction.S3_FIFO && observedPolicyState == Entry.POLICY_S4_SKIP) {
+      skipSuppressedAccesses++;
+      return;
+    }
+    switch (stateOf(entry)) {
       case Entry.POLICY_LRU:
         lru.moveToHead(entry);
         break;
       case Entry.POLICY_S3_SMALL:
       case Entry.POLICY_S3_MAIN:
-        entry.policyAccessCount(entry.policyAccessCount() + 1);
+        setPolicyAccessCount(entry, accessCountOf(entry) + 1);
+        break;
+      case Entry.POLICY_S4_SKIP:
+        skipSuppressedAccesses++;
         break;
       case Entry.POLICY_TINY_WINDOW:
-        sketch.increment(entry.keyHash64());
+        sketch.increment(keyHashOf(entry));
         window.moveToHead(entry);
         break;
       case Entry.POLICY_TINY_PROBATION:
-        sketch.increment(entry.keyHash64());
+        sketch.increment(keyHashOf(entry));
         advanceTinyCandidate(entry);
         unlink(probation, entry);
         long weight = weightOf(entry);
@@ -156,7 +234,7 @@ public final class MaintenancePolicy {
         demoteProtected();
         break;
       case Entry.POLICY_TINY_PROTECTED:
-        sketch.increment(entry.keyHash64());
+        sketch.increment(keyHashOf(entry));
         protectedQueue.moveToHead(entry);
         break;
       default:
@@ -164,30 +242,33 @@ public final class MaintenancePolicy {
   }
 
   public void remove(Entry entry, boolean eviction) {
-    remove(entry, eviction, 0L, false);
-  }
-
-  /** Removes an entry, reusing a hash already loaded by the eviction selector when provided. */
-  void remove(Entry entry, boolean eviction, long keyHash64) {
-    remove(entry, eviction, keyHash64, true);
-  }
-
-  private void remove(Entry entry, boolean eviction, long keyHash64, boolean hashProvided) {
-    int state = entry.policyState();
-    if (state == Entry.POLICY_NONE) {
-      entry.policyByteWeight(0L);
+    int linkId = entry.policyLinkId();
+    if (linkId == 0) {
+      clearUnlinkedPolicyMetadata(entry);
       return;
     }
-    long removedWeight = weightOf(entry);
+    int state = links.policyState(linkId);
+    long removedLogicalBytes = links.policyByteWeight(linkId);
+    int removedAccessCount = links.policyAccessCount(linkId);
+    long keyHash64 = links.keyHash64(linkId);
+    if (state == Entry.POLICY_NONE) {
+      clearPolicyMetadata(entry);
+      links.maybeRelease(entry);
+      return;
+    }
+    long removedWeight = countBounded ? 1L : removedLogicalBytes;
     switch (state) {
       case Entry.POLICY_LRU:
         unlink(lru, entry);
         break;
       case Entry.POLICY_S3_SMALL:
+      case Entry.POLICY_S4_SKIP:
+        removeSmallWeight(entry, removedWeight);
         unlink(small, entry);
-        smallWeight -= removedWeight;
         if (eviction) {
-          addGhost(entry, hashProvided ? keyHash64 : entry.keyHash64());
+          addGhost(keyHash64, removedWeight, removedAccessCount);
+        } else {
+          clearGhostEvidence(keyHash64);
         }
         break;
       case Entry.POLICY_S3_MAIN:
@@ -210,14 +291,9 @@ public final class MaintenancePolicy {
       default:
     }
     weightedSize -= removedWeight;
-    liveBytes -= entry.policyByteWeight();
-    entry.policyState(Entry.POLICY_NONE);
-    entry.policyByteWeight(0L);
-    entry.policyAccessCount(0);
-    if (eviction) {
-      evictions++;
-      evictionWeight = saturatedAdd(evictionWeight, removedWeight);
-    }
+    liveBytes -= removedLogicalBytes;
+    clearPolicyMetadata(entry);
+    links.maybeRelease(entry);
   }
 
   /** Selects one production eviction outcome; scan exhaustion is distinct from an empty policy. */
@@ -241,12 +317,13 @@ public final class MaintenancePolicy {
 
   /** Rotates a candidate whose per-entry writer mutex is currently held by a business writer. */
   public void skipLocked(Entry entry) {
-    switch (entry.policyState()) {
+    switch (stateOf(entry)) {
       case Entry.POLICY_LRU:
         lru.moveToHead(entry);
         break;
       case Entry.POLICY_S3_SMALL:
-        small.moveToHead(entry);
+      case Entry.POLICY_S4_SKIP:
+        moveSmallToHeadAsSkip(entry);
         break;
       case Entry.POLICY_S3_MAIN:
         main.moveToHead(entry);
@@ -272,20 +349,36 @@ public final class MaintenancePolicy {
     return liveBytes;
   }
 
-  long evictions() {
-    return evictions;
-  }
-
-  long evictionWeight() {
-    return evictionWeight;
-  }
-
   long sketchBytes() {
     return sketch == null ? 0L : sketch.bytes();
   }
 
-  long ghostHeapBytes() {
-    return ghost == null ? 0L : ghost.heapBytes();
+  long ghostNativeBytes() {
+    return ghost == null ? 0L : ghost.nativeBytes();
+  }
+
+  long ghostAllocationTrims() {
+    return ghostAllocationTrims;
+  }
+
+  long ghostAllocationDrops() {
+    return ghostAllocationDrops;
+  }
+
+  long skipSuppressedAccesses() {
+    return skipSuppressedAccesses;
+  }
+
+  long ghostDeferredPromotions() {
+    return ghostDeferredPromotions;
+  }
+
+  boolean ghostRehashPending() {
+    return ghost != null && ghost.rehashPending();
+  }
+
+  int advanceGhostRehash(int budget) {
+    return ghost == null ? 0 : ghost.advanceRehash(budget);
   }
 
   /** A successfully consumed access event, not a delayed global cache-stat delta. */
@@ -321,13 +414,9 @@ public final class MaintenancePolicy {
       if (small.tail != null && (smallWeight >= smallMaximum || main.tail == null)) {
         Entry candidate = small.tail;
         lastVictimScanCount++;
-        if (candidate.policyAccessCount() > 1) {
+        if (accessCountOf(candidate) >= S3_SMALL_PROMOTION_HITS) {
           long candidateWeight = weightOf(candidate);
-          unlink(small, candidate);
-          smallWeight -= candidateWeight;
-          candidate.policyAccessCount(0);
-          link(main, candidate, Entry.POLICY_S3_MAIN);
-          mainWeight += candidateWeight;
+          promoteSmallToMain(candidate, candidateWeight);
           continue;
         }
         return selection.entry(candidate);
@@ -341,8 +430,9 @@ public final class MaintenancePolicy {
         return candidate == null ? selection.none() : selection.entry(candidate);
       }
       lastVictimScanCount++;
-      if (candidate.policyAccessCount() > 0) {
-        candidate.policyAccessCount(candidate.policyAccessCount() - 1);
+      int accessCount = accessCountOf(candidate);
+      if (accessCount > 0) {
+        setPolicyAccessCount(candidate, accessCount - 1);
         main.moveToHead(candidate);
         continue;
       }
@@ -355,7 +445,7 @@ public final class MaintenancePolicy {
     demoteProtected();
     drainWindow();
     Entry candidate = tinyCandidate;
-    if (candidate != null && candidate.policyState() != Entry.POLICY_TINY_PROBATION) {
+    if (candidate != null && stateOf(candidate) != Entry.POLICY_TINY_PROBATION) {
       tinyCandidate = null;
       candidate = null;
     }
@@ -382,8 +472,8 @@ public final class MaintenancePolicy {
   }
 
   private boolean admit(Entry candidate, Entry victim) {
-    long candidateHash = candidate.keyHash64();
-    long victimHash = victim.keyHash64();
+    long candidateHash = keyHashOf(candidate);
+    long victimHash = keyHashOf(victim);
     int candidateFrequency = sketch.frequency(candidateHash);
     int victimFrequency = sketch.frequency(victimHash);
     if (candidateFrequency > victimFrequency) {
@@ -429,7 +519,7 @@ public final class MaintenancePolicy {
   /** Candidate traversal is oldest-to-newest, opposite to the intrusive deque's head links. */
   private void advanceTinyCandidate(Entry entry) {
     if (entry == tinyCandidate) {
-      tinyCandidate = entry.policyPrev;
+      tinyCandidate = links.policyPrevEntry(entry);
     }
   }
 
@@ -487,21 +577,27 @@ public final class MaintenancePolicy {
     return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
   }
 
-  private void updateWeight(Entry entry) {
-    long updatedBytes = byteWeightOf(entry);
-    long updated = countBounded ? 1L : updatedBytes;
-    long oldWeight = weightOf(entry);
-    long oldBytes = entry.policyByteWeight();
-    long delta = updated - oldWeight;
+  private void updateWeight(Entry entry, long valueAllocation) {
+    long updatedBytes = normalizedByteWeight(
+        CacheMath.logicalEntryBytes(entry.keyAllocationLength(), valueAllocation));
+    long oldBytes = byteWeightOf(entry);
+    long updatedWeight = countBounded ? 1L : updatedBytes;
+    long oldWeight = countBounded ? 1L : oldBytes;
+    long delta = updatedWeight - oldWeight;
     long byteDelta = updatedBytes - oldBytes;
     if (delta == 0L && byteDelta == 0L) {
       return;
     }
     weightedSize += delta;
     liveBytes += byteDelta;
-    switch (entry.policyState()) {
+    int state = stateOf(entry);
+    switch (state) {
       case Entry.POLICY_S3_SMALL:
+      case Entry.POLICY_S4_SKIP:
         smallWeight += delta;
+        if (state == Entry.POLICY_S4_SKIP) {
+          smallSkipWeight += delta;
+        }
         break;
       case Entry.POLICY_S3_MAIN:
         mainWeight += delta;
@@ -517,21 +613,110 @@ public final class MaintenancePolicy {
         break;
       default:
     }
-    entry.policyByteWeight(updatedBytes);
+    setPolicyByteWeight(entry, updatedBytes);
+    if (state == Entry.POLICY_S4_SKIP) {
+      trimSmallSkip();
+    }
   }
 
-  private void addGhost(Entry entry, long fingerprint) {
-    long previous = ghost.remove(fingerprint);
-    if (previous != Long.MIN_VALUE) {
-      ghostWeight -= previous;
+  private void addGhost(long fingerprint, long weight, int smallHits) {
+    boolean inserted = ghost.refresh(fingerprint, weight, smallHits, ghostRecord);
+    int frequency = ghostRecord.found ? Math.max(ghostRecord.frequency, smallHits) : smallHits;
+    if (ghostRecord.found) {
+      ghostWeight -= ghostRecord.weight;
     }
-    long weight = weightOf(entry);
-    ghost.put(fingerprint, weight);
+    for (int attempt = 0; !inserted && attempt < GHOST_INSERT_TRIM_ATTEMPTS; attempt++) {
+      long removed = ghost.removeFirst();
+      if (removed == Long.MIN_VALUE) {
+        break;
+      }
+      ghostWeight -= removed;
+      ghostAllocationTrims++;
+      inserted = ghost.put(fingerprint, weight, frequency);
+    }
+    if (!inserted) {
+      ghostAllocationDrops++;
+      return;
+    }
     ghostWeight += weight;
     if (ghostWeight > ghostMaximum) {
       while (ghostWeight > ghostMaximum && !ghost.isEmpty()) {
-        ghostWeight -= ghost.removeFirstLong();
+        ghostWeight -= ghost.removeFirst();
       }
+    }
+  }
+
+  private void addSmall(Entry entry, long weight) {
+    link(small, entry, Entry.POLICY_S4_SKIP);
+    smallWeight += weight;
+    smallSkipWeight += weight;
+    if (smallSkipTail == null) {
+      smallSkipTail = entry;
+    }
+    trimSmallSkip();
+  }
+
+  /** Converts the oldest virtual Skip entries into ordinary Small entries at the fixed 25% mark. */
+  private void trimSmallSkip() {
+    while (smallSkipWeight > smallSkipMaximum && smallSkipTail != null) {
+      Entry candidate = smallSkipTail;
+      Entry previous = links.policyPrevEntry(candidate);
+      smallSkipTail = previous;
+      if (stateOf(candidate) == Entry.POLICY_S4_SKIP) {
+        smallSkipWeight -= weightOf(candidate);
+        setPolicyState(candidate, Entry.POLICY_S3_SMALL);
+      }
+    }
+  }
+
+  /** Removes an entry from Small accounting while its intrusive links still identify its neighbors. */
+  private void removeSmallWeight(Entry entry, long weight) {
+    if (stateOf(entry) == Entry.POLICY_S4_SKIP) {
+      if (smallSkipTail == entry) {
+        smallSkipTail = links.policyPrevEntry(entry);
+      }
+      smallSkipWeight -= weight;
+    }
+    smallWeight -= weight;
+  }
+
+  /** Writer contention rotates the entry as the newest Small item, therefore back into Skip. */
+  private void moveSmallToHeadAsSkip(Entry entry) {
+    long weight = weightOf(entry);
+    boolean wasSkip = stateOf(entry) == Entry.POLICY_S4_SKIP;
+    if (wasSkip) {
+      if (smallSkipTail == entry) {
+        smallSkipTail = links.policyPrevEntry(entry);
+      }
+      smallSkipWeight -= weight;
+    } else {
+      setPolicyAccessCount(entry, 0);
+    }
+    small.unlink(entry);
+    link(small, entry, Entry.POLICY_S4_SKIP);
+    smallSkipWeight += weight;
+    if (smallSkipTail == null) {
+      smallSkipTail = entry;
+    }
+    trimSmallSkip();
+  }
+
+  private void promoteSmallToMain(Entry entry, long weight) {
+    removeSmallWeight(entry, weight);
+    unlink(small, entry);
+    clearGhostEvidence(keyHashOf(entry));
+    setPolicyAccessCount(entry, 0);
+    link(main, entry, Entry.POLICY_S3_MAIN);
+    mainWeight += weight;
+  }
+
+  private void clearGhostEvidence(long fingerprint) {
+    if (ghost == null) {
+      return;
+    }
+    long removed = ghost.remove(fingerprint);
+    if (removed != Long.MIN_VALUE) {
+      ghostWeight -= removed;
     }
   }
 
@@ -573,60 +758,136 @@ public final class MaintenancePolicy {
     }
   }
 
-  private static long byteWeightOf(Entry entry) {
-    long key = WriterArena.allocationWeight(entry.keyAllocationLength());
-    long valueAddress = Entry.rawValueAddress(entry.valueAddress);
-    if (valueAddress == 0L) {
-      return key;
-    }
-    return key
-        + WriterArena.allocationWeight(
-            ValueBlock.allocationLength(ValueBlock.length(valueAddress)));
-  }
-
   private long weightOf(Entry entry) {
-    return countBounded ? 1L : entry.policyByteWeight();
+    return countBounded ? 1L : byteWeightOf(entry);
   }
 
-  private static void link(EntryDeque deque, Entry entry, int state) {
-    deque.linkHead(entry);
+  private int stateOf(Entry entry) {
+    int linkId = entry.policyLinkId();
+    return linkId == 0 ? Entry.POLICY_NONE : links.policyState(linkId);
+  }
+
+  private int accessCountOf(Entry entry) {
+    return links.policyAccessCount(requireLinkId(entry));
+  }
+
+  private long keyHashOf(Entry entry) {
+    return links.keyHash64(requireLinkId(entry));
+  }
+
+  private long byteWeightOf(Entry entry) {
+    return links.policyByteWeight(requireLinkId(entry));
+  }
+
+  private int requireLinkId(Entry entry) {
+    int linkId = entry.policyLinkId();
+    if (linkId == 0) {
+      throw new IllegalStateException("policy entry has no native link record");
+    }
+    return linkId;
+  }
+
+  /** Publishes policy state to the reader-visible Entry before its actor mirror. */
+  private void setPolicyState(Entry entry, int state) {
+    int linkId = requireLinkId(entry);
     entry.policyState(state);
+    links.policyState(linkId, state);
+  }
+
+  /** Publishes policy access count to the reader-visible Entry before its actor mirror. */
+  private void setPolicyAccessCount(Entry entry, int count) {
+    int linkId = requireLinkId(entry);
+    entry.policyAccessCount(count);
+    links.policyAccessCount(linkId, count);
+  }
+
+  /** Publishes policy weight to the reader-visible Entry before its actor mirror. */
+  private void setPolicyByteWeight(Entry entry, long bytes) {
+    long normalizedBytes = normalizedByteWeight(bytes);
+    int linkId = requireLinkId(entry);
+    int storedBytes = (int) normalizedBytes;
+    entry.policyByteWeight(storedBytes);
+    links.policyByteWeight(linkId, storedBytes);
+  }
+
+  private static long normalizedByteWeight(long bytes) {
+    if (bytes < 0L) {
+      throw new IllegalArgumentException("policy byte weight must fit in a non-negative int");
+    }
+    return Math.min(bytes, (long) Integer.MAX_VALUE);
+  }
+
+  private void clearPolicyMetadata(Entry entry) {
+    int linkId = requireLinkId(entry);
+    entry.policyState(Entry.POLICY_NONE);
+    links.policyState(linkId, Entry.POLICY_NONE);
+    entry.policyAccessCount(0);
+    links.policyAccessCount(linkId, 0);
+    entry.policyByteWeight(0);
+    links.policyByteWeight(linkId, 0);
+  }
+
+  private static void clearUnlinkedPolicyMetadata(Entry entry) {
+    entry.policyState(Entry.POLICY_NONE);
+    entry.policyAccessCount(0);
+    entry.policyByteWeight(0L);
+  }
+
+  private void link(EntryDeque deque, Entry entry, int state) {
+    // Publish actor ownership before exposing the entry through either neighbor pointer. The
+    // writer admission policy may remove an entry concurrently; EntryLinks must not reclaim its
+    // record in the interval where the actor deque is already linking it but policyState is still
+    // NONE.
+    int linkId;
+    synchronized (links) {
+      linkId = links.ensure(entry);
+      setPolicyState(entry, state);
+    }
+    deque.linkHead(entry, linkId);
   }
 
   private static void unlink(EntryDeque deque, Entry entry) {
     deque.unlink(entry);
   }
 
-  private static final class EntryDeque {
+  private final class EntryDeque {
     Entry head;
     Entry tail;
 
     void linkHead(Entry entry) {
-      entry.policyPrev = null;
-      entry.policyNext = head;
+      linkHead(entry, entry.policyLinkId());
+    }
+
+    void linkHead(Entry entry, int linkId) {
+      links.linkHead(
+          linkId,
+          head,
+          EntryLinks.POLICY_PREVIOUS_OFFSET,
+          EntryLinks.POLICY_NEXT_OFFSET);
       if (head == null) {
         tail = entry;
-      } else {
-        head.policyPrev = entry;
       }
       head = entry;
     }
 
     void unlink(Entry entry) {
-      Entry previous = entry.policyPrev;
-      Entry next = entry.policyNext;
-      if (previous == null) {
-        head = next;
-      } else {
-        previous.policyNext = next;
+      unlink(entry, entry.policyLinkId());
+    }
+
+    void unlink(Entry entry, int linkId) {
+      long neighbors =
+          links.unlink(
+              linkId,
+              EntryLinks.POLICY_PREVIOUS_OFFSET,
+              EntryLinks.POLICY_NEXT_OFFSET);
+      int previousId = (int) (neighbors >>> 32);
+      int nextId = (int) neighbors;
+      if (previousId == 0) {
+        head = links.entry(nextId);
       }
-      if (next == null) {
-        tail = previous;
-      } else {
-        next.policyPrev = previous;
+      if (nextId == 0) {
+        tail = links.entry(previousId);
       }
-      entry.policyPrev = null;
-      entry.policyNext = null;
     }
 
     void moveToHead(Entry entry) {
@@ -638,14 +899,4 @@ public final class MaintenancePolicy {
     }
   }
 
-  /**
-   * Fastutil owns three primitive arrays for this linked map. Report their payload capacity rather
-   * than the logical entry count; like the other internal-memory statistics, JVM object and array
-   * headers are deliberately excluded because their sizes are VM-specific.
-   */
-  private static final class GhostMap extends Long2LongLinkedOpenHashMap {
-    long heapBytes() {
-      return ((long) key.length + value.length + link.length) * Long.BYTES;
-    }
-  }
 }

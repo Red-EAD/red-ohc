@@ -1,7 +1,6 @@
 package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -40,15 +39,16 @@ public final class BulkTtlClockTest {
   public void getAllReadsTheTtlClockOncePerChunk() {
     CountingTicker ticker = new CountingTicker();
     try (OHCache<String, String> cache = newCache(ticker)) {
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("two", "value-two"));
+      cache.put("one", "value-one");
+      cache.put("two", "value-two");
       cache.flushAsync().join();
       ticker.resetReaderCalls();
 
       Map<String, String> values = cache.getAll(Arrays.asList("one", "two"));
 
       assertEquals(values.size(), 2);
-      assertEquals(ticker.readerCalls(), 1);
+      assertEquals(ticker.readerMonotonicCalls(), 1);
+      assertEquals(ticker.readerWallCalls(), 0);
     }
   }
 
@@ -56,8 +56,8 @@ public final class BulkTtlClockTest {
   public void getDirectAllReadsTheTtlClockOncePerChunk() {
     CountingTicker ticker = new CountingTicker();
     try (OHCache<String, String> cache = newCache(ticker)) {
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("two", "value-two"));
+      cache.put("one", "value-one");
+      cache.put("two", "value-two");
       cache.flushAsync().join();
       ticker.resetReaderCalls();
       AtomicInteger hits = new AtomicInteger();
@@ -66,7 +66,8 @@ public final class BulkTtlClockTest {
       assertEquals(cache.getDirectAll(Arrays.asList("one", "two"), consumer), 2);
 
       assertEquals(hits.get(), 2);
-      assertEquals(ticker.readerCalls(), 1);
+      assertEquals(ticker.readerMonotonicCalls(), 1);
+      assertEquals(ticker.readerWallCalls(), 0);
     }
   }
 
@@ -74,7 +75,7 @@ public final class BulkTtlClockTest {
   public void getAllKeepsThePublishedValueObservedBeforeTheTtlClockRead() {
     ReentrantReplacementTicker ticker = new ReentrantReplacementTicker();
     try (OHCache<String, String> cache = newCache(ticker)) {
-      assertTrue(cache.put("key", "old", 1_060_000L));
+      cache.put("key", "old", 1_060_000L);
       cache.flushAsync().join();
       ticker.arm(cache);
 
@@ -82,7 +83,7 @@ public final class BulkTtlClockTest {
 
       assertEquals(values.get("key"), "old");
       assertEquals(cache.get("key"), "new");
-      assertEquals(ticker.readerCalls(), 1);
+      assertEquals(ticker.readerMonotonicCalls(), 1);
     }
   }
 
@@ -92,10 +93,11 @@ public final class BulkTtlClockTest {
     try (OHCache<String, String> cache = newNoTtlCache(ticker)) {
       ticker.resetReaderCalls();
 
-      assertTrue(cache.put("one", "value-one"));
-      assertTrue(cache.put("one", "value-two"));
+      cache.put("one", "value-one");
+      cache.put("one", "value-two");
 
-      assertEquals(ticker.readerCalls(), 0);
+      assertEquals(ticker.readerMonotonicCalls(), 0);
+      assertEquals(ticker.readerWallCalls(), 0);
     }
   }
 
@@ -120,28 +122,38 @@ public final class BulkTtlClockTest {
 
   private static final class CountingTicker implements Ticker {
     private final Thread reader = Thread.currentThread();
-    private final AtomicInteger readerCalls = new AtomicInteger();
 
     @Override
     public long nanos() {
+      if (Thread.currentThread() == reader) {
+        monotonicCalls.incrementAndGet();
+      }
       return System.nanoTime();
     }
 
     @Override
     public long currentTimeMillis() {
       if (Thread.currentThread() == reader) {
-        readerCalls.incrementAndGet();
+        wallCalls.incrementAndGet();
       }
       return 1_000_000L;
     }
 
     void resetReaderCalls() {
-      readerCalls.set(0);
+      monotonicCalls.set(0);
+      wallCalls.set(0);
     }
 
-    int readerCalls() {
-      return readerCalls.get();
+    int readerMonotonicCalls() {
+      return monotonicCalls.get();
     }
+
+    int readerWallCalls() {
+      return wallCalls.get();
+    }
+
+    private final AtomicInteger monotonicCalls = new AtomicInteger();
+    private final AtomicInteger wallCalls = new AtomicInteger();
   }
 
   private static final class ReentrantReplacementTicker implements Ticker {
@@ -152,18 +164,18 @@ public final class BulkTtlClockTest {
 
     @Override
     public long nanos() {
+      if (Thread.currentThread() == reader) {
+        int call = readerCalls.incrementAndGet();
+        if (replaceOnNextRead && call == 1) {
+          replaceOnNextRead = false;
+          cache.put("key", "new", 0L);
+        }
+      }
       return System.nanoTime();
     }
 
     @Override
     public long currentTimeMillis() {
-      if (Thread.currentThread() == reader) {
-        int call = readerCalls.incrementAndGet();
-        if (replaceOnNextRead && call == 1) {
-          replaceOnNextRead = false;
-          assertTrue(cache.put("key", "new", 0L));
-        }
-      }
       return 1_000_000L;
     }
 
@@ -173,7 +185,7 @@ public final class BulkTtlClockTest {
       replaceOnNextRead = true;
     }
 
-    int readerCalls() {
+    int readerMonotonicCalls() {
       return readerCalls.get();
     }
   }

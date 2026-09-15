@@ -4,7 +4,7 @@ import java.util.Arrays;
 
 /** Fixed small-allocation classes, deliberately shared by all writer arenas. */
 public final class SizeClasses {
-  public static final int PAGE_BYTES = 64 << 10;
+  public static final int MIN_PAGE_BYTES = 64 << 10;
   private static final int[] SLOT_BYTES = createSlots();
   private static final int MAX_SLOT_BYTES = SLOT_BYTES[SLOT_BYTES.length - 1];
   private static final byte[] CLASS_BY_16_BYTES = createClassLookup();
@@ -27,12 +27,38 @@ public final class SizeClasses {
     return SLOT_BYTES[index];
   }
 
+  public static int pageBytes(int index) {
+    return pageBytesForSlot(SLOT_BYTES[index]);
+  }
+
+  public static int pageBytesForSlot(int slotBytes) {
+    long alignedSlotBytes = (slotBytes + 63L) & ~63L;
+    if (alignedSlotBytes <= 0L || alignedSlotBytes > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException("slot size is out of range: " + slotBytes);
+    }
+    if (alignedSlotBytes < 4 * 1024) {
+      long required = Math.max((long) MIN_PAGE_BYTES, 256L * alignedSlotBytes);
+      return nextPowerOfTwo((int) required);
+    }
+    return 2 * 1024 * 1024;
+  }
+
   public static long directBytes(long entryBytes) {
-    return (WriterArena.PREFIX_BYTES + entryBytes + 15L) & ~15L;
+    long blockBytes = (WriterArena.PREFIX_BYTES + entryBytes + 63L) & ~63L;
+    // Native malloc implementations are not required to return 64-byte aligned addresses. Keep
+    // enough slack for Memory to align the visible block while retaining the raw base at +56.
+    return blockBytes + 128L;
+  }
+
+  private static int nextPowerOfTwo(int value) {
+    if (value <= 0 || value > (1 << 30)) {
+      throw new IllegalArgumentException("page size is out of range: " + value);
+    }
+    return 1 << (32 - Integer.numberOfLeadingZeros(value - 1));
   }
 
   private static int[] createSlots() {
-    int[] slots = new int[86];
+    int[] slots = new int[87];
     int cursor = 0;
     for (int value = 128; value <= 1024; value += 32) {
       slots[cursor++] = value;
@@ -41,7 +67,11 @@ public final class SizeClasses {
       slots[cursor++] = value;
     }
     slots[cursor++] = 4128;
-    for (int value = 4608; value <= 16384; value += 512) {
+    for (int value = 4608; value <= 5120; value += 512) {
+      slots[cursor++] = value;
+    }
+    slots[cursor++] = 5152;
+    for (int value = 5632; value <= 16384; value += 512) {
       slots[cursor++] = value;
     }
     for (int value = 18432; value <= 32768; value += 2048) {
@@ -50,7 +80,16 @@ public final class SizeClasses {
     if (cursor != slots.length) {
       throw new AssertionError(cursor);
     }
-    return slots;
+    int unique = 0;
+    int previous = -1;
+    for (int index = 0; index < cursor; index++) {
+      int aligned = (slots[index] + 63) & ~63;
+      if (aligned != previous) {
+        slots[unique++] = aligned;
+        previous = aligned;
+      }
+    }
+    return Arrays.copyOf(slots, unique);
   }
 
   private static byte[] createClassLookup() {

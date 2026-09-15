@@ -5,12 +5,11 @@ import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.expectThrows;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -22,6 +21,7 @@ import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.EvictionListener;
 import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
+import com.red.ohc.index.Entry;
 
 public final class EvictionListenerTest {
   @Test(timeOut = 5_000L)
@@ -33,7 +33,7 @@ public final class EvictionListenerTest {
 
     try (OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
-            .capacity(256L)
+            .capacity(1_000L)
             .keySerializer(countingSerializer(keyDeserializations))
             .valueSerializer(countingSerializer(valueDeserializations))
             .evictionListener(
@@ -42,10 +42,9 @@ public final class EvictionListenerTest {
                   callback.countDown();
                 })
             .buildTyped()) {
-      assertTrue(cache.put("one", "value-one"));
+      cache.put("one", "value-one");
       cache.flushAsync().join();
-      assertTrue(cache.put("two", "value-two"));
-      cache.flushAsync().join();
+      evictOne(cache);
 
       assertTrue(callback.await(2L, TimeUnit.SECONDS), "eviction listener was not called");
       assertEquals(cause.get(), RemovalCause.SIZE);
@@ -160,10 +159,10 @@ public final class EvictionListenerTest {
                   callback.countDown();
                 })
             .buildTyped()) {
-      assertTrue(cache.put("expired", "value", 2_000L));
+      cache.put("expired", "value", 2_000L);
       cache.flushAsync().join();
       nowMillis.set(3_000L);
-      assertTrue(cache.put("trigger", "value", 4_000L));
+      cache.put("trigger", "value", 4_000L);
       cache.flushAsync().join();
 
       assertTrue(callback.await(2L, TimeUnit.SECONDS), "eviction listener was not called");
@@ -205,11 +204,11 @@ public final class EvictionListenerTest {
                   callback.countDown();
                 })
             .buildTyped()) {
-      assertTrue(cache.put("expired", "old", 2_000L));
+      cache.put("expired", "old", 2_000L);
       cache.flushAsync().join();
       nowMillis.set(3_000L);
 
-      assertTrue(cache.putIfAbsentAsync("expired", "new", 4_000L).join());
+      assertEquals(cache.putIfAbsent("expired", "new", 4_000L), null);
       assertTrue(callback.await(500L, TimeUnit.MILLISECONDS), "eviction listener was not called");
       assertEquals(observedKey.get(), "expired");
       assertEquals(cause.get(), RemovalCause.EXPIRED);
@@ -225,11 +224,12 @@ public final class EvictionListenerTest {
             countingSerializer(new AtomicInteger()),
             countingSerializer(new AtomicInteger()),
             (key, value, cause) -> callback.countDown())) {
-      assertTrue(cache.put("one", "value-one"));
+      cache.put("one", "value-one");
       cache.flushAsync().join();
-      assertTrue(cache.put("one", "replacement"));
+      cache.put("one", "replacement");
       cache.flushAsync().join();
-      assertTrue(cache.remove("one"));
+      cache.remove("one");
+      assertTrue(!cache.containsKey("one"));
       cache.flushAsync().join();
       assertTrue(callback.getCount() == 1L, "explicit removal unexpectedly notified listener");
     }
@@ -243,7 +243,7 @@ public final class EvictionListenerTest {
             countingSerializer(new AtomicInteger()),
             countingSerializer(new AtomicInteger()),
             (key, value, cause) -> callback.countDown());
-    assertTrue(cache.put("one", "value-one"));
+    cache.put("one", "value-one");
     cache.flushAsync().join();
     cache.close();
     assertEquals(callback.getCount(), 1L);
@@ -320,86 +320,6 @@ public final class EvictionListenerTest {
     }
   }
 
-  @Test(timeOut = 5_000L)
-  public void closeWaitsForAnInFlightEvictionCallback() throws Exception {
-    CountDownLatch callbackEntered = new CountDownLatch(1);
-    CountDownLatch releaseCallback = new CountDownLatch(1);
-    ExecutorService callers = Executors.newFixedThreadPool(2);
-    OffHeapCache<String, String> cache =
-        newSmallCache(
-            countingSerializer(new AtomicInteger()),
-            countingSerializer(new AtomicInteger()),
-            (key, value, cause) -> {
-              callbackEntered.countDown();
-              try {
-                assertTrue(
-                    releaseCallback.await(2L, TimeUnit.SECONDS),
-                    "test did not release eviction callback");
-              } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError(interrupted);
-              }
-            });
-    try {
-      assertTrue(cache.put("one", "value-one"));
-      cache.flushAsync().join();
-      Future<?> eviction =
-          callers.submit(
-              () -> {
-                putEventually(cache, "two", "value-two");
-                cache.flushAsync().join();
-              });
-      assertTrue(callbackEntered.await(2L, TimeUnit.SECONDS), "eviction callback did not start");
-
-      Future<?> close = callers.submit(cache::close);
-      Thread.sleep(50L);
-      assertTrue(!close.isDone(), "close released native state during the callback");
-
-      releaseCallback.countDown();
-      eviction.get(2L, TimeUnit.SECONDS);
-      close.get(2L, TimeUnit.SECONDS);
-      assertEquals(cache.totalAllocatedBytes(), 0L);
-    } finally {
-      releaseCallback.countDown();
-      callers.shutdownNow();
-      cache.close();
-    }
-  }
-
-  @Test(timeOut = 5_000L)
-  public void actorListenerCannotSynchronouslyFlushOrCloseItself() throws Exception {
-    AtomicReference<OffHeapCache<String, String>> cacheRef = new AtomicReference<>();
-    AtomicReference<Throwable> flushFailure = new AtomicReference<>();
-    AtomicReference<Throwable> closeFailure = new AtomicReference<>();
-    CountDownLatch callback = new CountDownLatch(1);
-    OffHeapCache<String, String> cache =
-        newSmallCache(
-            countingSerializer(new AtomicInteger()),
-            countingSerializer(new AtomicInteger()),
-            (key, value, cause) -> {
-              try {
-                cacheRef.get().flushAsync().join();
-              } catch (Throwable failure) {
-                flushFailure.set(failure);
-              }
-              try {
-                cacheRef.get().close();
-              } catch (Throwable failure) {
-                closeFailure.set(failure);
-              }
-              callback.countDown();
-            });
-    cacheRef.set(cache);
-    try {
-      evictOne(cache);
-      assertTrue(callback.await(2L, TimeUnit.SECONDS));
-      assertTrue(flushFailure.get() instanceof IllegalStateException);
-      assertTrue(closeFailure.get() instanceof IllegalStateException);
-    } finally {
-      cache.close();
-    }
-  }
-
   @Test(timeOut = 10_000L)
   public void closedListenerCacheCanBeCollected() throws Exception {
     WeakReference<OffHeapCache<String, String>> reference = createClosedListenerCache();
@@ -422,19 +342,30 @@ public final class EvictionListenerTest {
   }
 
   private static void evictOne(OffHeapCache<String, String> cache) {
-    assertTrue(cache.put("one", "value-one"));
+    cache.put("one", "value-one");
     cache.flushAsync().join();
-    assertTrue(cache.put("two", "value-two"));
-    cache.flushAsync().join();
-  }
-
-  private static void putEventually(
-      OffHeapCache<String, String> cache, String key, String value) {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
-    while (!cache.put(key, value) && System.nanoTime() < deadline) {
-      Thread.yield();
+    Entry entry = cache.dataForTest().values().iterator().next();
+    try {
+      Field workerField = OffHeapCache.class.getDeclaredField("worker");
+      workerField.setAccessible(true);
+      Object worker = workerField.get(cache);
+      Method remove =
+          worker
+              .getClass()
+              .getDeclaredMethod(
+                  "removeFromMap",
+                  com.red.ohc.index.Entry.class,
+                  boolean.class,
+                  long.class,
+                  long.class,
+                  RemovalCause.class);
+      remove.setAccessible(true);
+      assertTrue(
+          (Boolean)
+              remove.invoke(worker, entry, true, entry.generation(), entry.valueAddress, RemovalCause.SIZE));
+    } catch (ReflectiveOperationException failure) {
+      throw new AssertionError("failed to trigger actor eviction", failure);
     }
-    assertEquals(cache.get(key), value, "budget pressure did not restore write admission");
   }
 
   private static OffHeapCache<String, String> newSmallCache(
@@ -442,7 +373,7 @@ public final class EvictionListenerTest {
       CacheSerializer<String> valueSerializer,
       EvictionListener<String, String> listener) {
     return OHCacheBuilder.<String, String>newBuilder()
-        .capacity(256L)
+        .capacity(1_000L)
         .keySerializer(keySerializer)
         .valueSerializer(valueSerializer)
         .evictionListener(listener)

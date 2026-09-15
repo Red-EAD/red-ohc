@@ -1,8 +1,5 @@
 package com.red.ohc.index;
 
-import java.lang.ref.ReferenceQueue;
-import java.lang.ref.WeakReference;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import com.red.ohc.storage.CacheMath;
@@ -12,6 +9,9 @@ import com.red.ohc.storage.NativeMemory;
 public final class Entry {
   private static final long VALUE_TAG_MASK = 7L;
   private static final long VALUE_HAS_TTL = 1L;
+  private static final long VALUE_RETIRED = 1L << 1;
+  private static final long VALUE_DEAD = 1L << 2;
+  private static final long VALUE_LIFECYCLE_MASK = VALUE_RETIRED | VALUE_DEAD;
 
   public static final int PENDING_ADD = 1;
   public static final int PENDING_UPDATE = 1 << 1;
@@ -27,15 +27,17 @@ public final class Entry {
   public static final int POLICY_TINY_WINDOW = 4;
   public static final int POLICY_TINY_PROBATION = 5;
   public static final int POLICY_TINY_PROTECTED = 6;
+  /** Virtual S4-FIFO-lite Skip region; it shares the existing three-bit policy-state field. */
+  public static final int POLICY_S4_SKIP = 7;
   private static final int PENDING_MASK = PENDING_ADD | PENDING_UPDATE | PENDING_REMOVE;
   private static final int PENDING_CLAIMED = 1 << 3;
   private static final int PENDING_QUEUED = 1 << 4;
-  private static final int PENDING_REPAIR = 1 << 5;
+  private static final int PENDING_RETRY = 1 << 5;
   private static final int PENDING_CLAIM_SHIFT = 6;
   private static final int PENDING_CLAIM_MASK = PENDING_MASK << PENDING_CLAIM_SHIFT;
   private static final int PENDING_ROLLOVER = 1 << 9;
   private static final int PENDING_ROLLOVER_CLAIMED = 1 << 10;
-  /** Heap-resident, volatile hint used by the business writer to avoid reading policy metadata. */
+  /** Native state-word hint used by the business writer to avoid reading policy metadata. */
   private static final int POLICY_PRESENT = 1 << 11;
   private static final int TIMER_UNSCHEDULED = -1;
   private static final int TIMER_HEAP_BASE = -2;
@@ -43,81 +45,58 @@ public final class Entry {
   private static final int TIMER_SLOT_MASK = (1 << TIMER_SLOT_BITS) - 1;
   private static final int POLICY_STATE_SHIFT = 0;
   private static final int POLICY_ACCESS_SHIFT = 3;
-  private static final long POLICY_META_OFFSET = 0L;
-  private static final long TIMER_LOCATION_OFFSET = 4L;
-  private static final long TIMER_DEADLINE_OFFSET = 8L;
+  private static final int POLICY_LINK_ID_SHIFT = 5;
+  private static final int POLICY_LINK_ID_MASK = 0x07ff_ffff;
+  private static final long STATE_WORD_OFFSET = 0L;
+  private static final long CURRENT_VALUE_ALLOCATION_OFFSET = 8L;
   private static final long MAINTENANCE_META_OFFSET = 16L;
-  private static final long POLICY_BYTE_WEIGHT_OFFSET = 24L;
-  public static final long NATIVE_METADATA_BYTES = 32L;
+  private static final long POLICY_META_OFFSET = 24L;
+  private static final long TIMER_LOCATION_OFFSET = 28L;
+  private static final long TIMER_DEADLINE_OFFSET = 32L;
+  private static final long POLICY_BYTE_WEIGHT_OFFSET = 40L;
+  /** Unified native header: allocator metadata occupies +48 and +56. */
+  public static final long NATIVE_METADATA_BYTES = 64L;
   private static final long MUTATION_VERSION_SHIFT = 32L;
   private static final long VERSION_MASK = 0xffffffffL;
   public static final long WRITER_LOCK = 1L << 63;
-  private static final long STATE_SHIFT = 61L;
-  private static final long STATE_MASK = 3L << STATE_SHIFT;
-  private static final long ALIVE = 0L;
-  private static final long RETIRED = 1L << STATE_SHIFT;
-  private static final long DEAD = 2L << STATE_SHIFT;
-  public static final long GENERATION_MASK = (1L << STATE_SHIFT) - 1L;
+  private static final int PENDING_STATE_SHIFT = 51;
+  private static final long PENDING_STATE_MASK = 0xfffL << PENDING_STATE_SHIFT;
+  private static final long WRITER_WAITER = 1L << 50;
+  public static final long GENERATION_MASK = WRITER_WAITER - 1L;
 
-  private static final AtomicLongFieldUpdater<Entry> LIFECYCLE =
-      AtomicLongFieldUpdater.newUpdater(Entry.class, "lifecycle");
-  private static final AtomicIntegerFieldUpdater<Entry> PENDING =
-      AtomicIntegerFieldUpdater.newUpdater(Entry.class, "pendingFlags");
+  private static final AtomicLongFieldUpdater<Entry> VALUE_ADDRESS =
+      AtomicLongFieldUpdater.newUpdater(Entry.class, "valueAddress");
+  /** High bit reserved in the native allocation word for the logical mapping state. */
+  private static final long LOGICAL_ABSENT = Long.MIN_VALUE;
+  private static final long VALUE_ALLOCATION_MASK = Long.MAX_VALUE;
 
   public final long nativeKeyAddress;
+  public final int keyLength;
 
-  /** High 32 bits are serialized key length; low 32 bits are the CHM hash. */
-  public final long keyMeta;
-
-  /** Eight-byte aligned native value address; bit 0 marks a TTL-bearing value. */
+  /** Eight-byte aligned native value address; low bits carry TTL/lifecycle tags. */
   public volatile long valueAddress;
 
-  public volatile long lifecycle;
-  public Entry policyPrev;
-  public Entry policyNext;
-  public Entry timerPrev;
-  public Entry timerNext;
-
-  public volatile int pendingFlags;
-
-  public Entry(long nativeKeyAddress, int keyLength, int chmHash, long valueAddress) {
-    this(nativeKeyAddress, keyLength, chmHash, chmHash & 0xffffffffL, valueAddress);
-  }
-
-  public Entry(
-      long nativeKeyAddress, int keyLength, int chmHash, long keyHash64, long valueAddress) {
+  public Entry(long nativeKeyAddress, int keyLength, long valueAddress) {
     this.nativeKeyAddress = nativeKeyAddress;
-    this.keyMeta = packKeyMeta(chmHash, keyLength);
+    if (keyLength < 0) {
+      throw new IllegalArgumentException("keyLength must be non-negative");
+    }
+    this.keyLength = keyLength;
     this.valueAddress = valueAddress;
-    this.pendingFlags = 0;
-  }
-
-  public static Entry bootstrap() {
-    return new Entry(0L, 0, 0, 0L);
-  }
-
-  public static long packKeyMeta(int hash, int keyLength) {
-    return ((long) keyLength << 32) | (hash & 0xffffffffL);
-  }
-
-  public static int keyHash(long keyMeta) {
-    return (int) keyMeta;
-  }
-
-  public static int keyLength(long keyMeta) {
-    return (int) (keyMeta >>> 32);
-  }
-
-  public int keyHash() {
-    return keyHash(keyMeta);
   }
 
   public long keyHash64() {
     return nativeKeyAddress == 0L ? 0L : NativeMemory.getLong(nativeKeyAddress);
   }
 
+  /** CHM's structural operations read the native hash; get uses LookupKey.hashCode directly. */
+  public int keyHash() {
+    long hash64 = keyHash64();
+    return (int) (hash64 ^ (hash64 >>> 32));
+  }
+
   public int keyLength() {
-    return keyLength(keyMeta);
+    return keyLength;
   }
 
   public long nativeKeyAddress() {
@@ -139,8 +118,17 @@ public final class Entry {
     return keyDataAllocationLength(keyLength) + NATIVE_METADATA_BYTES;
   }
 
+  /** Physical bytes after the allocator prefix: key hash and serialized key only. */
+  public static long keyPhysicalAllocationLengthForKeyLength(int keyLength) {
+    return keyDataAllocationLength(keyLength);
+  }
+
   public long keyAllocationLength() {
     return keyAllocationLengthForKeyLength(keyLength());
+  }
+
+  public long nativeKeyAllocationLength() {
+    return keyPhysicalAllocationLengthForKeyLength(keyLength());
   }
 
   public long rawValueAddress() {
@@ -151,133 +139,62 @@ public final class Entry {
     if (nativeKeyAddress == 0L) {
       throw new IllegalStateException("Entry has no native key block");
     }
-    return nativeKeyAddress + keyDataAllocationLength(keyLength());
+    return nativeKeyAddress - NATIVE_METADATA_BYTES;
+  }
+
+  private long stateWordAddress() {
+    return nativeMetadataAddress() + STATE_WORD_OFFSET;
+  }
+
+  private static int pendingFlags(long stateWord) {
+    return (int) ((stateWord & PENDING_STATE_MASK) >>> PENDING_STATE_SHIFT);
+  }
+
+  /** Snapshot of pending flags stored in the native state word. */
+  public int pendingFlags() {
+    return pendingFlags(NativeMemory.getLongVolatile(stateWordAddress()));
+  }
+
+  private boolean compareAndSetPending(int expected, int update) {
+    long address = stateWordAddress();
+    long current = NativeMemory.getLongVolatile(address);
+    if (pendingFlags(current) != expected) {
+      return false;
+    }
+    long next = (current & ~PENDING_STATE_MASK) | ((long) update << PENDING_STATE_SHIFT);
+    return NativeMemory.compareAndSwapLong(address, current, next);
   }
 
   public void initializeNativeMetadata() {
     long metadata = nativeMetadataAddress();
-    NativeMemory.setMemory(metadata, NATIVE_METADATA_BYTES, (byte) 0);
+    NativeMemory.putLong(metadata + STATE_WORD_OFFSET, 0L);
     NativeMemory.putInt(metadata + TIMER_LOCATION_OFFSET, TIMER_UNSCHEDULED);
+    NativeMemory.putInt(metadata + POLICY_META_OFFSET, 0);
+    NativeMemory.putLong(metadata + CURRENT_VALUE_ALLOCATION_OFFSET, LOGICAL_ABSENT);
+    NativeMemory.putLong(metadata + MAINTENANCE_META_OFFSET, 0L);
+    NativeMemory.putLong(metadata + TIMER_DEADLINE_OFFSET, 0L);
+    NativeMemory.putLong(metadata + POLICY_BYTE_WEIGHT_OFFSET, 0L);
   }
 
-  /** Immutable token joining a native value address and its optional weak Java object. */
-  public static final class ValueState {
-    private static final long FINGERPRINT_UNINITIALIZED = 0L;
-    private static final long FINGERPRINT_DISABLED = 1L;
-    private static final long FINGERPRINT_READY_MARKER = 2L;
-    private static final AtomicLongFieldUpdater<ValueState> FINGERPRINT_STATE =
-        AtomicLongFieldUpdater.newUpdater(ValueState.class, "fingerprintState");
-
-    private final long taggedValueAddress;
-    private final WeakValueSlot weakValue;
-    private final ValueState publication;
-    private volatile long fingerprintState;
-
-    public ValueState(long taggedValueAddress, WeakValueSlot weakValue) {
-      if (taggedValueAddress == 0L && weakValue != null) {
-        throw new IllegalArgumentException("weak value requires a native value address");
-      }
-      this.taggedValueAddress = taggedValueAddress;
-      this.weakValue = weakValue;
-      this.publication = this;
-      this.fingerprintState = FINGERPRINT_UNINITIALIZED;
-    }
-
-    private ValueState(long taggedValueAddress, WeakValueSlot weakValue, ValueState publication) {
-      if (taggedValueAddress == 0L && weakValue != null) {
-        throw new IllegalArgumentException("weak value requires a native value address");
-      }
-      this.taggedValueAddress = taggedValueAddress;
-      this.weakValue = weakValue;
-      this.publication = publication;
-      this.fingerprintState = FINGERPRINT_UNINITIALIZED;
-    }
-
-    public long taggedValueAddress() {
-      return taggedValueAddress;
-    }
-
-    public WeakValueSlot weakValue() {
-      return weakValue;
-    }
-
-    public ValueState publication() {
-      return publication;
-    }
-
-    public ValueState withWeakValue(WeakValueSlot replacement) {
-      return new ValueState(taggedValueAddress, replacement, publication);
-    }
-
-    public long fingerprintState() {
-      return publication.fingerprintState;
-    }
-
-    public boolean fingerprintReady() {
-      return (publication.fingerprintState & 0xffffffffL) == FINGERPRINT_READY_MARKER;
-    }
-
-    public boolean fingerprintDisabled() {
-      return publication.fingerprintState == FINGERPRINT_DISABLED;
-    }
-
-    public long fingerprint() {
-      if (!fingerprintReady()) {
-        throw new IllegalStateException("fingerprint is not ready");
-      }
-      return publication.fingerprintState >>> 32;
-    }
-
-    public boolean tryPublishFingerprint(long fingerprint) {
-      long packed = (fingerprint << 32) | FINGERPRINT_READY_MARKER;
-      return FINGERPRINT_STATE.compareAndSet(
-          publication, FINGERPRINT_UNINITIALIZED, packed);
-    }
-
-    void disableFingerprint() {
-      for (; ; ) {
-        long current = publication.fingerprintState;
-        if (current == FINGERPRINT_DISABLED
-            || FINGERPRINT_STATE.compareAndSet(publication, current, FINGERPRINT_DISABLED)) {
-          return;
-        }
-      }
-    }
+  /** Allocation length paired with the currently published value pointer. */
+  public long currentValueAllocation() {
+    return NativeMemory.getLongVolatile(nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET)
+        & VALUE_ALLOCATION_MASK;
   }
 
-  /** Weak value metadata bound to one exact tagged native value address. */
-  public static final class WeakValueSlot extends WeakReference<Object> {
-    private final Entry owner;
-    private final long taggedValueAddress;
-
-    public WeakValueSlot(Object value, long taggedValueAddress) {
-      this(value, taggedValueAddress, null, null);
+  /** Must be published before the matching value pointer becomes visible. */
+  public void currentValueAllocation(long allocation) {
+    if (allocation < 0L) {
+      throw new IllegalArgumentException("negative value allocation");
     }
-
-    public WeakValueSlot(
-        Object value,
-        long taggedValueAddress,
-        Entry owner,
-        ReferenceQueue<Object> queue) {
-      super(value, queue);
-      if (value == null) {
-        throw new NullPointerException("value");
-      }
-      if (taggedValueAddress == 0L) {
-        throw new IllegalArgumentException("weak value requires a native value address");
-      }
-      this.owner = owner;
-      this.taggedValueAddress = taggedValueAddress;
-    }
-
-    public Entry owner() {
-      return owner;
-    }
-
-    public long taggedValueAddress() {
-      return taggedValueAddress;
-    }
-
+    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
+    // Value writers own the Entry claim whenever they update the allocation. Preserve the
+    // logical marker observed under that claim and publish the combined word with one release
+    // store; logical present/absent transitions retain their CAS helpers below because they can
+    // be initiated by the reader/actor side.
+    long current = NativeMemory.getLong(address);
+    NativeMemory.putLongRelease(
+        address, (allocation & VALUE_ALLOCATION_MASK) | (current & LOGICAL_ABSENT));
   }
 
   public static long tagValueAddress(long rawAddress, boolean hasTtl) {
@@ -313,73 +230,174 @@ public final class Entry {
       return false;
     }
     Entry entry = (Entry) other;
-    // keyMeta already fuses chmHash + keyLength, so it rejects both spread collisions and
-    // length mismatches from the heap cache line. The hash64 native read is dropped for the
-    // same reason as LookupKey.equals: a hit always matches it, and the memcmp below is
-    // authoritative while reading the same native key block.
-    if (keyMeta != entry.keyMeta) {
+    // Entry-to-Entry equality is also used by CHM.remove(key, value). Keep that value contract
+    // distinct from LookupKey.equals: a zero-length key must not make every candidate value equal.
+    if (keyHash64() != entry.keyHash64() || keyLength != entry.keyLength) {
       return false;
     }
-    return keyLength() == 0
+    return keyLength == 0
         || NativeMemory.equals(nativeKeyBytesAddress(), entry.nativeKeyBytesAddress(), keyLength());
   }
 
   public boolean claimWriter() {
-    long current = lifecycle;
-    return (current & (WRITER_LOCK | STATE_MASK)) == ALIVE
-        && LIFECYCLE.compareAndSet(this, current, current | WRITER_LOCK);
+    if (!isAlive()) {
+      return false;
+    }
+    long address = stateWordAddress();
+    long current = NativeMemory.getLongVolatile(address);
+    return (current & WRITER_LOCK) == 0L
+        && NativeMemory.compareAndSwapLong(address, current, current | WRITER_LOCK);
+  }
+
+  public boolean markWriterWaiter() {
+    long address = stateWordAddress();
+    while (true) {
+      long current = NativeMemory.getLongVolatile(address);
+      if ((current & WRITER_LOCK) == 0L) {
+        return false;
+      }
+      if ((current & WRITER_WAITER) != 0L) {
+        return true;
+      }
+      if (NativeMemory.compareAndSwapLong(address, current, current | WRITER_WAITER)) {
+        return true;
+      }
+    }
   }
 
   public void finishWriter() {
-    long current = lifecycle;
-    if ((current & WRITER_LOCK) == 0L) {
-      throw new IllegalStateException("writer lock is not held");
+    long address = stateWordAddress();
+    while (true) {
+      long current = NativeMemory.getLongVolatile(address);
+      if ((current & WRITER_LOCK) == 0L) {
+        throw new IllegalStateException("writer lock is not held");
+      }
+      long generation = (current & GENERATION_MASK) + 1L;
+      if (generation > GENERATION_MASK) {
+        generation = 1L;
+      }
+      long next = (current & PENDING_STATE_MASK) | generation;
+      if (NativeMemory.compareAndSwapLong(address, current, next)) {
+        if ((current & WRITER_WAITER) != 0L) {
+          synchronized (this) {
+            notifyAll();
+          }
+        }
+        return;
+      }
     }
-    long generation = (current & GENERATION_MASK) + 1L;
-    if (generation > GENERATION_MASK) {
-      generation = 1L;
-    }
-    LIFECYCLE.lazySet(this, (current & STATE_MASK) | generation);
   }
 
   public long generation() {
-    return lifecycle & GENERATION_MASK;
+    return NativeMemory.getLongVolatile(stateWordAddress()) & GENERATION_MASK;
   }
 
   public boolean isAlive() {
-    return (lifecycle & STATE_MASK) == ALIVE;
+    return (valueAddress & VALUE_LIFECYCLE_MASK) == 0L;
+  }
+
+  /** Marks this entry as logically present and reports whether the counter needs an increment. */
+  public boolean markLogicallyPresent() {
+    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
+    for (;;) {
+      long current = NativeMemory.getLongVolatile(address);
+      if ((current & LOGICAL_ABSENT) == 0L) {
+        return false;
+      }
+      if (NativeMemory.compareAndSwapLong(address, current, current & VALUE_ALLOCATION_MASK)) {
+        return true;
+      }
+    }
+  }
+
+  /** Returns whether this entry has already been excluded from logical Map accounting. */
+  public boolean isLogicallyAbsent() {
+    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
+    return (NativeMemory.getLongVolatile(address) & LOGICAL_ABSENT) != 0L;
+  }
+
+  /** Marks this entry as logically absent and reports whether the counter needs a decrement. */
+  public boolean markLogicallyAbsent() {
+    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
+    for (;;) {
+      long current = NativeMemory.getLongVolatile(address);
+      if ((current & LOGICAL_ABSENT) != 0L) {
+        return false;
+      }
+      if (NativeMemory.compareAndSwapLong(address, current, current | LOGICAL_ABSENT)) {
+        return true;
+      }
+    }
+  }
+
+  /**
+   * Marks this entry absent while the caller owns the Entry writer claim. The writer claim makes
+   * the allocation word stable, so the actor can use one ordered store instead of a CAS loop.
+   */
+  public boolean markLogicallyAbsentAfterWriterClaim() {
+    if (!isWriterLocked()) {
+      throw new IllegalStateException("writer claim is required for the actor absent transition");
+    }
+    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
+    long current = NativeMemory.getLongVolatile(address);
+    if ((current & LOGICAL_ABSENT) != 0L) {
+      return false;
+    }
+    NativeMemory.putLongRelease(address, current | LOGICAL_ABSENT);
+    return true;
   }
 
   /** The maintenance actor must not consume a coalesced mutation during a writer publication. */
   public boolean isWriterLocked() {
-    return (lifecycle & WRITER_LOCK) != 0L;
+    return (NativeMemory.getLongVolatile(stateWordAddress()) & WRITER_LOCK) != 0L;
   }
 
   /** Must be called while holding the per-entry writer mutex. */
   public void markRetired() {
-    long current = lifecycle;
+    long current = NativeMemory.getLongVolatile(stateWordAddress());
     if ((current & WRITER_LOCK) == 0L) {
       throw new IllegalStateException("writer lock is not held");
     }
-    LIFECYCLE.lazySet(this, (current & (WRITER_LOCK | GENERATION_MASK)) | RETIRED);
+    setValueLifecycle(VALUE_RETIRED);
   }
 
   /** Restores ALIVE after a failed conditional CHM remove while still holding the writer mutex. */
   public void restoreAlive() {
-    long current = lifecycle;
+    long current = NativeMemory.getLongVolatile(stateWordAddress());
     if ((current & WRITER_LOCK) == 0L) {
       throw new IllegalStateException("writer lock is not held");
     }
-    LIFECYCLE.lazySet(this, current & (WRITER_LOCK | GENERATION_MASK));
+    setValueLifecycle(0L);
   }
 
   /** Used only for a private candidate that lost putIfAbsent before publication. */
   public void markDead() {
-    long current = lifecycle;
+    long current = NativeMemory.getLongVolatile(stateWordAddress());
     if ((current & WRITER_LOCK) != 0L) {
       throw new IllegalStateException("writer lock is held");
     }
-    LIFECYCLE.lazySet(this, (current & GENERATION_MASK) | DEAD);
+    setValueLifecycle(VALUE_DEAD);
+  }
+
+  /** Clears only the native value pointer while retaining the retired/dead lifecycle tag. */
+  public void clearValue() {
+    while (true) {
+      long current = valueAddress;
+      long next = current & VALUE_LIFECYCLE_MASK;
+      if (current == next || VALUE_ADDRESS.compareAndSet(this, current, next)) {
+        return;
+      }
+    }
+  }
+
+  private void setValueLifecycle(long lifecycle) {
+    while (true) {
+      long current = valueAddress;
+      long next = (current & ~VALUE_LIFECYCLE_MASK) | lifecycle;
+      if (VALUE_ADDRESS.compareAndSet(this, current, next)) {
+        return;
+      }
+    }
   }
 
   public boolean timerScheduled() {
@@ -430,19 +448,26 @@ public final class Entry {
   }
 
   public long timerDeadlineTick() {
-    return NativeMemory.getLong(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET);
+    return NativeMemory.getLongVolatile(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET);
   }
 
   public void timerDeadlineTick(long tick) {
-    NativeMemory.putLong(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET, tick);
+    NativeMemory.putLongRelease(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET, tick);
   }
 
-  private int timerLocation() {
-    return NativeMemory.getInt(nativeMetadataAddress() + TIMER_LOCATION_OFFSET);
+  /** Actor-owned packed timer location; exposed for one-snapshot maintenance paths. */
+  public int timerLocation() {
+    return NativeMemory.getIntVolatile(nativeMetadataAddress() + TIMER_LOCATION_OFFSET);
   }
 
-  private void timerLocation(int location) {
-    NativeMemory.putInt(nativeMetadataAddress() + TIMER_LOCATION_OFFSET, location);
+  /** Publishes an already encoded timer location. */
+  public void timerLocation(int location) {
+    NativeMemory.putIntVolatile(nativeMetadataAddress() + TIMER_LOCATION_OFFSET, location);
+  }
+
+  /** Publishes a normal timer location with one volatile write. */
+  public void timerLocation(int level, int slot) {
+    timerLocation((level << TIMER_SLOT_BITS) | (slot & TIMER_SLOT_MASK));
   }
 
   /** Attempts a reliable-removal claim once; callers must not wait for another producer. */
@@ -450,26 +475,26 @@ public final class Entry {
     if (flags != PENDING_REMOVE) {
       throw new IllegalArgumentException("invalid pending flags: " + flags);
     }
-    int current = pendingFlags;
+    int current = pendingFlags();
     return (current & PENDING_CLAIMED) == 0
-        && PENDING.compareAndSet(
-            this, current, current | PENDING_CLAIMED | (flags << PENDING_CLAIM_SHIFT));
+        && compareAndSetPending(
+            current, current | PENDING_CLAIMED | (flags << PENDING_CLAIM_SHIFT));
   }
 
   /** Releases a successful reliable removal claim after its retirement records are visible. */
   public void completePendingClaim() {
-    if ((pendingFlags & PENDING_CLAIMED) == 0) {
+    if ((pendingFlags() & PENDING_CLAIMED) == 0) {
       throw new IllegalStateException("missing pending claim");
     }
     tryIncrementMutationVersion();
     while (true) {
-      int current = pendingFlags;
+      int current = pendingFlags();
       if ((current & PENDING_CLAIMED) == 0) {
         throw new IllegalStateException("pending claim was lost");
       }
       int currentFlags = (current & PENDING_CLAIM_MASK) >>> PENDING_CLAIM_SHIFT;
-      if (PENDING.compareAndSet(
-          this, current, (current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK)) | currentFlags)) {
+      if (compareAndSetPending(
+          current, (current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK)) | currentFlags)) {
         return;
       }
     }
@@ -485,25 +510,28 @@ public final class Entry {
     return maintenanceMeta() & VERSION_MASK;
   }
 
-  /** Best-effort version publication for producer paths; it never waits for the actor. */
+  /** Advances every unsaturated publication without waiting for the actor's rollover fence. */
   private boolean tryIncrementMutationVersion() {
-    int flags = pendingFlags;
-    if ((flags & (PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) != 0) {
-      return false;
-    }
-    long current = maintenanceMeta();
-    long currentVersion = current >>> MUTATION_VERSION_SHIFT;
-    if (currentVersion == VERSION_MASK) {
-      int nextFlags = flags | PENDING_ROLLOVER;
-      if ((flags & PENDING_ROLLOVER) == 0
-          && (flags & PENDING_ROLLOVER_CLAIMED) == 0) {
-        PENDING.compareAndSet(this, flags, nextFlags);
+    for (;;) {
+      int flags = pendingFlags();
+      if ((flags & (PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) != 0) {
+        return false;
       }
-      return false;
+      long current = maintenanceMeta();
+      long currentVersion = current >>> MUTATION_VERSION_SHIFT;
+      if (currentVersion == VERSION_MASK) {
+        compareAndSetPending(flags, flags | PENDING_ROLLOVER);
+        return false;
+      }
+      long next = (current & VERSION_MASK) | ((currentVersion + 1L) << MUTATION_VERSION_SHIFT);
+      if (NativeMemory.compareAndSwapLong(
+          nativeMetadataAddress() + MAINTENANCE_META_OFFSET, current, next)) {
+        return true;
+      }
+      // The actor can update appliedVersion in the same word. Dropping a failed increment would
+      // let a later value share the version of an older queued allocation seed.
+      Thread.onSpinWait();
     }
-    long next = (current & VERSION_MASK) | ((currentVersion + 1L) << MUTATION_VERSION_SHIFT);
-    return NativeMemory.compareAndSwapLong(
-        nativeMetadataAddress() + MAINTENANCE_META_OFFSET, current, next);
   }
 
   /** Clears a fully applied final version. Called by the single maintenance owner. */
@@ -511,28 +539,28 @@ public final class Entry {
     if (isWriterLocked()) {
       return false;
     }
-    int currentFlags = pendingFlags;
+    int currentFlags = pendingFlags();
     int rolloverFlags =
-        PENDING_ROLLOVER | PENDING_MASK | PENDING_CLAIMED | PENDING_QUEUED | PENDING_REPAIR;
+        PENDING_ROLLOVER | PENDING_MASK | PENDING_CLAIMED | PENDING_QUEUED | PENDING_RETRY;
     if ((currentFlags & rolloverFlags) != PENDING_ROLLOVER) {
       return false;
     }
     int claimedFlags = currentFlags | PENDING_ROLLOVER_CLAIMED;
-    if (!PENDING.compareAndSet(this, currentFlags, claimedFlags)) {
+    if (!compareAndSetPending(currentFlags, claimedFlags)) {
       return false;
     }
     long current = maintenanceMeta();
     if ((current >>> MUTATION_VERSION_SHIFT) != VERSION_MASK
         || (current & VERSION_MASK) != VERSION_MASK) {
-      PENDING.compareAndSet(this, claimedFlags, currentFlags);
+      compareAndSetPending(claimedFlags, currentFlags);
       return false;
     }
     if (!NativeMemory.compareAndSwapLong(
         nativeMetadataAddress() + MAINTENANCE_META_OFFSET, current, 0L)) {
-      PENDING.compareAndSet(this, claimedFlags, currentFlags);
+      compareAndSetPending(claimedFlags, currentFlags);
       return false;
     }
-    if (!PENDING.compareAndSet(this, claimedFlags, currentFlags & ~PENDING_ROLLOVER)) {
+    if (!compareAndSetPending(claimedFlags, currentFlags & ~PENDING_ROLLOVER)) {
       throw new IllegalStateException("maintenance rollover fence was modified");
     }
     return true;
@@ -568,35 +596,15 @@ public final class Entry {
     }
     tryIncrementMutationVersion();
     while (true) {
-      int current = pendingFlags;
-      int next = current | flags;
+      int current = pendingFlags();
+      int next = (current | flags) & ~PENDING_RETRY;
       if ((current & PENDING_QUEUED) != 0) {
-        if (PENDING.compareAndSet(this, current, next)) {
+        if (compareAndSetPending(current, next)) {
           return false;
         }
         continue;
       }
-      if (PENDING.compareAndSet(this, current, next | PENDING_QUEUED)) {
-        return true;
-      }
-    }
-  }
-
-  /** Re-queues an already published mutation when a worker observed an older version. */
-  public boolean requeueMutation(int flags) {
-    if ((flags & ~(PENDING_ADD | PENDING_UPDATE)) != 0 || flags == 0) {
-      throw new IllegalArgumentException("invalid advisory mutation flags: " + flags);
-    }
-    while (true) {
-      int current = pendingFlags;
-      int next = current | flags;
-      if ((current & PENDING_QUEUED) != 0) {
-        if (PENDING.compareAndSet(this, current, next)) {
-          return false;
-        }
-        continue;
-      }
-      if (PENDING.compareAndSet(this, current, next | PENDING_QUEUED)) {
+      if (compareAndSetPending(current, next | PENDING_QUEUED)) {
         return true;
       }
     }
@@ -605,11 +613,11 @@ public final class Entry {
   /** Cancels a reliable removal claim before its associated mapping becomes invisible. */
   public boolean cancelPendingClaim() {
     while (true) {
-      int current = pendingFlags;
+      int current = pendingFlags();
       if ((current & PENDING_CLAIMED) == 0) {
         throw new IllegalStateException("missing pending claim");
       }
-      if (PENDING.compareAndSet(this, current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
+      if (compareAndSetPending(current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
         return true;
       }
     }
@@ -617,94 +625,170 @@ public final class Entry {
 
   public boolean cancelPendingClaimIfPresent() {
     while (true) {
-      int current = pendingFlags;
+      int current = pendingFlags();
       if ((current & PENDING_CLAIMED) == 0) {
         return false;
       }
-      if (PENDING.compareAndSet(this, current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
+      if (compareAndSetPending(current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
         return true;
       }
     }
   }
 
-  /** Clears the transport marker when an advisory queue offer was not accepted. */
-  public boolean queueOfferFailed() {
+  /** Retains an advisory mutation for the next publication after the actor observed a lock. */
+  public boolean requestMutationRetry(int flags) {
+    if ((flags & ~(PENDING_ADD | PENDING_UPDATE)) != 0 || flags == 0) {
+      throw new IllegalArgumentException("invalid advisory retry flags: " + flags);
+    }
     while (true) {
-      int current = pendingFlags;
-      if ((current & PENDING_QUEUED) == 0) {
+      int current = pendingFlags();
+      int next = current | flags | PENDING_RETRY;
+      if (next == current) {
         return false;
       }
-      if ((current & PENDING_REPAIR) != 0) {
-        if (PENDING.compareAndSet(this, current, current & ~PENDING_QUEUED)) {
-          return false;
-        }
-      } else {
-        if (PENDING.compareAndSet(this, current, (current & ~PENDING_QUEUED) | PENDING_REPAIR)) {
-          return true;
-        }
+      if (compareAndSetPending(current, next)) {
+        return true;
+      }
+    }
+  }
+
+  /**
+   * Claims the single transport record required by an actor retry. The actor and the writer may
+   * race this handoff after the writer lock clears; exactly one of them may publish the record.
+   */
+  public boolean claimMutationRetry() {
+    while (true) {
+      int current = pendingFlags();
+      if ((current & PENDING_RETRY) == 0) {
+        return false;
+      }
+      int next = current & ~PENDING_RETRY;
+      boolean publish = (current & PENDING_QUEUED) == 0;
+      if (publish) {
+        next |= PENDING_QUEUED;
+      }
+      if (compareAndSetPending(current, next)) {
+        return publish;
       }
     }
   }
 
   public boolean isPendingQueued() {
-    return (pendingFlags & PENDING_QUEUED) != 0;
+    return (pendingFlags() & PENDING_QUEUED) != 0;
   }
 
-  public boolean clearRepairMarker() {
-    while (true) {
-      int current = pendingFlags;
-      if ((current & PENDING_REPAIR) == 0) {
-        return false;
+  public boolean isMutationRetryRequested() {
+    return (pendingFlags() & PENDING_RETRY) != 0;
+  }
+
+  /**
+   * Clears advisory state before the native key block is retired.
+   *
+   * <p>This method deliberately changes only the pending-state slice of the native word. It does
+   * not clear the writer bit, generation, or policy-presence bit. The maintenance lifecycle owner
+   * calls it after applying a terminal removal and before retiring the Entry's native key block;
+   * stale advisory queue nodes can then be discarded without keeping the link record alive.
+   */
+  public void clearStalePendingFlags() {
+    long address = stateWordAddress();
+    int clearMask =
+        PENDING_MASK
+            | PENDING_CLAIMED
+            | PENDING_CLAIM_MASK
+            | PENDING_QUEUED
+            | PENDING_RETRY
+            | PENDING_ROLLOVER
+            | PENDING_ROLLOVER_CLAIMED;
+    for (;;) {
+      long current = NativeMemory.getLongVolatile(address);
+      int flags = pendingFlags(current);
+      int nextFlags = flags & ~clearMask;
+      if (flags == nextFlags) {
+        return;
       }
-      if (PENDING.compareAndSet(this, current, current & ~PENDING_REPAIR)) {
-        return true;
+      long next = (current & ~PENDING_STATE_MASK) | ((long) nextFlags << PENDING_STATE_SHIFT);
+      if (NativeMemory.compareAndSwapLong(address, current, next)) {
+        return;
       }
     }
   }
 
-  public boolean isRepairMarked() {
-    return (pendingFlags & PENDING_REPAIR) != 0;
-  }
-
   public int takePending() {
     while (true) {
-      int current = pendingFlags;
+      int current = pendingFlags();
       if ((current & PENDING_CLAIMED) != 0) {
         return PENDING_BUSY;
       }
-      int next = current & ~(PENDING_MASK | PENDING_QUEUED);
-      if (PENDING.compareAndSet(this, current, next)) {
+      int next = current & ~(PENDING_MASK | PENDING_QUEUED | PENDING_RETRY);
+      if (compareAndSetPending(current, next)) {
         return current & PENDING_MASK;
       }
     }
   }
 
   public int policyState() {
-    return (policyMeta() >>> POLICY_STATE_SHIFT) & 7;
+    return (policyMetaVolatile() >>> POLICY_STATE_SHIFT) & 7;
   }
 
   public void policyState(int state) {
     int normalizedState = state & 7;
-    int current = policyMeta();
-    NativeMemory.putInt(
-        nativeMetadataAddress() + POLICY_META_OFFSET, (current & ~7) | normalizedState);
+    long address = nativeMetadataAddress() + POLICY_META_OFFSET;
+    int current = NativeMemory.getIntVolatile(address);
+    NativeMemory.putIntVolatile(address, (current & ~7) | normalizedState);
     setPolicyPresent(normalizedState != POLICY_NONE);
   }
 
   /** True when the maintenance actor has this entry linked into an eviction policy. */
   public boolean policyPresent() {
-    return (pendingFlags & POLICY_PRESENT) != 0;
+    return (pendingFlags() & POLICY_PRESENT) != 0;
+  }
+
+  /** Clears a stale actor hint without touching it while the actor still owns a live policy. */
+  public boolean clearPolicyPresentIfNone() {
+    if (policyState() != POLICY_NONE) {
+      return false;
+    }
+    long address = stateWordAddress();
+    for (;;) {
+      if (policyState() != POLICY_NONE) {
+        return false;
+      }
+      long current = NativeMemory.getLongVolatile(address);
+      int flags = pendingFlags(current);
+      if ((flags & POLICY_PRESENT) == 0) {
+        return false;
+      }
+      int nextFlags = flags & ~POLICY_PRESENT;
+      long next = (current & ~PENDING_STATE_MASK) | ((long) nextFlags << PENDING_STATE_SHIFT);
+      if (NativeMemory.compareAndSwapLong(address, current, next)) {
+        return true;
+      }
+    }
   }
 
   public int policyAccessCount() {
-    return (policyMeta() >>> POLICY_ACCESS_SHIFT) & 3;
+    return (policyMetaVolatile() >>> POLICY_ACCESS_SHIFT) & 3;
   }
 
   public void policyAccessCount(int count) {
     int value = Math.max(0, Math.min(3, count));
-    int current = policyMeta();
-    NativeMemory.putInt(
-        nativeMetadataAddress() + POLICY_META_OFFSET, (current & ~0x18) | (value << POLICY_ACCESS_SHIFT));
+    long address = nativeMetadataAddress() + POLICY_META_OFFSET;
+    int current = NativeMemory.getIntVolatile(address);
+    NativeMemory.putIntVolatile(address, (current & ~0x18) | (value << POLICY_ACCESS_SHIFT));
+  }
+
+  /** Actor-owned native link record id; zero means the entry has no maintenance links. */
+  public int policyLinkId() {
+    return (policyMetaVolatile() >>> POLICY_LINK_ID_SHIFT) & POLICY_LINK_ID_MASK;
+  }
+
+  public void policyLinkId(int id) {
+    if ((id & ~POLICY_LINK_ID_MASK) != 0) {
+      throw new IllegalArgumentException("link id out of range: " + id);
+    }
+    long address = nativeMetadataAddress() + POLICY_META_OFFSET;
+    int current = NativeMemory.getIntVolatile(address);
+    NativeMemory.putIntVolatile(address, (current & 0x1f) | (id << POLICY_LINK_ID_SHIFT));
   }
 
   public long policyByteWeight() {
@@ -715,15 +799,15 @@ public final class Entry {
     NativeMemory.putLong(nativeMetadataAddress() + POLICY_BYTE_WEIGHT_OFFSET, bytes);
   }
 
-  private int policyMeta() {
-    return NativeMemory.getInt(nativeMetadataAddress() + POLICY_META_OFFSET);
+  private int policyMetaVolatile() {
+    return NativeMemory.getIntVolatile(nativeMetadataAddress() + POLICY_META_OFFSET);
   }
 
   private void setPolicyPresent(boolean present) {
     while (true) {
-      int current = pendingFlags;
+      int current = pendingFlags();
       int next = present ? current | POLICY_PRESENT : current & ~POLICY_PRESENT;
-      if (current == next || PENDING.compareAndSet(this, current, next)) {
+      if (current == next || compareAndSetPending(current, next)) {
         return;
       }
     }

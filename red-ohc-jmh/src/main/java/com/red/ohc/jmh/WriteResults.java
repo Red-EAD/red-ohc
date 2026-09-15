@@ -13,12 +13,16 @@ public class WriteResults {
   public long attempted;
   public long accepted;
   public long rejected;
+  public long exceptions;
+  public long incomplete;
 
   @Setup(Level.Iteration)
   public void reset() {
     attempted = 0L;
     accepted = 0L;
     rejected = 0L;
+    exceptions = 0L;
+    incomplete = 0L;
   }
 
   public void record(boolean wasAccepted) {
@@ -28,5 +32,14 @@ public class WriteResults {
     } else {
       rejected++;
     }
+  }
+
+  public void attempt() {
+    attempted++;
+  }
+
+  public void recordFailure() {
+    exceptions++;
+    incomplete++;
   }
 }

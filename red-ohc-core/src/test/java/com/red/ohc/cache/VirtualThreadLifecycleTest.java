@@ -3,19 +3,17 @@ package com.red.ohc.cache;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
-import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.SkipException;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
+import com.red.ohc.runtime.WriterResourceRegistry;
 
 public final class VirtualThreadLifecycleTest {
   private static final int READERS = 128;
@@ -52,28 +50,36 @@ public final class VirtualThreadLifecycleTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped()) {
-      assertTrue(cache.put("seed", "value"));
+      cache.put("seed", "value");
       cache.flushAsync().join();
       int baselineReaders = readerCount(cache);
-      int baselineStripes = budgetStripeCount(cache);
+      int baselineResources = writerResourceActiveCount(cache);
       WorkloadResult workload = runWorkload(cache, startVirtualThread);
       assertEquals(workload.readHits, READERS);
       assertEquals(workload.acceptedWrites, WRITERS);
 
-      awaitCollectionAndCleanup(cache, workload.terminatedThreads, baselineReaders, baselineStripes);
+      awaitCollectionAndCleanup(cache, baselineReaders, baselineResources);
 
       int remainingReaders = readerCount(cache);
-      int remainingStripes = budgetStripeCount(cache);
-      int liveThreads = liveReferences(workload.terminatedThreads);
+      int remainingResources = writerResourceActiveCount(cache);
       assertTrue(
           remainingReaders <= baselineReaders + 4,
           "reader registrations="
               + remainingReaders
               + ", baseline="
-              + baselineReaders
-              + ", live virtual threads="
-              + liveThreads);
-      assertEquals(remainingStripes, baselineStripes);
+              + baselineReaders);
+      assertTrue(
+          remainingResources <= baselineResources + 4,
+          "active writer resources="
+              + remainingResources
+              + ", baseline="
+              + baselineResources);
+      WriterResourceRegistry resources = writerResources(cache);
+      assertEquals(resources.retiringCount(), 0);
+      assertTrue(
+          resources.resourceCount() <= baselineResources + WRITERS,
+          "resource descriptors must grow only to the writer concurrency high-water mark");
+      assertTrue(resources.pooledCount() >= resources.resourceCount() - remainingResources - 1);
     }
   }
 
@@ -110,56 +116,39 @@ public final class VirtualThreadLifecycleTest {
           startVirtualThread(
               starter,
               () -> {
-                if (cache.put("writer-" + key, "value")) {
-                  acceptedWrites.incrementAndGet();
-                }
+                cache.put("writer-" + key, "value");
+                acceptedWrites.incrementAndGet();
               });
     }
     for (Thread thread : threads) {
       thread.join();
     }
-    List<WeakReference<Thread>> terminated = new ArrayList<>(TOTAL);
-    for (Thread thread : threads) {
-      terminated.add(new WeakReference<>(thread));
-    }
-    return new WorkloadResult(terminated, readHits.get(), acceptedWrites.get());
+    return new WorkloadResult(readHits.get(), acceptedWrites.get());
   }
 
   private static void awaitCollectionAndCleanup(
-      OffHeapCache<?, ?> cache,
-      List<WeakReference<Thread>> terminated,
-      int baselineReaders,
-      int baselineStripes)
+      OffHeapCache<?, ?> cache, int baselineReaders, int baselineResources)
       throws Exception {
     for (int attempt = 0; attempt < 100; attempt++) {
-      System.gc();
       cache.flushAsync().join();
       if (readerCount(cache) <= baselineReaders + 4
-          && budgetStripeCount(cache) == baselineStripes
-          && liveReferences(terminated) <= 4) {
+          && writerResourceActiveCount(cache) <= baselineResources + 4
+          && writerResources(cache).retiringCount() == 0) {
         return;
       }
       Thread.sleep(10L);
     }
   }
 
-  private static int liveReferences(List<WeakReference<Thread>> references) {
-    int live = 0;
-    for (WeakReference<Thread> reference : references) {
-      if (reference.get() != null) {
-        live++;
-      }
-    }
-    return live;
+  private static int writerResourceActiveCount(OffHeapCache<?, ?> cache) throws Exception {
+    return writerResources(cache).activeCount();
   }
 
-  private static int budgetStripeCount(OffHeapCache<?, ?> cache) throws Exception {
-    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
-    budgetField.setAccessible(true);
-    Object budget = budgetField.get(cache);
-    Method count = budget.getClass().getDeclaredMethod("stripeCount");
-    count.setAccessible(true);
-    return (Integer) count.invoke(budget);
+  private static WriterResourceRegistry writerResources(OffHeapCache<?, ?> cache)
+      throws Exception {
+    Field resourceField = OffHeapCache.class.getDeclaredField("writerResources");
+    resourceField.setAccessible(true);
+    return (WriterResourceRegistry) resourceField.get(cache);
   }
 
   private static int readerCount(OffHeapCache<?, ?> cache) throws Exception {
@@ -172,13 +161,10 @@ public final class VirtualThreadLifecycleTest {
   }
 
   private static final class WorkloadResult {
-    final List<WeakReference<Thread>> terminatedThreads;
     final int readHits;
     final int acceptedWrites;
 
-    private WorkloadResult(
-        List<WeakReference<Thread>> terminatedThreads, int readHits, int acceptedWrites) {
-      this.terminatedThreads = terminatedThreads;
+    private WorkloadResult(int readHits, int acceptedWrites) {
       this.readHits = readHits;
       this.acceptedWrites = acceptedWrites;
     }

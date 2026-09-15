@@ -11,7 +11,7 @@ import com.red.ohc.index.EntryTestSupport;
 public final class MaintenancePolicyAdmissionTest {
   @Test
   public void tinyLfuDoesNotUseTheHashDosRandomAdmissionBelowCaffeinesThreshold() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 16_384L);
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.W_TINY_LFU, 10_240L);
     Entry victim = entry(1L);
     Entry candidate = entry(127L);
 

@@ -2,6 +2,7 @@ package com.red.ohc.codec;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
@@ -49,6 +50,21 @@ public final class HashingTest {
     assertEquals(lookup.hash(), encoded.hash());
     assertEquals(lookup.hash64(), encoded.hash64());
     assertEquals(target, bytes);
+  }
+
+  @Test
+  public void reusesTheSameLookupBackingArrayWhileRefreshingTheHash() {
+    byte[] bytes = "first-key".getBytes(StandardCharsets.US_ASCII);
+    LookupKey lookup = new LookupKey();
+
+    lookup.set(bytes, bytes.length);
+    int firstHash = lookup.hash();
+    bytes[0] = 's';
+    lookup.set(bytes, bytes.length);
+
+    assertSame(lookup.bytes(), bytes);
+    assertTrue(lookup.hash() != firstHash, "the hash must still be refreshed for the new bytes");
+    assertEquals(lookup.hash64(), Hashing.farmHashUo(bytes, 0, bytes.length));
   }
 
   @Test
@@ -104,7 +120,7 @@ public final class HashingTest {
       LookupKey lookup = new LookupKey();
       lookup.set(lookupBytes, lookupBytes.length);
       NativeMemory.putLong(address, lookup.hash64());
-      Entry entry = new Entry(address, storedBytes.length, lookup.hash(), 0L);
+      Entry entry = new Entry(address, storedBytes.length, 0L);
       entry.initializeNativeMetadata();
 
       assertFalse(lookup.equals(entry));
@@ -131,7 +147,7 @@ public final class HashingTest {
           NativeMemory.putLong(address, hash64);
           NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
           lookup.set(bytes, length);
-          Entry entry = new Entry(address, length, lookup.hash(), hash64, 0L);
+          Entry entry = new Entry(address, length, 0L);
           entry.initializeNativeMetadata();
 
           assertTrue(lookup.equals(entry), "length=" + length);
@@ -167,7 +183,7 @@ public final class HashingTest {
           NativeMemory.putLong(address, hash64);
           NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
           lookup.set(bytes, length);
-          Entry entry = new Entry(address, length, lookup.hash(), hash64, 0L);
+          Entry entry = new Entry(address, length, 0L);
           entry.initializeNativeMetadata();
 
           for (int mismatch :

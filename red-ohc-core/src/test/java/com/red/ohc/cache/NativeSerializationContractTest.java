@@ -63,7 +63,7 @@ public final class NativeSerializationContractTest {
   @Test
   public void genericReadsDeserializeNativePayloadAndReturnOwnedObjects() {
     try (OHCache<String, Integer> cache = newIntCache()) {
-      assertTrue(cache.put("one", 0x01020304));
+      cache.put("one", 0x01020304);
       cache.flushAsync().join();
 
       assertEquals(cache.get("one").intValue(), 0x01020304);
@@ -106,8 +106,8 @@ public final class NativeSerializationContractTest {
             .valueSerializer(nested)
             .build()) {
       owner.set(cache);
-      assertTrue(cache.put("outer", "outer-value"));
-      assertTrue(cache.put("inner", "inner-value"));
+      cache.put("outer", "outer-value");
+      cache.put("inner", "inner-value");
       assertEquals(cache.get("outer"), "outer-value");
     }
   }
@@ -141,9 +141,51 @@ public final class NativeSerializationContractTest {
             .keySerializer(STRING)
             .valueSerializer(tracking)
             .build()) {
-      assertTrue(cache.put("key", "old"));
-      assertEquals(cache.putIfAbsentAsync("key", "new", 0L).join(), Boolean.FALSE);
+      cache.put("key", "old");
+      assertTrue(cache.putIfAbsent("key", "new", 0L) != null);
       assertEquals(serializedSizes.get(), 1);
+    }
+  }
+
+  @Test
+  public void unconditionalPutAndRemoveDoNotDeserializePreviousValue() {
+    AtomicInteger deserializations = new AtomicInteger();
+    CacheSerializer<String> tracking =
+        new CacheSerializer<String>() {
+          @Override
+          public void serialize(String value, ByteBuffer buffer) {
+            buffer.put(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+          }
+
+          @Override
+          public String deserialize(ByteBuffer buffer) {
+            deserializations.incrementAndGet();
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+          }
+
+          @Override
+          public int serializedSize(String value) {
+            return value.length();
+          }
+        };
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(tracking)
+            .build()) {
+      cache.put("key", "old");
+      cache.put("key", "new");
+      cache.remove("key");
+      assertEquals(deserializations.get(), 0);
+
+      cache.put("key", "conditional");
+      assertEquals(cache.putIfAbsent("key", "ignored"), "conditional");
+      assertEquals(deserializations.get(), 1);
+      assertTrue(cache.remove("key", "conditional"));
+      assertEquals(deserializations.get(), 2);
     }
   }
 
@@ -189,7 +231,7 @@ public final class NativeSerializationContractTest {
             .valueSerializer(flaky)
             .build()) {
       expectThrows(IllegalStateException.class, () -> cache.put("failed", "value"));
-      assertTrue(cache.put("after", "value"));
+      cache.put("after", "value");
       assertEquals(cache.get("after"), "value");
     }
   }
@@ -203,10 +245,10 @@ public final class NativeSerializationContractTest {
                 .keySerializer(STRING)
                 .valueSerializer(STRING)
                 .buildTyped()) {
-      assertTrue(cache.put("key", "old"));
+      cache.put("key", "old");
       cache.flushAsync().join();
-      assertEquals(cache.replaceAsync("key", "wrong", "new", 0L).join(), Boolean.FALSE);
-      assertEquals(cache.replaceAsync("key", "old", "new", 0L).join(), Boolean.TRUE);
+      assertFalse(cache.replace("key", "wrong", "new", 0L));
+      assertTrue(cache.replace("key", "old", "new", 0L));
       assertEquals(cache.get("key"), "new");
     }
   }

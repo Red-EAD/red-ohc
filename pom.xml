@@ -15,8 +15,8 @@
         <maven.compiler.release>11</maven.compiler.release>
         <jna.version>5.15.0</jna.version>
         <jctools.version>4.0.5</jctools.version>
-        <fastutil.version>8.2.1</fastutil.version>
         <jol.version>0.17</jol.version>
+        <jcstress.version>0.16</jcstress.version>
         <caffeine.version>3.2.4</caffeine.version>
         <ehcache.version>3.10.8</ehcache.version>
         <mapdb.version>3.1.0</mapdb.version>
@@ -46,11 +46,6 @@
                 <version>${jctools.version}</version>
             </dependency>
             <dependency>
-                <groupId>it.unimi.dsi</groupId>
-                <artifactId>fastutil</artifactId>
-                <version>${fastutil.version}</version>
-            </dependency>
-            <dependency>
                 <groupId>org.testng</groupId>
                 <artifactId>testng</artifactId>
                 <version>${testng.version}</version>
@@ -60,6 +55,12 @@
                 <groupId>org.openjdk.jol</groupId>
                 <artifactId>jol-core</artifactId>
                 <version>${jol.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.openjdk.jcstress</groupId>
+                <artifactId>jcstress-core</artifactId>
+                <version>${jcstress.version}</version>
                 <scope>test</scope>
             </dependency>
         </dependencies>

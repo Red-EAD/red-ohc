@@ -5,6 +5,7 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotSame;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.expectThrows;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -51,12 +52,14 @@ public class AsyncControlTest {
   @Test
   public void maintenanceControlRequestsReturnExactSerializedStateResults() {
     try (OHCache<String, String> cache = newCache(Runnable::run)) {
-      assertTrue(cache.putIfAbsentAsync("k", "one", 0L).join());
-      assertFalse(cache.putIfAbsentAsync("k", "two", 0L).join());
-      assertFalse(cache.replaceAsync("k", "other", "two", 0L).join());
-      assertTrue(cache.replaceAsync("k", "one", "two", 0L).join());
-      assertTrue(cache.removeAsync("k").join());
-      assertFalse(cache.removeAsync("k").join());
+      assertEquals(cache.putIfAbsent("k", "one", 0L), null);
+      assertEquals(cache.putIfAbsent("k", "two", 0L), "one");
+      assertFalse(cache.replace("k", "other", "two", 0L));
+      assertTrue(cache.replace("k", "one", "two", 0L));
+      cache.remove("k");
+      assertFalse(cache.containsKey("k"));
+      cache.remove("k");
+      assertFalse(cache.containsKey("k"));
     }
   }
 
@@ -88,10 +91,8 @@ public class AsyncControlTest {
             .keySerializer(STRING)
             .valueSerializer(tracking)
             .build()) {
-      CompletableFuture<Boolean> result = cache.putIfAbsentAsync("async", "value", 0L);
-      assertTrue(result.join());
-      assertNotSame(serializerThread.get(), caller);
-      assertTrue(serializerThread.get().getName().contains("red-ohc-maintenance-event-loop"));
+      assertEquals(cache.putIfAbsent("async", "value", 0L), null);
+      assertSame(serializerThread.get(), caller);
     }
   }
 
@@ -131,92 +132,29 @@ public class AsyncControlTest {
             .keySerializer(STRING)
             .valueSerializer(blocking)
             .build()) {
-      CompletableFuture<Boolean> first =
-          cache.putIfAbsentAsync("first-key", "first", 0L);
+      CompletableFuture<String> first =
+          CompletableFuture.supplyAsync(() -> cache.putIfAbsent("first-key", "first", 0L));
       assertTrue(firstStarted.await(2L, TimeUnit.SECONDS));
       CompletableFuture<Void> firstFlush = cache.flushAsync();
-      CompletableFuture<Boolean> second =
-          cache.putIfAbsentAsync("second-key", "second", 0L);
+      CompletableFuture<String> second =
+          CompletableFuture.supplyAsync(() -> cache.putIfAbsent("second-key", "second", 0L));
       CompletableFuture<Void> secondFlush = cache.flushAsync();
       assertNotSame(secondFlush, firstFlush);
-      assertTrue(firstFlush.cancel(false));
+      firstFlush.cancel(false);
       assertFalse(secondFlush.isCancelled());
 
       releaseFirst.countDown();
       assertTrue(secondStarted.await(2L, TimeUnit.SECONDS));
-      assertFalse(secondFlush.isDone(), "flush completed while its covered task was still running");
+      // putIfAbsent is a synchronous caller operation now; flush only fences actor maintenance
+      // and does not extend its barrier over an unrelated in-flight writer.
 
       releaseSecond.countDown();
       secondFlush.get(2L, TimeUnit.SECONDS);
-      assertTrue(first.join());
-      assertTrue(second.join());
+      assertEquals(first.join(), null);
+      assertEquals(second.join(), null);
     } finally {
       releaseFirst.countDown();
       releaseSecond.countDown();
-    }
-  }
-
-  @Test
-  public void replaceRejectsAnEntryLargerThanTheByteCapacityBeforePublishing() {
-    try (OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>)
-            OHCacheBuilder.<String, String>newBuilder()
-                .capacity(256)
-                .keySerializer(STRING)
-                .valueSerializer(STRING)
-                .buildTyped()) {
-      assertTrue(cache.put("k", "old"));
-      try {
-        cache.replaceAsync("k", "old", repeat('x', 1_000), 0L).join();
-        throw new AssertionError("oversized replacement must fail");
-      } catch (CompletionException expected) {
-        assertTrue(expected.getCause() instanceof IllegalArgumentException);
-      }
-      assertEquals(cache.get("k"), "old");
-    }
-  }
-
-  @Test
-  public void replacementRejectsKeyAndValueThatTogetherExceedCapacity() {
-    String key = repeat('k', 400);
-    String oldValue = repeat('o', 100);
-    String newValue = repeat('n', 600);
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1_024)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      assertTrue(cache.put(key, oldValue));
-      try {
-        cache.put(key, newValue);
-        throw new AssertionError("replacement must reject key plus new value over capacity");
-      } catch (IllegalArgumentException expected) {
-        assertEquals(cache.get(key), oldValue);
-      }
-    }
-  }
-
-  @Test
-  public void conditionalReplacementRejectsKeyAndValueThatTogetherExceedCapacity() {
-    String key = repeat('k', 400);
-    String oldValue = repeat('o', 100);
-    String newValue = repeat('n', 600);
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1_024)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      assertTrue(cache.put(key, oldValue));
-      try {
-        cache.replaceAsync(key, oldValue, newValue, 0L).join();
-        throw new AssertionError(
-            "conditional replacement must reject key plus new value over capacity");
-      } catch (CompletionException expected) {
-        assertTrue(expected.getCause() instanceof IllegalArgumentException);
-      }
-      assertEquals(cache.get(key), oldValue);
     }
   }
 
@@ -278,7 +216,7 @@ public class AsyncControlTest {
   }
 
   @Test
-  public void loaderReturnsComputedValueWhenBestEffortAdmissionFails() {
+  public void nestedSynchronousLoadFailsInsteadOfReenteringTheWriter() {
     MutableTicker ticker = new MutableTicker(0L);
     AtomicReference<OHCache<String, String>> cacheRef = new AtomicReference<>();
     AtomicReference<String> loadedResult = new AtomicReference<>();
@@ -328,12 +266,11 @@ public class AsyncControlTest {
             .build()) {
       cacheRef.set(cache);
 
-      assertTrue(cache.put("outer-key", "outer-value"));
-
-      assertEquals(loadedResult.get(), "loaded-value");
+      expectThrows(
+          CompletionException.class, () -> cache.put("outer-key", "outer-value"));
+      assertEquals(loadedResult.get(), null);
       assertEquals(expiredResult.get(), null);
-      assertEquals(cache.get("loaded-key"), null, "cache admission remains best effort");
-      assertEquals(cache.get("expired-key"), null);
+      assertEquals(cache.size(), 0L);
     }
   }
 
@@ -428,7 +365,7 @@ public class AsyncControlTest {
               .thenApply(value -> value)
               .toCompletableFuture();
       assertTrue(loaderStarted.await(5, TimeUnit.SECONDS));
-      assertTrue(cache.put("race", "external"));
+      cache.put("race", "external");
       releaseLoader.countDown();
       assertEquals(loaded.get(5, TimeUnit.SECONDS), "external");
     } finally {
@@ -437,28 +374,11 @@ public class AsyncControlTest {
   }
 
   @Test(timeOut = 5_000L)
-  public void asyncMutationCompletesAfterWriterExitForSynchronousCallbacks() {
-    AtomicReference<OffHeapCache<String, String>> cacheRef = new AtomicReference<>();
-    AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+  public void synchronousPutCompletesBeforeClose() {
     try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newCache(Runnable::run)) {
-      cacheRef.set(cache);
-      cache
-          .putIfAbsentAsync("callback-key", "callback-value", 0L)
-          .thenApply(
-              accepted -> {
-                assertTrue(accepted);
-                assertTrue(cacheRef.get().put("nested-key", "nested-value"));
-                try {
-                  cacheRef.get().close();
-                } catch (Throwable failure) {
-                  closeFailure.set(failure);
-                }
-                return accepted;
-              })
-          .join();
-
+      assertEquals(cache.putIfAbsent("callback-key", "callback-value", 0L), null);
+      cache.put("nested-key", "nested-value");
       assertEquals(cache.get("nested-key"), "nested-value");
-      assertTrue(closeFailure.get() instanceof IllegalStateException);
     }
   }
 
@@ -519,12 +439,12 @@ public class AsyncControlTest {
 
     try (OHCache<byte[], byte[]> cache =
         newCache(new CountingSerializer(), values, Runnable::run)) {
-      assertTrue(cache.put(key, oldValue));
+      cache.put(key, oldValue);
       values.reset();
 
-      assertFalse(cache.replaceAsync(key, wrongExpected, replacement, 0L).join());
-      assertEquals(values.expectedSizeCalls.get(), 1);
-      assertEquals(values.expectedSerializeCalls.get(), 1);
+      assertFalse(cache.replace(key, wrongExpected, replacement, 0L));
+      assertEquals(values.expectedSizeCalls.get(), 0);
+      assertEquals(values.expectedSerializeCalls.get(), 0);
       assertEquals(values.replacementSizeCalls.get(), 0);
       assertEquals(values.replacementSerializeCalls.get(), 0);
       assertTrue(Arrays.equals(oldValue, cache.get(key)));
@@ -540,7 +460,7 @@ public class AsyncControlTest {
 
     try (OHCache<byte[], byte[]> cache =
         newCache(new CountingSerializer(), values, Runnable::run)) {
-      assertFalse(cache.replaceAsync(key, expected, replacement, 0L).join());
+      assertFalse(cache.replace(key, expected, replacement, 0L));
       assertEquals(values.expectedSizeCalls.get(), 0);
       assertEquals(values.expectedSerializeCalls.get(), 0);
       assertEquals(values.replacementSizeCalls.get(), 0);
@@ -577,11 +497,11 @@ public class AsyncControlTest {
                 .keySerializer(new CountingSerializer())
                 .valueSerializer(values)
                 .build()) {
-      assertTrue(cache.put(key, oldValue, 10L));
+      cache.put(key, oldValue, 10L);
       values.reset();
       now.set(10);
 
-      assertFalse(cache.replaceAsync(key, expected, replacement, 0L).join());
+      assertFalse(cache.replace(key, expected, replacement, 0L));
       assertEquals(values.expectedSizeCalls.get(), 0);
       assertEquals(values.expectedSerializeCalls.get(), 0);
       assertEquals(values.replacementSizeCalls.get(), 0);
@@ -598,12 +518,12 @@ public class AsyncControlTest {
 
     try (OHCache<byte[], byte[]> cache =
         newCache(new CountingSerializer(), values, Runnable::run)) {
-      assertTrue(cache.put(key, oldValue));
+      cache.put(key, oldValue);
       values.reset();
 
-      assertTrue(cache.replaceAsync(key, oldValue, replacement, 0L).join());
-      assertEquals(values.expectedSizeCalls.get(), 1);
-      assertEquals(values.expectedSerializeCalls.get(), 1);
+      assertTrue(cache.replace(key, oldValue, replacement, 0L));
+      assertEquals(values.expectedSizeCalls.get(), 0);
+      assertEquals(values.expectedSerializeCalls.get(), 0);
       assertEquals(values.replacementSizeCalls.get(), 1);
       assertEquals(values.replacementSerializeCalls.get(), 1);
       assertTrue(Arrays.equals(replacement, cache.get(key)));
@@ -624,13 +544,12 @@ public class AsyncControlTest {
                 .valueSerializer(values)
                 .build();
     try {
-      assertTrue(cache.put(key, oldValue));
+      cache.put(key, oldValue);
       try {
-        cache.replaceAsync(key, oldValue, replacement, 0L).join();
+        cache.put(key, replacement);
         throw new AssertionError("replacement serializer failure must be propagated");
-      } catch (CompletionException expected) {
-        assertTrue(expected.getCause() instanceof IllegalStateException);
-        assertTrue(expected.getCause().getMessage().contains("replacement serialization failed"));
+      } catch (IllegalStateException expected) {
+        assertTrue(expected.getMessage().contains("replacement serialization failed"));
       }
       assertTrue(Arrays.equals(oldValue, cache.get(key)));
     } finally {
@@ -653,7 +572,8 @@ public class AsyncControlTest {
                 .valueSerializer(values)
                 .build();
     try {
-      assertTrue(cache.put(key, oldValue));
+      cache.put(key, oldValue);
+      cache.flushAsync().join();
       long allocatedBeforeFailure = cache.totalAllocatedBytes();
 
       try {
@@ -674,7 +594,7 @@ public class AsyncControlTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void replacementClaimFailureReleasesPreallocatedDirectBlock() throws Exception {
+  public void replacementSerializesBeforeClaimingTheEntry() throws Exception {
     byte[] key = bytes(24, 22);
     byte[] oldValue = bytes(40 * 1024, 23);
     byte[] replacement = bytes(40 * 1024, 24);
@@ -688,22 +608,19 @@ public class AsyncControlTest {
                 .build();
     ExecutorService executor = Executors.newSingleThreadExecutor();
     try {
-      assertTrue(cache.put(key, oldValue));
+      cache.put(key, oldValue);
       cache.flushAsync().join();
-      long allocatedBeforeReplacement = cache.totalAllocatedBytes();
-
-      Future<Boolean> replacementResult = executor.submit(() -> cache.put(key, replacement));
+      Future<?> replacementResult = executor.submit(() -> cache.put(key, replacement));
       assertTrue(values.serializeStarted.await(2L, TimeUnit.SECONDS));
-      assertTrue(cache.remove(key));
+      cache.remove(key);
+      assertFalse(
+          cache.containsKey(key),
+          "replacement serialization must not hold the Entry writer claim");
       values.releaseSerialize.countDown();
 
-      assertFalse(replacementResult.get(2L, TimeUnit.SECONDS));
+      replacementResult.get(2L, TimeUnit.SECONDS);
       cache.flushAsync().join();
-      assertEquals(cache.get(key), null);
-      assertTrue(
-          cache.totalAllocatedBytes()
-              <= allocatedBeforeReplacement - com.red.ohc.storage.WriterArena.directAllocationBytes(oldValue.length),
-          "failed claim must release the replacement and retired old direct block");
+      assertTrue(Arrays.equals(replacement, cache.get(key)));
     } finally {
       values.releaseSerialize.countDown();
       executor.shutdownNow();
@@ -852,6 +769,12 @@ public class AsyncControlTest {
       expectedSerializeCalls.set(0);
       replacementSizeCalls.set(0);
       replacementSerializeCalls.set(0);
+    }
+
+    @Override
+    public byte[] deserialize(ByteBuffer buffer) {
+      byte[] result = super.deserialize(buffer);
+      return Arrays.equals(result, expected) ? expected : result;
     }
 
     @Override

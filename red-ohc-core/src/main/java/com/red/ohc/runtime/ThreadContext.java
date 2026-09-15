@@ -4,30 +4,38 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
 
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
-import com.red.ohc.maintenance.ReliableRemovalQueue;
-import com.red.ohc.maintenance.RetirementQueue;
+import com.red.ohc.maintenance.RetirementJournal;
+import com.red.ohc.maintenance.RetirementSegment;
+import com.red.ohc.maintenance.WriterLifecycleLane;
 import com.red.ohc.storage.WriterArena;
 
 public final class ThreadContext {
+  static final int READER_EXITED_LOOKUP = 1;
+  static final int READER_EXITED_VALUES = 1 << 1;
+  private static final long NO_WRITE_TIMESTAMP = Long.MIN_VALUE;
+  public static final int RESIDENCE_SAMPLE_INTERVAL = 1_024;
   private static final int MAX_REUSABLE_BULK_KEYS = 4_096;
-  public static final int MAX_THREAD_LOCAL_FINGERPRINT_BYTES = 64 * 1024;
-  public static final int MAX_FINGERPRINT_BYTES = FingerprintScratchPool.MAX_FINGERPRINT_BYTES;
+  private static final int RELEASE_PAGE_MEMO_CAPACITY = 256;
   public byte[] keyBytes = new byte[64];
   public ByteBuffer keyBuffer = ByteBuffer.wrap(keyBytes);
   public LookupKey lookupKey = new LookupKey();
   public final ReaderSlot slot = new ReaderSlot();
+  private DirectValueView topLevelDirectView;
   private DirectValueView[] directViews;
   private int directViewDepth;
   private int readerDepth;
+  /** Number of active reader scopes that remain inside the value-protection region. */
+  private int valueProtectionDepth;
+  private long readerPublishedEpoch;
+  private int userCallbackDepth;
   private ByteBuffer writableValueBuffer;
   private ByteBuffer[] readOnlyValueBuffers;
   private int readOnlyValueDepth;
-  private FingerprintScratch[] fingerprintScratches;
-  private boolean[] pooledFingerprintScratches;
-  private int fingerprintScratchDepth;
   private Set<Entry>[] bulkEntrySets;
   private int[] bulkEntrySetCapacities;
   private boolean[] reusableBulkEntrySets;
@@ -38,33 +46,70 @@ public final class ThreadContext {
   private long accessSequence;
   private int bulkReadDepth;
   private boolean bulkReadChanged;
-  private final FingerprintScratchPool fingerprintScratchPool;
-
-  boolean registered;
+  private int replacementSampleCounter;
+  private long writeCreatedAtMillis = NO_WRITE_TIMESTAMP;
+  private long writeMonotonicNowNanos = NO_WRITE_TIMESTAMP;
+  private final IdentityRemoval identityRemoval = new IdentityRemoval();
+  private RetirementSegment.Reservation retirementReservation;
+  private long[] releaseGroupKeys;
+  private int[] releaseGroupCounts;
+  private int[] releaseGroupOffsets;
+  private int[] releaseGroupPositions;
+  private int[] releaseGroupSlots;
+  private int[] releaseGroupIndexes;
+  private long[] releaseGroupBytes;
+  private int[] releaseEntryGroupSlots;
+  // Allocator-private Page references; NativeMemory clears them even when a batch fails.
+  private Object[] releaseGroupPages;
+  private int[] releaseEntrySlots;
+  private int releaseBatchRecords;
+  private long releaseBatchBytes;
+  private ReleasePageMemo releasePageMemo;
 
   public ThreadContext(WriterArena writerArena) {
-    this(writerArena, null);
+    if (writerArena != null) {
+      throw new IllegalArgumentException("writer resources must be registry-owned");
+    }
   }
 
-  public ThreadContext(WriterArena writerArena, FingerprintScratchPool fingerprintScratchPool) {
-    this.fingerprintScratchPool = fingerprintScratchPool;
-    if (writerArena != null) {
-      this.writerState = new WriterState(writerArena);
+  /** Removes a CHM mapping only when its value is the exact Entry observed by this writer. */
+  public boolean removeEntryIfSame(
+      ConcurrentHashMap<Entry, Entry> data, Entry expected) {
+    return identityRemoval.remove(data, expected);
+  }
+
+  /** Reusable CHM remapping function; one instance is retained by each writer context. */
+  public static final class IdentityRemoval implements BiFunction<Entry, Entry, Entry> {
+    private Entry expected;
+    private boolean removed;
+
+    public boolean remove(ConcurrentHashMap<Entry, Entry> data, Entry expected) {
+      if (data == null || expected == null) {
+        throw new NullPointerException();
+      }
+      this.expected = expected;
+      this.removed = false;
+      try {
+        data.compute(expected, this);
+        return removed;
+      } finally {
+        this.expected = null;
+      }
+    }
+
+    @Override
+    public Entry apply(Entry ignoredKey, Entry current) {
+      if (current == expected) {
+        removed = true;
+        return null;
+      }
+      return current;
     }
   }
 
   private static final class WriterState {
-    private final RetirementQueue.Reservation retirement = new RetirementQueue.Reservation();
-    private final ReliableRemovalQueue.Reservation reliableRemoval =
-        new ReliableRemovalQueue.Reservation();
-    private WriterArena writerArena;
-    private int budgetStripeIndex = -1;
+    private WriterResource resource;
     private boolean writerEntered;
-    private boolean retirementPublished;
-
-    private WriterState(WriterArena writerArena) {
-      this.writerArena = writerArena;
-    }
   }
 
 
@@ -95,7 +140,7 @@ public final class ThreadContext {
     if (writableValueBuffer == null) {
       writableValueBuffer = NativeByteBuffer.writable(address, length);
     } else {
-      NativeByteBuffer.writable(writableValueBuffer, address, length);
+      NativeByteBuffer.writableTrusted(writableValueBuffer, address, length);
     }
     return writableValueBuffer;
   }
@@ -115,7 +160,7 @@ public final class ThreadContext {
       buffer = NativeByteBuffer.readOnly(address, length);
       readOnlyValueBuffers[readOnlyValueDepth] = buffer;
     } else {
-      NativeByteBuffer.readOnly(buffer, address, length);
+      NativeByteBuffer.readOnlyTrusted(buffer, address, length);
     }
     readOnlyValueDepth++;
     return buffer;
@@ -126,106 +171,281 @@ public final class ThreadContext {
       throw new IllegalStateException("read-only value buffer is not entered");
     }
     ByteBuffer buffer = readOnlyValueBuffers[--readOnlyValueDepth];
-    NativeByteBuffer.invalidate(buffer);
+    NativeByteBuffer.invalidateTrusted(buffer);
   }
 
   public void invalidateWritableValueBuffer(ByteBuffer buffer) {
-    NativeByteBuffer.invalidate(buffer);
-  }
-
-  /** Enters a per-depth direct scratch buffer for weak-value fingerprint validation. */
-  public ByteBuffer enterFingerprintScratch(int length) {
-    if (length < 0 || length > MAX_FINGERPRINT_BYTES) {
-      return null;
-    }
-    FingerprintScratch scratch = null;
-    boolean pooled = false;
-    try {
-      ensureFingerprintDepth();
-      int depth = fingerprintScratchDepth;
-      if (length <= MAX_THREAD_LOCAL_FINGERPRINT_BYTES) {
-        scratch = fingerprintScratches[depth];
-        if (scratch == null) {
-          scratch = new FingerprintScratch();
-          fingerprintScratches[depth] = scratch;
-        }
-        if (!scratch.ensureCapacity(length)) {
-          return null;
-        }
-      } else {
-        if (fingerprintScratchPool == null) {
-          return null;
-        }
-        scratch = fingerprintScratchPool.acquire(length);
-        if (scratch == null) {
-          return null;
-        }
-        pooled = true;
-        fingerprintScratches[depth] = scratch;
-      }
-      pooledFingerprintScratches[depth] = pooled;
-      ByteBuffer prepared = scratch.prepare(length);
-      fingerprintScratchDepth++;
-      return prepared;
-    } catch (OutOfMemoryError ignored) {
-      if (pooled && scratch != null) {
-        fingerprintScratchPool.release(scratch);
-        fingerprintScratches[fingerprintScratchDepth] = null;
-        pooledFingerprintScratches[fingerprintScratchDepth] = false;
-      }
-      return null;
-    }
-  }
-
-  /** Computes a CRC32C or Adler32 fingerprint using the currently entered scratch state. */
-  public long fingerprint(ByteBuffer buffer, int length) {
-    if (fingerprintScratchDepth <= 0) {
-      throw new IllegalStateException("fingerprint scratch is not entered");
-    }
-    return fingerprintScratches[fingerprintScratchDepth - 1].checksum(buffer, length);
-  }
-
-  public void exitFingerprintScratch() {
-    if (fingerprintScratchDepth <= 0) {
-      throw new IllegalStateException("fingerprint scratch is not entered");
-    }
-    int depth = --fingerprintScratchDepth;
-    if (pooledFingerprintScratches[depth]) {
-      fingerprintScratchPool.release(fingerprintScratches[depth]);
-      fingerprintScratches[depth] = null;
-      pooledFingerprintScratches[depth] = false;
-    }
+    NativeByteBuffer.invalidateTrusted(buffer);
   }
 
   public WriterArena writer() {
     WriterState state = writerState;
-    if (state == null || state.writerArena == null) {
+    if (state == null || state.resource == null) {
       throw new IllegalStateException("writer resources are not bound");
     }
-    return state.writerArena;
+    return state.resource.arena();
+  }
+
+  /** Reusable writer-side retirement reservation; no allocation occurs on replacement. */
+  public RetirementSegment.Reservation retirementReservation() {
+    if (retirementReservation == null) {
+      retirementReservation = new RetirementSegment.Reservation();
+    }
+    return retirementReservation;
+  }
+
+  /** Ensures reusable grouping storage for actor-side page batch release. */
+  public void ensureReleaseBatchScratch(int capacity) {
+    if (capacity <= 0) {
+      throw new IllegalArgumentException("release batch scratch capacity must be positive");
+    }
+    int tableCapacity = 1;
+    while (tableCapacity < capacity * 2 && tableCapacity < (1 << 30)) {
+      tableCapacity <<= 1;
+    }
+    if (releaseGroupKeys != null
+        && releaseGroupKeys.length >= tableCapacity
+        && releaseGroupIndexes.length >= capacity
+        && releaseGroupBytes.length >= tableCapacity
+        && releaseEntryGroupSlots.length >= capacity) {
+      return;
+    }
+    releaseGroupKeys = new long[tableCapacity];
+    releaseGroupCounts = new int[tableCapacity];
+    releaseGroupOffsets = new int[tableCapacity];
+    releaseGroupPositions = new int[tableCapacity];
+    releaseGroupSlots = new int[capacity];
+    releaseGroupIndexes = new int[capacity];
+    releaseGroupBytes = new long[tableCapacity];
+    releaseEntryGroupSlots = new int[capacity];
+    releaseGroupPages = new Object[tableCapacity];
+    releaseEntrySlots = new int[capacity];
+  }
+
+  public long[] releaseGroupKeys() {
+    return releaseGroupKeys;
+  }
+
+  public int[] releaseGroupCounts() {
+    return releaseGroupCounts;
+  }
+
+  public int[] releaseGroupOffsets() {
+    return releaseGroupOffsets;
+  }
+
+  public int[] releaseGroupPositions() {
+    return releaseGroupPositions;
+  }
+
+  public int[] releaseGroupSlots() {
+    return releaseGroupSlots;
+  }
+
+  public int[] releaseGroupIndexes() {
+    return releaseGroupIndexes;
+  }
+
+  public long[] releaseGroupBytes() {
+    return releaseGroupBytes;
+  }
+
+  public int[] releaseEntryGroupSlots() {
+    return releaseEntryGroupSlots;
+  }
+
+  /** Opaque allocator references scoped to one release call, never retained between batches. */
+  public Object[] releaseGroupPages() {
+    return releaseGroupPages;
+  }
+
+  public int[] releaseEntrySlots() {
+    return releaseEntrySlots;
+  }
+
+  /** Resets the primitive progress counters used by an idempotent grouped native release. */
+  public void resetReleaseBatchProgress() {
+    releaseBatchRecords = 0;
+    releaseBatchBytes = 0L;
+  }
+
+  /** Records a group after its native slots have been accepted by the allocator. */
+  public void recordReleaseBatchProgress(int records, long bytes) {
+    if (records < 0 || bytes < 0L) {
+      throw new IllegalArgumentException("invalid release batch progress");
+    }
+    releaseBatchRecords += records;
+    releaseBatchBytes += bytes;
+  }
+
+  public int releaseBatchRecords() {
+    return releaseBatchRecords;
+  }
+
+  public long releaseBatchBytes() {
+    return releaseBatchBytes;
+  }
+
+  /** Begins one actor reclaim scope for the bounded allocator-page descriptor memo. */
+  public void beginReleasePageMemo() {
+    ReleasePageMemo memo = releasePageMemo;
+    if (memo == null) {
+      memo = new ReleasePageMemo();
+      releasePageMemo = memo;
+    }
+    memo.begin();
+  }
+
+  /** Returns an opaque Page only when the full page key matches in the current reclaim scope. */
+  public Object releasePageMemoLookup(long pageKey) {
+    ReleasePageMemo memo = releasePageMemo;
+    return memo == null ? null : memo.lookup(pageKey);
+  }
+
+  /** Remembers one fully validated Page; outside a reclaim scope this is intentionally a no-op. */
+  public void releasePageMemoRemember(long pageKey, Object page) {
+    ReleasePageMemo memo = releasePageMemo;
+    if (memo != null) {
+      memo.remember(pageKey, page);
+    }
+  }
+
+  /** Invalidates the exact descriptor before a page can be republished as available. */
+  public void releasePageMemoInvalidate(long pageKey, Object page) {
+    ReleasePageMemo memo = releasePageMemo;
+    if (memo != null) {
+      memo.invalidate(pageKey, page);
+    }
+  }
+
+  /** Clears every Page reference touched by the current reclaim scope. */
+  public void endReleasePageMemo() {
+    ReleasePageMemo memo = releasePageMemo;
+    if (memo != null) {
+      memo.end();
+    }
+  }
+
+  private static final class ReleasePageMemo {
+    private final long[] pageKeys = new long[RELEASE_PAGE_MEMO_CAPACITY];
+    private final Object[] pages = new Object[RELEASE_PAGE_MEMO_CAPACITY];
+    private final int[] touchedSlots = new int[RELEASE_PAGE_MEMO_CAPACITY];
+    private final boolean[] touched = new boolean[RELEASE_PAGE_MEMO_CAPACITY];
+    private int touchedCount;
+    private boolean active;
+
+    private void begin() {
+      if (active) {
+        throw new IllegalStateException("release page memo is already active");
+      }
+      active = true;
+    }
+
+    private Object lookup(long pageKey) {
+      if (!active) {
+        return null;
+      }
+      int slot = slot(pageKey);
+      return pageKeys[slot] == pageKey ? pages[slot] : null;
+    }
+
+    private void remember(long pageKey, Object page) {
+      if (!active) {
+        return;
+      }
+      if (pageKey == 0L || page == null) {
+        throw new IllegalArgumentException("release page memo requires a page key and descriptor");
+      }
+      int slot = slot(pageKey);
+      if (!touched[slot]) {
+        touched[slot] = true;
+        touchedSlots[touchedCount++] = slot;
+      }
+      pageKeys[slot] = pageKey;
+      pages[slot] = page;
+    }
+
+    private void invalidate(long pageKey, Object page) {
+      if (!active) {
+        return;
+      }
+      int slot = slot(pageKey);
+      if (pageKeys[slot] == pageKey && pages[slot] == page) {
+        pageKeys[slot] = 0L;
+        pages[slot] = null;
+      }
+    }
+
+    private void end() {
+      if (!active) {
+        return;
+      }
+      for (int index = 0; index < touchedCount; index++) {
+        int slot = touchedSlots[index];
+        pageKeys[slot] = 0L;
+        pages[slot] = null;
+        touched[slot] = false;
+      }
+      touchedCount = 0;
+      active = false;
+    }
+
+    private static int slot(long pageKey) {
+      return Long.hashCode(pageKey) & (RELEASE_PAGE_MEMO_CAPACITY - 1);
+    }
+  }
+
+  /** Returns true once per fixed replacement interval at publication time. */
+  public boolean sampleNextReplacement() {
+    replacementSampleCounter++;
+    if (replacementSampleCounter < RESIDENCE_SAMPLE_INTERVAL) {
+      return false;
+    }
+    replacementSampleCounter = 0;
+    return true;
   }
 
   public boolean hasWriterResources() {
     WriterState state = writerState;
-    return state != null && state.writerArena != null;
+    return state != null && state.resource != null;
   }
 
-  public void bindWriterResources(WriterArena writerArena, int budgetStripeIndex) {
-    if (writerArena == null) {
-      throw new IllegalArgumentException("writer arena is required");
+  public WriterLifecycleLane lifecycleLane() {
+    WriterState state = writerState;
+    if (state == null || state.resource == null) {
+      throw new IllegalStateException("writer lifecycle lane is not bound");
     }
-    if (budgetStripeIndex < 0) {
-      throw new IllegalArgumentException("budget stripe index must be non-negative");
+    return state.resource.lifecycleLane();
+  }
+
+  public RetirementJournal.Lane retirementLane() {
+    WriterState state = writerState;
+    if (state == null || state.resource == null) {
+      throw new IllegalStateException("writer retirement lane is not bound");
+    }
+    return state.resource.retirementLane();
+  }
+
+  public void bindWriterResource(WriterResource resource) {
+    if (resource == null) {
+      throw new IllegalArgumentException("writer resource is required");
     }
     WriterState state = ensureWriterState();
-    if (state.writerArena != null) {
-      if (state.writerArena != writerArena) {
+    if (state.resource != null) {
+      if (state.resource != resource) {
         throw new IllegalStateException("writer resources are already bound");
       }
       return;
     }
-    state.writerArena = writerArena;
-    state.budgetStripeIndex = budgetStripeIndex;
+    state.resource = resource;
+  }
+
+  public WriterResource writerResource() {
+    WriterState state = writerState;
+    if (state == null || state.resource == null) {
+      throw new IllegalStateException("writer resource is not bound");
+    }
+    return state.resource;
   }
 
   public boolean tryEnterWriter() {
@@ -250,54 +470,122 @@ public final class ThreadContext {
     return state != null && state.writerEntered;
   }
 
-  public RetirementQueue.Reservation retirement() {
-    return ensureWriterState().retirement;
+  /** Reuses the wall-clock sample taken while resolving the current write deadline. */
+  public void writeCreatedAtMillis(long createdAtMillis) {
+    writeCreatedAtMillis = createdAtMillis;
   }
 
-  public ReliableRemovalQueue.Reservation reliableRemoval() {
-    return ensureWriterState().reliableRemoval;
+  public long writeCreatedAtMillis() {
+    return writeCreatedAtMillis;
   }
 
-  public int budgetStripeIndex() {
-    WriterState state = writerState;
-    if (state == null || state.writerArena == null) {
-      throw new IllegalStateException("writer resources are not bound");
-    }
-    return state.budgetStripeIndex;
+  /** Reuses the monotonic sample taken while resolving the current write deadline. */
+  public void writeMonotonicNowNanos(long nowNanos) {
+    writeMonotonicNowNanos = nowNanos;
+  }
+
+  public long writeMonotonicNowNanos() {
+    return writeMonotonicNowNanos;
   }
 
   public boolean isRegistered() {
-    return registered;
+    return slot.registry != null;
+  }
+
+  public int readerSlotIndex() {
+    if (slot.registry == null || slot.registryIndex < 0) {
+      throw new IllegalStateException("reader slot is not registered");
+    }
+    return slot.registryIndex;
   }
 
   public int readerDepth() {
     return readerDepth;
   }
 
-  public void enterReader() {
-    readerDepth++;
+  /** Epoch carried by the reader state currently published for this context. */
+  public long readerPublishedEpoch() {
+    return readerPublishedEpoch;
   }
 
-  public boolean exitReader() {
+  public void readerPublishedEpoch(long epoch) {
+    if (epoch < 0L || epoch > ReaderRegistry.MAX_READER_EPOCH) {
+      throw new IllegalArgumentException("reader epoch must be in [0, 2^62 - 2]");
+    }
+    readerPublishedEpoch = epoch;
+  }
+
+  /** Records an epoch already validated by the reader publication path. */
+  public void readerPublishedEpochKnown(long epoch) {
+    readerPublishedEpoch = epoch;
+  }
+
+  public boolean isUserCallbackActive() {
+    return userCallbackDepth != 0;
+  }
+
+  public void enterUserCallback() {
+    userCallbackDepth++;
+  }
+
+  public void exitUserCallback() {
+    if (userCallbackDepth <= 0) {
+      throw new IllegalStateException("cache callback is not active");
+    }
+    userCallbackDepth--;
+  }
+
+  /** Enters a nested lookup guard and returns whether value protection became newly active. */
+  public boolean enterReader(boolean protectsValues) {
+    readerDepth++;
+    if (protectsValues || valueProtectionDepth != 0) {
+      return valueProtectionDepth++ == 0;
+    }
+    return false;
+  }
+
+  public int exitReader() {
     if (readerDepth <= 0) {
       throw new IllegalStateException("reader guard is not entered");
     }
-    return --readerDepth == 0;
+    boolean protectedValues = valueProtectionDepth != 0;
+    readerDepth--;
+    if (protectedValues) {
+      valueProtectionDepth--;
+    }
+    int state = 0;
+    if (protectedValues && valueProtectionDepth == 0) {
+      state |= READER_EXITED_VALUES;
+    }
+    if (readerDepth == 0) {
+      state |= READER_EXITED_LOOKUP;
+    }
+    return state;
   }
 
   public DirectValueView pushDirectView(long address, int length) {
-    if (directViews == null) {
-      directViews = new DirectValueView[4];
-    }
-    if (directViewDepth == directViews.length) {
-      DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
-      System.arraycopy(directViews, 0, expanded, 0, directViews.length);
-      directViews = expanded;
-    }
-    DirectValueView view = directViews[directViewDepth];
-    if (view == null) {
-      view = new DirectValueView();
-      directViews[directViewDepth] = view;
+    DirectValueView view;
+    if (directViewDepth == 0) {
+      view = topLevelDirectView;
+      if (view == null) {
+        view = new DirectValueView();
+        topLevelDirectView = view;
+      }
+    } else {
+      int nestedDepth = directViewDepth - 1;
+      if (directViews == null) {
+        directViews = new DirectValueView[4];
+      }
+      if (nestedDepth == directViews.length) {
+        DirectValueView[] expanded = new DirectValueView[directViews.length << 1];
+        System.arraycopy(directViews, 0, expanded, 0, directViews.length);
+        directViews = expanded;
+      }
+      view = directViews[nestedDepth];
+      if (view == null) {
+        view = new DirectValueView();
+        directViews[nestedDepth] = view;
+      }
     }
     directViewDepth++;
     view.reset(address, length, this);
@@ -308,7 +596,14 @@ public final class ThreadContext {
     if (directViewDepth <= 0) {
       throw new IllegalStateException("direct view is not entered");
     }
-    DirectValueView view = directViews[--directViewDepth];
+    DirectValueView view;
+    if (directViewDepth == 1) {
+      directViewDepth = 0;
+      view = topLevelDirectView;
+    } else {
+      directViewDepth--;
+      view = directViews[directViewDepth - 1];
+    }
     try {
       if (view.hasMaterializedByteBuffer()) {
         releaseReadOnlyValueBuffer();
@@ -378,26 +673,6 @@ public final class ThreadContext {
     reusableBulkEntrySets = expandedReusable;
   }
 
-  private void ensureFingerprintDepth() {
-    if (fingerprintScratches == null) {
-      fingerprintScratches = new FingerprintScratch[2];
-      pooledFingerprintScratches = new boolean[2];
-    }
-    if (fingerprintScratchDepth < fingerprintScratches.length) {
-      return;
-    }
-    FingerprintScratch[] expanded = new FingerprintScratch[fingerprintScratches.length << 1];
-    boolean[] expandedPooled = new boolean[pooledFingerprintScratches.length << 1];
-    System.arraycopy(fingerprintScratches, 0, expanded, 0, fingerprintScratches.length);
-    System.arraycopy(pooledFingerprintScratches, 0, expandedPooled, 0, pooledFingerprintScratches.length);
-    fingerprintScratches = expanded;
-    pooledFingerprintScratches = expandedPooled;
-  }
-
-  public void markRegistered() {
-    registered = true;
-  }
-
   public long hit() {
     slot.localHits++;
     return ++readSequence;
@@ -419,7 +694,10 @@ public final class ThreadContext {
     slot.localHits++;
     readSequence++;
     if ((++accessSequence & 15L) == 0L) {
-      accessRing().offer(entry, entry.generation());
+      long observedValueAddress = entry.valueAddress;
+      long observedGeneration = entry.generation();
+      int observedPolicyState = entry.policyState();
+      accessRing().offer(entry, observedValueAddress, observedGeneration, observedPolicyState);
     }
     bulkReadChanged = true;
   }
@@ -446,14 +724,21 @@ public final class ThreadContext {
 
   /** Delivers every sampled hit to this thread's actor-owned access ring. */
   public void access(Entry entry) {
+    access(entry, entry == null ? 0L : entry.valueAddress);
+  }
+
+  /** Delivers a sampled hit with the value token observed by the lookup. */
+  public void access(Entry entry, long observedValueAddress) {
     if ((++accessSequence & 15L) != 0L) {
       return;
     }
-    publishSampledAccess(entry);
+    publishSampledAccess(entry, observedValueAddress);
   }
 
-  private void publishSampledAccess(Entry entry) {
-    accessRing().offer(entry, entry.generation());
+  private void publishSampledAccess(Entry entry, long observedValueAddress) {
+    long observedGeneration = entry.generation();
+    int observedPolicyState = entry.policyState();
+    accessRing().offer(entry, observedValueAddress, observedGeneration, observedPolicyState);
   }
 
   public void finishRead(long sequence) {
@@ -472,29 +757,16 @@ public final class ThreadContext {
     publish();
   }
 
-  public void markRetirementPublished() {
-    ensureWriterState().retirementPublished = true;
-  }
-
-  public boolean consumeRetirementPublished() {
-    WriterState state = writerState;
-    if (state == null) {
-      return false;
-    }
-    boolean published = state.retirementPublished;
-    state.retirementPublished = false;
-    return published;
-  }
-
   public void publish() {
     slot.publishedHits = slot.localHits;
     slot.publishedMisses = slot.localMisses;
+    slot.signalAccess();
   }
 
   private AccessRing accessRing() {
     AccessRing ring = slot.access;
     if (ring == null) {
-      ring = new AccessRing();
+      ring = new AccessRing(slot::signalAccess);
       slot.access = ring;
     }
     return ring;
@@ -503,7 +775,7 @@ public final class ThreadContext {
   private WriterState ensureWriterState() {
     WriterState state = writerState;
     if (state == null) {
-      state = new WriterState(null);
+      state = new WriterState();
       writerState = state;
     }
     return state;

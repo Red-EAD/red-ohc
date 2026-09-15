@@ -7,6 +7,7 @@ import static org.testng.Assert.assertTrue;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.testng.annotations.Test;
 
@@ -62,7 +63,7 @@ public final class PermanentReadClockTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .build()) {
-      assertTrue(cache.put(key, new byte[16]));
+      cache.put(key, new byte[16]);
       cache.flushAsync().join();
       readerClockCalls.set(0);
       assertTrue(cache.getDirect(key, value -> value.getLong(0)));
@@ -93,7 +94,7 @@ public final class PermanentReadClockTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .build()) {
-      assertTrue(cache.put(key, new byte[16], 64L));
+      cache.put(key, new byte[16], 64L);
       cache.flushAsync().join();
       now.set(64);
       cache.flushAsync().join();
@@ -108,7 +109,7 @@ public final class PermanentReadClockTest {
         new Ticker() {
           @Override
           public long nanos() {
-            return 0L;
+            return now.get() * 1_000_000L;
           }
 
           @Override
@@ -137,18 +138,51 @@ public final class PermanentReadClockTest {
       assertFalse(cache.getDirect(readKey, value -> value.getByte(0)));
       assertEquals(
           cache.getDirectAll(Collections.singletonList(readKey), (key, value) -> {}), 0);
-      assertTrue(cache.putIfAbsentAsync(absentKey, new byte[] {3}, 0L).join());
-      assertFalse(cache.replaceAsync(replaceKey, new byte[] {2}, new byte[] {4}, 0L).join());
+      assertTrue(cache.putIfAbsent(absentKey, new byte[] {3}, 0L) == null);
+      assertFalse(cache.replace(replaceKey, new byte[] {2}, new byte[] {4}, 0L));
+    }
+  }
+
+  @Test
+  public void ttlReadUsesTheMonotonicDeadlineAfterPublication() {
+    Thread reader = Thread.currentThread();
+    AtomicLong readerWallMillis = new AtomicLong(1_000L);
+    AtomicLong monotonicNanos = new AtomicLong();
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return monotonicNanos.get();
+          }
+
+          @Override
+          public long currentTimeMillis() {
+            return Thread.currentThread() == reader ? readerWallMillis.get() : 1_000L;
+          }
+        };
+    byte[] key = {11, 12, 13, 14};
+    try (OHCache<byte[], byte[]> cache =
+        OHCacheBuilder.<byte[], byte[]>newBuilder()
+            .capacity(1 << 20)
+            .ticker(ticker)
+            .keySerializer(BYTES)
+            .valueSerializer(BYTES)
+            .build()) {
+      cache.put(key, new byte[16], 2_000L);
+
+      readerWallMillis.set(3_000L);
+      assertTrue(cache.getDirect(key, value -> value.getLong(0)));
+
+      monotonicNanos.set(1_000_000_000L);
+      assertFalse(cache.getDirect(key, value -> value.getLong(0)));
     }
   }
 
   private static void assertPutEventually(
       OHCache<byte[], byte[]> cache, byte[] key, byte[] value, long expireAtMillis) {
     for (int attempt = 0; attempt < 1_000; attempt++) {
-      if (cache.put(key, value, expireAtMillis)) {
-        return;
-      }
-      Thread.yield();
+      cache.put(key, value, expireAtMillis);
+      return;
     }
     assertTrue(false, "put admission did not succeed within 1000 attempts");
   }

@@ -7,14 +7,13 @@ import static org.testng.Assert.expectThrows;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
-import com.red.ohc.api.Ticker;
-import com.red.ohc.storage.Budget;
+import com.red.ohc.api.OHCache;
+import com.red.ohc.runtime.WriterResourceRegistry;
 
 public class WriteAdmissionTest {
   private static final CacheSerializer<String> STRING =
@@ -50,28 +49,16 @@ public class WriteAdmissionTest {
   }
 
   @Test
-  public void oversizePutThrowsInsteadOfReturningFalse() {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(128)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      expectThrows(
-          IllegalArgumentException.class, () -> cache.put("this-key-is-too-large", "value"));
-    }
-  }
-
-  @Test
-  public void capacityOversizeSkipsDefaultTtlAndNativeAdmission() throws Exception {
-    AtomicInteger serializedSizes = new AtomicInteger();
-    AtomicInteger currentTimeMillisCalls = new AtomicInteger();
-    Thread writer = Thread.currentThread();
-    CacheSerializer<String> countingValueSerializer =
+  public void reentrantPutFailsExplicitlyInsteadOfSilentlyDroppingTheNestedWrite() {
+    AtomicReference<OHCache<String, String>> holder = new AtomicReference<>();
+    CacheSerializer<String> reentrant =
         new CacheSerializer<String>() {
           @Override
           public void serialize(String value, ByteBuffer buffer) {
-            STRING.serialize(value, buffer);
+            if ("outer".equals(value)) {
+              holder.get().put("nested", "inner");
+            }
+            buffer.put(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
           }
 
           @Override
@@ -81,116 +68,18 @@ public class WriteAdmissionTest {
 
           @Override
           public int serializedSize(String value) {
-            serializedSizes.incrementAndGet();
             return STRING.serializedSize(value);
           }
         };
-    Ticker ticker =
-        new Ticker() {
-          @Override
-          public long nanos() {
-            return System.nanoTime();
-          }
-
-          @Override
-          public long currentTimeMillis() {
-            if (Thread.currentThread() == writer) {
-              currentTimeMillisCalls.incrementAndGet();
-            }
-            return 1_000_000L;
-          }
-        };
-
-    try (OffHeapCache<String, String> cache =
+    try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
-            .capacity(512)
-            .defaultTTLmillis(1_000L)
-            .ticker(ticker)
+            .capacity(1 << 20)
             .keySerializer(STRING)
-            .valueSerializer(countingValueSerializer)
-            .buildTyped()) {
-      assertTrue(cache.put("baseline", "value", 0L));
-      cache.flushAsync().join();
-      long allocatedBeforeOversize = cache.totalAllocatedBytes();
-      long reservedBeforeOversize = budgetReserved(cache);
-      serializedSizes.set(0);
-      currentTimeMillisCalls.set(0);
-      expectThrows(
-          IllegalArgumentException.class,
-          () -> cache.put("oversized", "x".repeat(4_096)));
-
-      assertEquals(serializedSizes.get(), 1);
-      assertEquals(currentTimeMillisCalls.get(), 0);
-      assertEquals(cache.totalAllocatedBytes(), allocatedBeforeOversize);
-      assertEquals(budgetReserved(cache), reservedBeforeOversize);
-      assertTrue(cache.put("baseline", "value"));
-    }
-  }
-
-  @Test
-  public void capacityOversizeReplacementSkipsDefaultTtlAndNativeAdmission() throws Exception {
-    AtomicInteger serializedSizes = new AtomicInteger();
-    AtomicInteger currentTimeMillisCalls = new AtomicInteger();
-    Thread writer = Thread.currentThread();
-    CacheSerializer<String> countingValueSerializer =
-        new CacheSerializer<String>() {
-          @Override
-          public void serialize(String value, ByteBuffer buffer) {
-            STRING.serialize(value, buffer);
-          }
-
-          @Override
-          public String deserialize(ByteBuffer buffer) {
-            return STRING.deserialize(buffer);
-          }
-
-          @Override
-          public int serializedSize(String value) {
-            serializedSizes.incrementAndGet();
-            return STRING.serializedSize(value);
-          }
-        };
-    Ticker ticker =
-        new Ticker() {
-          @Override
-          public long nanos() {
-            return System.nanoTime();
-          }
-
-          @Override
-          public long currentTimeMillis() {
-            if (Thread.currentThread() == writer) {
-              currentTimeMillisCalls.incrementAndGet();
-            }
-            return 1_000_000L;
-          }
-        };
-
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(512)
-            .defaultTTLmillis(1_000L)
-            .ticker(ticker)
-            .keySerializer(STRING)
-            .valueSerializer(countingValueSerializer)
-            .buildTyped()) {
-      assertTrue(cache.put("baseline", "value", 0L));
-      cache.flushAsync().join();
-      long allocatedBeforeOversize = cache.totalAllocatedBytes();
-      long reservedBeforeOversize = budgetReserved(cache);
-      serializedSizes.set(0);
-      currentTimeMillisCalls.set(0);
-
-      expectThrows(
-          IllegalArgumentException.class,
-          () -> cache.put("baseline", "x".repeat(4_096)));
-
-      assertEquals(serializedSizes.get(), 1);
-      assertEquals(currentTimeMillisCalls.get(), 0);
-      assertEquals(cache.totalAllocatedBytes(), allocatedBeforeOversize);
-      assertEquals(budgetReserved(cache), reservedBeforeOversize);
-      assertTrue(cache.put("baseline", "replacement"));
-      assertEquals(cache.get("baseline"), "replacement");
+            .valueSerializer(reentrant)
+            .build()) {
+      holder.set(cache);
+      expectThrows(IllegalStateException.class, () -> cache.put("outer", "outer"));
+      assertEquals(cache.size(), 0L);
     }
   }
 
@@ -202,7 +91,7 @@ public class WriteAdmissionTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped()) {
-      assertTrue(cache.put("seed", "value"));
+      cache.put("seed", "value");
       cache.flushAsync().join();
       AtomicReference<String> observed = new AtomicReference<>();
 
@@ -215,36 +104,36 @@ public class WriteAdmissionTest {
   }
 
   @Test
-  public void firstWriteUsesTheCacheFixedBudgetStripeSet() throws Exception {
+  public void oneLiveWriterKeepsOneExclusiveResource() throws Exception {
     try (OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped()) {
-      int before = budgetStripeCount(cache);
-      assertTrue(cache.put("first", "value"));
-      assertTrue(cache.put("second", "value"));
-      assertEquals(budgetStripeCount(cache), before);
+      int before = writerResourceCount(cache);
+      cache.put("first", "value");
+      cache.put("second", "value");
+      assertEquals(writerResourceCount(cache), before + 1);
     }
   }
 
   @Test
-  public void closeClearsReaderRegistryAndBudget() throws Exception {
+  public void closeClearsReaderRegistryAndNativeMemory() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    assertTrue(cache.put("key", "value"));
+    cache.put("key", "value");
     assertEquals(cache.get("key"), "value");
     assertTrue(readerCount(cache) > 0);
 
     cache.close();
 
     assertEquals(readerCount(cache), 0);
-    assertEquals(budgetReserved(cache), 0L);
+    assertEquals(cache.totalAllocatedBytes(), 0L);
   }
 
   @Test(timeOut = 30_000L)
@@ -261,7 +150,7 @@ public class WriteAdmissionTest {
         java.util.concurrent.Executors.newFixedThreadPool(2);
     java.util.concurrent.Future<Boolean> direct = null;
     try {
-      assertTrue(cache.put("key", "initial"));
+      cache.put("key", "initial");
       cache.flushAsync().join();
       direct =
           readers.submit(
@@ -280,22 +169,19 @@ public class WriteAdmissionTest {
                       }));
       assertTrue(entered.await(2L, java.util.concurrent.TimeUnit.SECONDS));
 
-      int attempts = Math.toIntExact(retirementQueueCapacity(cache)) + 64;
+      int attempts = 64;
       java.util.concurrent.Future<Integer> writer =
           readers.submit(
               () -> {
-                int accepted = 0;
                 for (int i = 0; i < attempts; i++) {
-                  if (cache.put("key", "value-" + i)) {
-                    accepted++;
-                  }
+                  cache.put("key", "value-" + i);
                 }
-                return accepted;
+                return attempts;
               });
-      assertTrue(
-          writer.get(8L, java.util.concurrent.TimeUnit.SECONDS) < attempts,
-          "writer must return bounded admission failures instead of waiting for the reader");
+      Thread.sleep(100L);
+      assertTrue(writer.isDone(), "writer must not wait for reader-backed retirement");
       release.countDown();
+      assertEquals(writer.get(8L, java.util.concurrent.TimeUnit.SECONDS).intValue(), attempts);
       assertTrue(direct.get(2L, java.util.concurrent.TimeUnit.SECONDS));
     } finally {
       release.countDown();
@@ -307,97 +193,10 @@ public class WriteAdmissionTest {
     }
   }
 
-  @Test
-  public void speculativeInsertPutsANewKey() {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .speculativeInsert(true)
-            .buildTyped()) {
-      assertTrue(cache.put("alpha", "one"));
-      assertEquals(cache.get("alpha"), "one");
-      assertEquals(cache.size(), 1L);
-    }
-  }
-
-  @Test
-  public void speculativeInsertOverwritesAnExistingKey() {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .speculativeInsert(true)
-            .buildTyped()) {
-      assertTrue(cache.put("k", "v1"));
-      assertTrue(cache.put("k", "v2"));
-      // The CAS-loss branch must free the candidate and replace the winner's value.
-      assertEquals(cache.get("k"), "v2");
-      assertEquals(cache.size(), 1L);
-    }
-  }
-
-  @Test(timeOut = 30_000L)
-  public void speculativeInsertConcurrentSameKeyConvergesToOneEntry() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .speculativeInsert(true)
-            .buildTyped()) {
-      int threads = 8;
-      java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-      java.util.List<Thread> workers = new java.util.ArrayList<>(threads);
-      for (int t = 0; t < threads; t++) {
-        final String value = "v" + t;
-        Thread worker =
-            new Thread(
-                () -> {
-                  try {
-                    start.await();
-                  } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                  }
-                  cache.put("shared", value);
-                });
-        workers.add(worker);
-        worker.start();
-      }
-      start.countDown();
-      for (Thread worker : workers) {
-        worker.join();
-      }
-      cache.flushAsync().join();
-      // Exactly one winner survives regardless of how many speculative candidates lost the CAS.
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.get("shared").length(), 2);
-    }
-  }
-
-  private static int budgetStripeCount(OffHeapCache<?, ?> cache) throws Exception {
-    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
-    budgetField.setAccessible(true);
-    Budget budget = (Budget) budgetField.get(cache);
-    Method count = Budget.class.getDeclaredMethod("stripeCount");
-    count.setAccessible(true);
-    return (Integer) count.invoke(budget);
-  }
-
-  private static long retirementQueueCapacity(OffHeapCache<?, ?> cache) throws Exception {
-    Field workerField = OffHeapCache.class.getDeclaredField("worker");
-    workerField.setAccessible(true);
-    com.red.ohc.maintenance.MaintenanceEventLoop worker =
-        (com.red.ohc.maintenance.MaintenanceEventLoop) workerField.get(cache);
-    return worker.retirementQueueCapacity();
-  }
-
-  private static long budgetReserved(OffHeapCache<?, ?> cache) throws Exception {
-    Field budgetField = OffHeapCache.class.getDeclaredField("budget");
-    budgetField.setAccessible(true);
-    return ((Budget) budgetField.get(cache)).reserved();
+  private static int writerResourceCount(OffHeapCache<?, ?> cache) throws Exception {
+    Field resourceField = OffHeapCache.class.getDeclaredField("writerResources");
+    resourceField.setAccessible(true);
+    return ((WriterResourceRegistry) resourceField.get(cache)).resourceCount();
   }
 
   private static int readerCount(OffHeapCache<?, ?> cache) throws Exception {

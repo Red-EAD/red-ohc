@@ -7,7 +7,7 @@ import com.sun.jna.Native;
 import com.red.ohc.api.AllocatorType;
 
 /** Owns the selected native allocation backend without cache-specific accounting. */
-public final class NativeAllocator {
+public class NativeAllocator {
   private final AllocatorType type;
 
   public NativeAllocator(AllocatorType type) {

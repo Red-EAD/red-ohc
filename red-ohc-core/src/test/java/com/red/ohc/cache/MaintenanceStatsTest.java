@@ -41,7 +41,7 @@ public final class MaintenanceStatsTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .build()) {
-      assertTrue(cache.put("key", "value"));
+      cache.put("key", "value");
       cache.flushAsync().join();
 
       OHCacheStats stats = cache.stats();
@@ -50,6 +50,43 @@ public final class MaintenanceStatsTest {
       assertTrue(stats.nativeAllocatedBytes() >= stats.liveWeight());
       assertTrue(stats.ttlBacklog() >= 0L);
       assertEquals(stats.maintenanceQueueDepth(), 0L);
+      assertTrue(stats.maintenancePassWorkNanos() >= 0L);
+      assertTrue(stats.maintenanceActiveNanosTotal() >= 0L);
+      assertTrue(stats.maintenanceParkNanosTotal() >= 0L);
+      assertTrue(stats.maintenanceImmediateContinuationCount() >= 0L);
+      assertTrue(stats.retirementQueueDepth() >= 0L);
+      assertTrue(stats.retirementSealRecordsTotal() >= 0L);
+      assertTrue(stats.retirementReclaimRecordsTotal() >= 0L);
+      assertTrue(stats.retirementSealScannedLanesTotal() >= 0L);
+      assertTrue(stats.retirementSealHeadOfLineStops() >= 0L);
+      assertTrue(stats.retirementReclaimBlockedCount() >= 0L);
+      assertTrue(stats.retirementReclaimBlockedNanos() >= 0L);
+      assertTrue(stats.retirementRetryWakeCount() >= 0L);
+      assertTrue(stats.activeReaderCount() >= 0L);
+      assertTrue(stats.asyncMutationQueueDepth() >= 0L);
+      assertTrue(stats.nativeDebtBudgetBytes() > 0L);
+      assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void nativeDebtBudgetIsDiagnosticOnlyAndDoesNotRejectWrites() {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .nativeMemoryBudgetBytes(8L << 10)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped()) {
+      cache.put("key", "initial");
+      for (int index = 0; index < 32; index++) {
+        cache.put("key", "value-" + index);
+      }
+
+      OHCacheStats stats = cache.stats();
+      assertEquals(stats.nativeDebtBudgetBytes(), 8L << 10);
+      assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
+      assertEquals(cache.get("key"), "value-31");
     }
   }
 }

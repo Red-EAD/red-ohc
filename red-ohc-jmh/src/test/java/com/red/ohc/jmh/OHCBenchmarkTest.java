@@ -5,8 +5,8 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
+import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
-import com.red.ohc.storage.WriterArena;
 
 public class OHCBenchmarkTest {
   @DataProvider(name = "allocationSizes")
@@ -15,15 +15,14 @@ public class OHCBenchmarkTest {
   }
 
   @Test(dataProvider = "allocationSizes")
-  public void capacityForMatchesAllocatorWeight(int keyBytes, int valueBytes) {
+  public void capacityForMatchesLogicalEntryBytes(int keyBytes, int valueBytes) {
     long capacity = OHCBenchmark.capacityFor("HIT_ONLY", keyBytes, valueBytes);
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
     long valueAllocation = ValueBlock.allocationLength(valueBytes);
-    long perEntryWeight =
-        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
-    long expected = 24_576L * perEntryWeight * 4L / 3L + perEntryWeight;
+    long perEntryBytes = CacheMath.logicalEntryBytes(keyAllocation, valueAllocation);
+    long expected = 24_576L * perEntryBytes * 4L / 3L + perEntryBytes;
 
     Assert.assertEquals(capacity, expected);
-    Assert.assertTrue(capacity / perEntryWeight >= 24_576L);
+    Assert.assertTrue(capacity / perEntryBytes >= 24_576L);
   }
 }

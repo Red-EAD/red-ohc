@@ -42,6 +42,50 @@ public final class NativeByteBufferTest {
   }
 
   @Test
+  public void rebindsAReadOnlyViewThroughTheTrustedThreadContextPath() {
+    NativeByteBuffer.verifySupported();
+    long firstAddress = NativeMemory.unsafe().allocateMemory(16L);
+    long secondAddress = NativeMemory.unsafe().allocateMemory(8L);
+    try {
+      ByteBuffer firstSource = NativeByteBuffer.writable(firstAddress, 16);
+      try {
+        firstSource.putLong(0x0102030405060708L);
+      } finally {
+        NativeByteBuffer.invalidate(firstSource);
+      }
+      ByteBuffer secondSource = NativeByteBuffer.writable(secondAddress, 8);
+      try {
+        secondSource.putLong(0x1112131415161718L);
+      } finally {
+        NativeByteBuffer.invalidate(secondSource);
+      }
+
+      ThreadContext context = new ThreadContext(null);
+      ByteBuffer outer = context.readOnlyValueBuffer(firstAddress, 16);
+      ByteBuffer inner = context.readOnlyValueBuffer(secondAddress, 8);
+      assertTrue(outer != inner);
+      assertEquals(outer.limit(), 16);
+      assertEquals(inner.limit(), 8);
+      context.releaseReadOnlyValueBuffer();
+      assertEquals(inner.limit(), 0);
+      assertEquals(outer.limit(), 16, "nested release must preserve the outer view");
+
+      context.releaseReadOnlyValueBuffer();
+      assertEquals(outer.limit(), 0, "callback return must invalidate the outer view");
+      ByteBuffer rebound = context.readOnlyValueBuffer(secondAddress, 8);
+      assertTrue(rebound == outer, "the first read-only shell must be reused across operations");
+      assertTrue(rebound.isReadOnly());
+      assertEquals(rebound.getLong(), 0x1112131415161718L);
+      expectThrows(java.nio.ReadOnlyBufferException.class, () -> rebound.put((byte) 1));
+      context.releaseReadOnlyValueBuffer();
+      assertEquals(rebound.limit(), 0);
+    } finally {
+      NativeMemory.unsafe().freeMemory(firstAddress);
+      NativeMemory.unsafe().freeMemory(secondAddress);
+    }
+  }
+
+  @Test
   public void exposesExistingNativeMemoryWithoutHeapArray() {
     NativeByteBuffer.verifySupported();
     long address = NativeMemory.unsafe().allocateMemory(16L);
@@ -86,6 +130,34 @@ public final class NativeByteBufferTest {
           IllegalArgumentException.class,
           () -> NativeByteBuffer.writable(foreign, address, 8));
     } finally {
+      NativeMemory.unsafe().freeMemory(address);
+    }
+  }
+
+  @Test
+  public void checkedReadOnlyRebindValidatesOwnerAndAddressBounds() {
+    NativeByteBuffer.verifySupported();
+    long address = NativeMemory.unsafe().allocateMemory(16L);
+    ByteBuffer foreign = ByteBuffer.allocateDirect(16);
+    ByteBuffer owned = NativeByteBuffer.readOnly(address, 16);
+    try {
+      expectThrows(
+          IllegalArgumentException.class,
+          () -> NativeByteBuffer.readOnly(foreign, address, 8));
+      expectThrows(
+          IllegalArgumentException.class,
+          () -> NativeByteBuffer.readOnly(owned, address, -1));
+      expectThrows(
+          IllegalArgumentException.class,
+          () -> NativeByteBuffer.readOnly(owned, 0L, 8));
+      expectThrows(
+          NullPointerException.class,
+          () -> NativeByteBuffer.readOnly((ByteBuffer) null, address, 8));
+
+      NativeByteBuffer.readOnly(owned, 0L, 0);
+      assertEquals(owned.limit(), 0);
+    } finally {
+      NativeByteBuffer.invalidate(owned);
       NativeMemory.unsafe().freeMemory(address);
     }
   }
