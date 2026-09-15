@@ -50,6 +50,8 @@ public final class NativeMemory {
     private final AtomicLong entryAllocations = new AtomicLong();
     private final AtomicLong pageAllocatedCount = new AtomicLong();
     private final LongAdder pageReusedCount = new LongAdder();
+    private final LongAdder retainedPageCount = new LongAdder();
+    private final LongAdder retainedPageConsumedCount = new LongAdder();
     private final LongAdder[] pageReadyCounts = newReadyPageCounts();
     private final AtomicLong pageTrimmedCount = new AtomicLong();
     private final AtomicLong smallAllocationFallbacks = new AtomicLong();
@@ -217,6 +219,14 @@ public final class NativeMemory {
       return pageReusedCount.sum();
     }
 
+    public long retainedPageCount() {
+      return retainedPageCount.sum();
+    }
+
+    public long retainedPageConsumedCount() {
+      return retainedPageConsumedCount.sum();
+    }
+
     public long pageReadyCount() {
       long ready = 0L;
       for (LongAdder count : pageReadyCounts) {
@@ -334,6 +344,24 @@ public final class NativeMemory {
       // Publish the diagnostic count before the token. A concurrent pop can observe the stack
       // immediately after the CAS, and must be able to balance the ready count.
       restoreReadyPage(page);
+    }
+
+    /** Publishes an owner-detached retained page directly to the shared ready stack. */
+    void publishAvailablePageGlobal(WriterArena.Page page) {
+      restoreReadyPage(page);
+    }
+
+    /** Cumulative observability events for the owner-private retention path. */
+    void recordRetainedPage() {
+      retainedPageCount.increment();
+    }
+
+    void recordRetainedPageConsumed() {
+      retainedPageConsumedCount.increment();
+    }
+
+    void recordPageReuse() {
+      pageReusedCount.increment();
     }
 
     private void restoreReadyPage(WriterArena.Page page) {

@@ -1066,6 +1066,184 @@ public class WriterArenaTest {
     }
   }
 
+  @Test
+  public void partiallyFreedPageIsRetainedByItsLiveOwnerWithoutTheSharedStack() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    List<Long> entries = new ArrayList<>();
+    long[] firstPageEntries = new long[0];
+    try {
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena source = memory.newWriterArena();
+      firstPageEntries = new long[slotsPerPage];
+      for (int index = 0; index < slotsPerPage; index++) {
+        firstPageEntries[index] = source.allocate(bytes);
+      }
+      // The next allocation exhausts the first page and starts a second one.
+      long secondPageEntry = source.allocate(bytes);
+      entries.add(secondPageEntry);
+      long pagesBefore = memory.pageAllocatedCount();
+      long readyBefore = memory.pageReadyCount();
+      long retainedBefore = memory.retainedPageCount();
+      // Free half the slots: the page still owns live slots, so its owner retains it instead of
+      // publishing to the shared ready stack.
+      for (int index = 0; index < slotsPerPage / 2; index++) {
+        memory.releaseEntry(firstPageEntries[index], bytes);
+      }
+      for (int index = slotsPerPage / 2; index < slotsPerPage; index++) {
+        entries.add(firstPageEntries[index]);
+      }
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore);
+      Assert.assertEquals(memory.retainedPageCount(), retainedBefore + 1L);
+      // Fill the second page so the next allocation must look for another page.
+      for (int index = 1; index < slotsPerPage; index++) {
+        entries.add(source.allocate(bytes));
+      }
+      long reusedBefore = memory.pageReusedCount();
+      long consumedBefore = memory.retainedPageConsumedCount();
+      long retainedReuse = source.allocate(bytes);
+      entries.add(retainedReuse);
+      Assert.assertNotEquals(retainedReuse, 0L);
+      // The owner consumed its retained page without a fresh page or shared-stack traffic.
+      Assert.assertEquals(memory.pageAllocatedCount(), pagesBefore);
+      Assert.assertEquals(memory.pageReusedCount(), reusedBefore + 1L);
+      Assert.assertEquals(memory.retainedPageConsumedCount(), consumedBefore + 1L);
+    } finally {
+      for (long entry : entries) {
+        memory.releaseEntry(entry, 112L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void retainedPageOverflowSpillsToTheSharedReadyStack() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    List<Long> entries = new ArrayList<>();
+    try {
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena source = memory.newWriterArena();
+      long[][] pageEntries = new long[WriterArena.RETAINED_PAGE_LIMIT + 1][slotsPerPage];
+      for (int page = 0; page < pageEntries.length; page++) {
+        for (int slot = 0; slot < slotsPerPage; slot++) {
+          pageEntries[page][slot] = source.allocate(bytes);
+        }
+      }
+      // One more allocation exhausts the last filled page, so every freed page is non-current.
+      entries.add(source.allocate(bytes));
+      long pagesBefore = memory.pageAllocatedCount();
+      long readyBefore = memory.pageReadyCount();
+      long retainedBefore = memory.retainedPageCount();
+      // Free half the slots of every filled page: each stays partially live, so each is retained
+      // until the owner's slots are full; the page beyond the limit spills to the shared stack.
+      for (int page = 0; page < pageEntries.length; page++) {
+        for (int slot = 0; slot < slotsPerPage / 2; slot++) {
+          memory.releaseEntry(pageEntries[page][slot], bytes);
+        }
+        for (int slot = slotsPerPage / 2; slot < slotsPerPage; slot++) {
+          entries.add(pageEntries[page][slot]);
+        }
+      }
+      Assert.assertEquals(
+          memory.retainedPageCount(), retainedBefore + WriterArena.RETAINED_PAGE_LIMIT);
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore + 1L);
+      // Another arena steals exactly the spilled page without a fresh allocation.
+      long reusedBefore = memory.pageReusedCount();
+      WriterArena target = memory.newWriterArena();
+      long stolen = target.allocate(bytes);
+      entries.add(stolen);
+      Assert.assertNotEquals(stolen, 0L);
+      Assert.assertEquals(memory.pageAllocatedCount(), pagesBefore);
+      Assert.assertEquals(memory.pageReusedCount(), reusedBefore + 1L);
+    } finally {
+      for (long entry : entries) {
+        memory.releaseEntry(entry, 112L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void completelyFreedPageLeavesRetentionAndStaysTrimmable() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    List<Long> entries = new ArrayList<>();
+    try {
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena source = memory.newWriterArena();
+      long[] firstPageEntries = new long[slotsPerPage];
+      for (int index = 0; index < slotsPerPage; index++) {
+        firstPageEntries[index] = source.allocate(bytes);
+      }
+      long secondPageEntry = source.allocate(bytes);
+      entries.add(secondPageEntry);
+      long readyBefore = memory.pageReadyCount();
+      long trimmedBefore = memory.pageTrimmedCount();
+      // Free every slot of the first page: with no live slots left the page must leave owner
+      // retention and reach the shared ready stack so allocation pressure can trim it.
+      for (long entry : firstPageEntries) {
+        memory.releaseEntry(entry, bytes);
+      }
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore + 1L);
+      memory.trimAvailablePages();
+      Assert.assertEquals(memory.pageTrimmedCount(), trimmedBefore + 1L);
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore);
+    } finally {
+      for (long entry : entries) {
+        memory.releaseEntry(entry, 112L);
+      }
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void detachPublishesRetainedAndCurrentPagesToTheSharedStack() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    List<Long> entries = new ArrayList<>();
+    try {
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int slotsPerPage = SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass);
+      WriterArena source = memory.newWriterArena();
+      long[] firstPageEntries = new long[slotsPerPage];
+      for (int index = 0; index < slotsPerPage; index++) {
+        firstPageEntries[index] = source.allocate(bytes);
+      }
+      long secondPageEntry = source.allocate(bytes);
+      entries.add(secondPageEntry);
+      long readyBefore = memory.pageReadyCount();
+      // Free half the first page so the owner retains it.
+      for (int index = 0; index < slotsPerPage / 2; index++) {
+        memory.releaseEntry(firstPageEntries[index], bytes);
+      }
+      for (int index = slotsPerPage / 2; index < slotsPerPage; index++) {
+        entries.add(firstPageEntries[index]);
+      }
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore);
+      source.detach();
+      // The retained page and the partially filled current page both reach the shared stack.
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore + 2L);
+      long pagesBefore = memory.pageAllocatedCount();
+      long reusedBefore = memory.pageReusedCount();
+      WriterArena target = memory.newWriterArena();
+      long stolen = target.allocate(bytes);
+      entries.add(stolen);
+      Assert.assertNotEquals(stolen, 0L);
+      Assert.assertEquals(memory.pageAllocatedCount(), pagesBefore);
+      Assert.assertEquals(memory.pageReusedCount(), reusedBefore + 1L);
+      Assert.assertEquals(memory.pageReadyCount(), readyBefore + 1L);
+    } finally {
+      for (long entry : entries) {
+        memory.releaseEntry(entry, 112L);
+      }
+      memory.closeArenas();
+    }
+  }
+
   private static void await(CountDownLatch latch) {
     try {
       latch.await(2L, TimeUnit.SECONDS);

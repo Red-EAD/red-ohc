@@ -79,6 +79,8 @@ public final class WriterResource {
     }
     registrationVersion = version;
     cut = false;
+    // Retirement sealed the arena's retention slots; a re-activated writer must retain again.
+    arena.reopenRetention();
     STATE.setRelease(this, ACTIVE);
   }
 

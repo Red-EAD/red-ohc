@@ -2,6 +2,7 @@ package com.red.ohc.storage;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 /**
  * One writer-owned allocator. Allocation is single-consumer while native retirement may return
@@ -22,6 +23,12 @@ public final class WriterArena {
   private static final int HANDLE_PAGE_SHIFT = HANDLE_SLOT_BITS;
   private static final VarHandle SIZE_CLASS_STATE =
       MethodHandles.arrayElementVarHandle(SizeClassState[].class);
+
+  /** Owner-private retention depth per size class before pages spill to the shared ready stack. */
+  static final int RETAINED_PAGE_LIMIT = 4;
+
+  /** Sentinel that permanently seals a retained slot after its owner detached. */
+  private static final Page RETENTION_CLOSED_PAGE = new Page(null, 0, 0L, 0L, 0, 1, 1);
 
   private final NativeMemory.Memory memory;
   private final int id;
@@ -50,7 +57,10 @@ public final class WriterArena {
     for (;;) {
       Page page = ownerClass.currentPage;
       if (page == null) {
-        page = memory.tryStealAvailablePage(sizeClass, ownerClass);
+        page = pollRetainedOwnerPage(ownerClass);
+        if (page == null) {
+          page = memory.tryStealAvailablePage(sizeClass, ownerClass);
+        }
         if (page == null) {
           try {
             page = memory.tryAcquireEntryPage(sizeClass, ownerClass);
@@ -90,6 +100,20 @@ public final class WriterArena {
     }
   }
 
+  /** Takes an owner-retained available page without touching the shared ready stack. */
+  private Page pollRetainedOwnerPage(SizeClassState ownerClass) {
+    Page page = ownerClass.pollRetainedPage();
+    if (page == null) {
+      return null;
+    }
+    if (!page.tryActivate(ownerClass)) {
+      // Only this owner can activate a retained page; reaching here means an invariant broke.
+      throw new IllegalStateException("retained page is not activatable by its owner");
+    }
+    memory.recordPageReuse();
+    return page;
+  }
+
   /** QSBR reclaim returns a slot to the page's current owner. */
   public void remoteFree(long block, int sizeClass) {
     long handle = NativeMemory.getLong(block + 56L);
@@ -105,19 +129,15 @@ public final class WriterArena {
   }
 
   void completeRemoteFree(Page page, int remaining) {
-    try {
-      if (remaining == 0) {
-        Runnable hook = retirementHookForTest;
-        if (hook != null) {
-          hook.run();
-        }
-      }
-    } finally {
-      // The slot list has already been linked into the page's free list before the optional test
-      // hook runs. Keep the page discoverable even when that hook deliberately throws: the
-      // retirement caller will retry its cleared records, while future allocations must still
-      // be able to observe the newly available page.
-      page.publishAvailableAfterRemoteFree();
+    // Publish before the optional test hook so a racing trim still sees the page.
+    page.publishAvailableAfterRemoteFree();
+    if (remaining == 0) {
+      // A completely free page must not stay hidden in owner retention.
+      page.releaseRetentionToSharedStack();
+    }
+    Runnable hook = retirementHookForTest;
+    if (hook != null) {
+      hook.run();
     }
   }
 
@@ -135,6 +155,17 @@ public final class WriterArena {
       sizeClass.currentPage = null;
       if (page != null) {
         page.detachOwner();
+      }
+      // Seal every slot so no remote free can strand a page on a detached arena.
+      sizeClass.closeRetention();
+    }
+  }
+
+  /** Reopens retention after this arena's writer resource is re-activated from the pool. */
+  public void reopenRetention() {
+    for (SizeClassState sizeClass : sizeClasses) {
+      if (sizeClass != null) {
+        sizeClass.reopenRetention();
       }
     }
   }
@@ -176,10 +207,79 @@ public final class WriterArena {
     final WriterArena arena;
     final int sizeClass;
     Page currentPage;
+    /** Owner-private available pages; overflow still reaches the shared ready stack. */
+    private final AtomicReferenceArray<Page> retainedPages =
+        new AtomicReferenceArray<>(RETAINED_PAGE_LIMIT);
 
     SizeClassState(WriterArena arena, int sizeClass) {
       this.arena = arena;
       this.sizeClass = sizeClass;
+    }
+
+    /** Offers a just-published available page to the owner; false means spill to the shared stack. */
+    boolean tryRetainPage(Page page) {
+      for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
+        if (retainedPages.compareAndSet(slot, null, page)) {
+          arena.memory.recordRetainedPage();
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** Takes one retained page for the owner's next allocation; null when nothing is retained. */
+    Page pollRetainedPage() {
+      for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
+        Page page = retainedPages.get(slot);
+        if (page == null || page == RETENTION_CLOSED_PAGE) {
+          continue;
+        }
+        if (retainedPages.compareAndSet(slot, page, null)) {
+          arena.memory.recordRetainedPageConsumed();
+          return page;
+        }
+      }
+      return null;
+    }
+
+    /** Removes one specific page from retention so it becomes shared-stack visible again. */
+    boolean tryReleaseRetainedPage(Page page) {
+      for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
+        if (retainedPages.get(slot) == page
+            && retainedPages.compareAndSet(slot, page, null)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** Clears the closed sentinel so a recycled arena's owner can retain pages again. */
+    void reopenRetention() {
+      for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
+        retainedPages.compareAndSet(slot, RETENTION_CLOSED_PAGE, null);
+      }
+    }
+
+    /** Seals every retained slot after the owner stopped allocating; claimed pages go shared. */
+    void closeRetention() {
+      for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
+        for (;;) {
+          Page page = retainedPages.get(slot);
+          if (page == RETENTION_CLOSED_PAGE) {
+            break;
+          }
+          if (page == null) {
+            if (retainedPages.compareAndSet(slot, null, RETENTION_CLOSED_PAGE)) {
+              break;
+            }
+            continue;
+          }
+          if (retainedPages.compareAndSet(slot, page, RETENTION_CLOSED_PAGE)) {
+            arena.memory.publishAvailablePageGlobal(page);
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -443,9 +543,8 @@ public final class WriterArena {
       if (state() != FULL) {
         return;
       }
-      SizeClassState availableOwner = ownerClass;
       if (STATE.compareAndSet(this, FULL, AVAILABLE)) {
-        publishAvailable(availableOwner);
+        publishAvailable();
       }
     }
 
@@ -457,15 +556,34 @@ public final class WriterArena {
       if (state() != FULL || !hasFreeSlot()) {
         return;
       }
-      SizeClassState availableOwner = ownerClass;
       if (!STATE.compareAndSet(this, FULL, AVAILABLE)) {
         return;
       }
-      publishAvailable(availableOwner);
+      publishAvailable();
     }
 
-    private void publishAvailable(SizeClassState availableOwner) {
-      availableOwner.arena.memory.publishAvailablePage(this);
+    private void publishAvailable() {
+      // Read the owner after the FULL->AVAILABLE CAS won; a pre-CAS snapshot could be stale.
+      SizeClassState owner = ownerClass;
+      // Retain only pages with live slots; completely free pages must stay trimmable.
+      if (hasLiveSlots() && owner.tryRetainPage(this)) {
+        if (!hasLiveSlots()) {
+          // The page completed freeing while retaining; hand it to the shared stack.
+          if (owner.tryReleaseRetainedPage(this)) {
+            owner.arena.memory.publishAvailablePageGlobal(this);
+          }
+        }
+        return;
+      }
+      owner.arena.memory.publishAvailablePage(this);
+    }
+
+    /** Moves an owner-retained copy of this page back to the shared ready stack. */
+    private void releaseRetentionToSharedStack() {
+      SizeClassState owner = ownerClass;
+      if (owner != null && owner.tryReleaseRetainedPage(this)) {
+        owner.arena.memory.publishAvailablePageGlobal(this);
+      }
     }
 
     boolean tryActivate(SizeClassState expectedOwner) {
@@ -505,6 +623,10 @@ public final class WriterArena {
 
     private boolean hasFreeSlot() {
       return freeSummary() != 0L || nextSlot < slotCount;
+    }
+
+    private boolean hasLiveSlots() {
+      return (long) ALLOCATED_SLOTS.getAcquire(this) != (long) FREED_SLOTS.getAcquire(this);
     }
 
     private int popFreeSlot() {
