@@ -93,6 +93,21 @@ public final class MaintenanceEventLoop
   private boolean mailboxFenceBlocked;
   /** The most recent flush marker consumed by the actor; extensions reuse its future. */
   private FlushRequest lastConsumedFlushMarker;
+  /**
+   * Capacity-phase outcome diagnostics (P0). Every selected victim lands in exactly one bucket:
+   * REMOVED (full removeFromMap), LOCKED (writer-held, deferred), DROPPED_UNMAPPED (dead
+   * victim whose CHM unlink already completed - legitimate policy cleanup), SKIPPED_MAPPED
+   * (dead victim still mapped: its own removal protocol owns the CHM unlink, so the actor
+   * defers instead of unlinking it out from under that protocol), or SCAN_EMPTY/SCAN_RETRY
+   * (selection found nothing). DroppedUnmapped vs skippedMapped is the divergence signature.
+   */
+  private final AtomicLong capacityVictimsRemoved = new AtomicLong();
+  private final AtomicLong capacityVictimsLocked = new AtomicLong();
+  private final AtomicLong capacityVictimsDroppedUnmapped = new AtomicLong();
+  private final AtomicLong capacityVictimsSkippedMapped = new AtomicLong();
+  private final AtomicLong capacityScanEmpty = new AtomicLong();
+  private final AtomicLong capacityScanRetry = new AtomicLong();
+
   private final AtomicLong asyncSubmitted = new AtomicLong();
   private final AtomicLong asyncFailed = new AtomicLong();
   private final AtomicLong asyncRejected = new AtomicLong();
@@ -1574,8 +1589,13 @@ public final class MaintenanceEventLoop
     WriterLifecycleJournal lifecycle = writerLifecycleJournal;
     int lifecycleDemand =
         plan.removals
-            ? boundedWorkCount(
-                Math.max(1L, lifecycle == null ? 0L : lifecycle.lagRecords()))
+            // Demand above one turn's hard cap is unprocessable this turn anyway; letting it
+            // into the fair-share division only starves the capacity phase in proportion to
+            // the backlog - the exact self-reinforcing divergence amplifier.
+            ? Math.min(
+                LIFECYCLE_MAX_PER_TURN,
+                boundedWorkCount(
+                    Math.max(1L, lifecycle == null ? 0L : lifecycle.lagRecords())))
             : 0;
     int capacityDemand = plan.capacity ? CAPACITY_MAX_PER_TURN : 0;
     boolean retirementPending =
@@ -1691,18 +1711,33 @@ public final class MaintenanceEventLoop
       if (victim == null) {
         if (selection.kind == MaintenancePolicy.Selection.Kind.SCAN_EXHAUSTED
             && attempts < attemptBudget) {
+          capacityScanRetry.incrementAndGet();
           continue;
         }
+        capacityScanEmpty.incrementAndGet();
         scheduleCapacityRetry();
         break;
       }
       long taggedValue = victim.valueAddress;
       long value = Entry.rawValueAddress(taggedValue);
       if (!victim.isAlive() || victim.isLogicallyAbsent() || value == 0L) {
+        // A dead victim may still be mapped: its own removal protocol (writer remove, expiry,
+        // or a queued lifecycle record) owns the CHM unlink. Unlinking it here would orphan a
+        // mapped entry out of the policy - invisible to every future selection - so only
+        // unlink once the mapping is verifiably gone; otherwise defer via skipLocked so the
+        // tail selection moves on without losing the victim.
+        if (isMappedEntry(victim)) {
+          capacityVictimsSkippedMapped.incrementAndGet();
+          policy.skipLocked(victim);
+          attempts++;
+          continue;
+        }
+        capacityVictimsDroppedUnmapped.incrementAndGet();
         policy.remove(victim, false);
         continue;
       }
       if (victim.isWriterLocked()) {
+        capacityVictimsLocked.incrementAndGet();
         capacityBlockedEntry = victim;
         capacityBlocked = true;
         scheduleCapacityRetry();
@@ -1717,6 +1752,7 @@ public final class MaintenanceEventLoop
           taggedValue,
           RemovalCause.SIZE)) {
         removed++;
+        capacityVictimsRemoved.incrementAndGet();
         // The shared LongAdder is updated by the logical-absent transition. Keep this actor-local
         // sample in step without paying for a contended exact sum after every victim.
         admission.actorSubtractReleasedCharge(victimCharge);
@@ -1726,6 +1762,7 @@ public final class MaintenanceEventLoop
         continue;
       }
       if (victim.isWriterLocked()) {
+        capacityVictimsLocked.incrementAndGet();
         capacityBlockedEntry = victim;
         capacityBlocked = true;
         scheduleCapacityRetry();
@@ -1733,10 +1770,19 @@ public final class MaintenanceEventLoop
       }
       if (!victim.isAlive()
           || victim.isLogicallyAbsent()
-          || Entry.rawValueAddress(victim.valueAddress) == 0L
-          || !isMappedEntry(victim)) {
+          || Entry.rawValueAddress(victim.valueAddress) == 0L) {
+        // Same rule as the selection-time drop: only unlink once the mapping is verifiably
+        // gone; a still-mapped dead victim stays linked and selectable for its own protocol.
+        if (isMappedEntry(victim)) {
+          capacityVictimsSkippedMapped.incrementAndGet();
+          policy.skipLocked(victim);
+          attempts++;
+          continue;
+        }
+        capacityVictimsDroppedUnmapped.incrementAndGet();
         policy.remove(victim, false);
       } else {
+        capacityVictimsSkippedMapped.incrementAndGet();
         policy.skipLocked(victim);
         scheduleCapacityRetry();
         break;
