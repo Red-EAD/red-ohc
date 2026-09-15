@@ -7,7 +7,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
-import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.LongAdder;
 
 import sun.misc.Unsafe;
@@ -38,6 +37,14 @@ public final class NativeMemory {
     } catch (ReflectiveOperationException e) {
       throw new ExceptionInInitializerError(e);
     }
+  }
+
+  private static final long OBJECT_ARRAY_BASE = U.arrayBaseOffset(Object[].class);
+  private static final long OBJECT_ARRAY_SCALE = U.arrayIndexScale(Object[].class);
+
+  /** Volatile-access element offset valid for any reference array. */
+  private static long objectArrayOffset(int index) {
+    return OBJECT_ARRAY_BASE + (long) index * OBJECT_ARRAY_SCALE;
   }
 
   private NativeMemory() {}
@@ -81,8 +88,7 @@ public final class NativeMemory {
     private final IntChunkTable freePageIdNext = new IntChunkTable();
     private final IntChunkTable readyPageNext = new IntChunkTable();
     private final IntChunkTable pageVersions = new IntChunkTable();
-    private final AtomicReferenceArray<AtomicReferenceArray<WriterArena.Page>> pageChunks =
-        new AtomicReferenceArray<>(PAGE_CHUNK_COUNT);
+    private final WriterArena.Page[][] pageChunks = new WriterArena.Page[PAGE_CHUNK_COUNT][];
     private final AtomicInteger pooledPageCount = new AtomicInteger();
 
     public Memory(AllocatorType type) {
@@ -760,13 +766,15 @@ public final class NativeMemory {
           // The page-table pass below owns the physical free; popping only removes the token.
         }
       }
-      for (int chunkIndex = 0; chunkIndex < pageChunks.length(); chunkIndex++) {
-        AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(chunkIndex);
+      for (int chunkIndex = 0; chunkIndex < pageChunks.length; chunkIndex++) {
+        WriterArena.Page[] chunk =
+            (WriterArena.Page[]) U.getObjectVolatile(pageChunks, objectArrayOffset(chunkIndex));
         if (chunk == null) {
           continue;
         }
-        for (int slot = 0; slot < chunk.length(); slot++) {
-          WriterArena.Page page = chunk.get(slot);
+        for (int slot = 0; slot < chunk.length; slot++) {
+          WriterArena.Page page =
+              (WriterArena.Page) U.getObjectVolatile(chunk, objectArrayOffset(slot));
           if (page != null) {
             freeEntryPage(page, true);
           }
@@ -923,25 +931,34 @@ public final class NativeMemory {
     }
 
     void registerPage(WriterArena.Page page) {
+      if ((page.id & ~WriterArena.PAGE_ID_MASK) != 0) {
+        throw new IllegalStateException("page id outside the table namespace: " + page.id);
+      }
       int chunkIndex = page.id >>> PAGE_CHUNK_BITS;
-      AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(chunkIndex);
+      WriterArena.Page[] chunk =
+          (WriterArena.Page[]) U.getObjectVolatile(pageChunks, objectArrayOffset(chunkIndex));
       if (chunk == null) {
-        AtomicReferenceArray<WriterArena.Page> created =
-            new AtomicReferenceArray<>(PAGE_CHUNK_SIZE);
-        if (!pageChunks.compareAndSet(chunkIndex, null, created)) {
-          created = pageChunks.get(chunkIndex);
+        WriterArena.Page[] created = new WriterArena.Page[PAGE_CHUNK_SIZE];
+        if (!U.compareAndSwapObject(pageChunks, objectArrayOffset(chunkIndex), null, created)) {
+          created =
+              (WriterArena.Page[])
+                  U.getObjectVolatile(pageChunks, objectArrayOffset(chunkIndex));
         }
         chunk = created;
       }
-      if (!chunk.compareAndSet(page.id & (PAGE_CHUNK_SIZE - 1), null, page)) {
+      if (!U.compareAndSwapObject(
+          chunk, objectArrayOffset(page.id & (PAGE_CHUNK_SIZE - 1)), null, page)) {
         throw new IllegalStateException("duplicate native page id " + page.id);
       }
     }
 
     void unregisterPage(WriterArena.Page page) {
-      AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(page.id >>> PAGE_CHUNK_BITS);
+      WriterArena.Page[] chunk =
+          (WriterArena.Page[])
+              U.getObjectVolatile(pageChunks, objectArrayOffset(page.id >>> PAGE_CHUNK_BITS));
       if (chunk != null) {
-        chunk.compareAndSet(page.id & (PAGE_CHUNK_SIZE - 1), page, null);
+        U.compareAndSwapObject(
+            chunk, objectArrayOffset(page.id & (PAGE_CHUNK_SIZE - 1)), page, null);
       }
     }
 
@@ -956,8 +973,14 @@ public final class NativeMemory {
     }
 
     private WriterArena.Page pageForId(int pageId) {
-      AtomicReferenceArray<WriterArena.Page> chunk = pageChunks.get(pageId >>> PAGE_CHUNK_BITS);
-      return chunk == null ? null : chunk.get(pageId & (PAGE_CHUNK_SIZE - 1));
+      WriterArena.Page[] chunk =
+          (WriterArena.Page[])
+              U.getObjectVolatile(pageChunks, objectArrayOffset(pageId >>> PAGE_CHUNK_BITS));
+      if (chunk == null) {
+        return null;
+      }
+      return (WriterArena.Page)
+          U.getObjectVolatile(chunk, objectArrayOffset(pageId & (PAGE_CHUNK_SIZE - 1)));
     }
 
     private long takeFreePageId() {
@@ -996,11 +1019,12 @@ public final class NativeMemory {
       private static final int CHUNK_SIZE = 1 << CHUNK_BITS;
       private static final int CHUNK_COUNT =
           1 << (WriterArena.HANDLE_PAGE_BITS - CHUNK_BITS);
-      private final AtomicReferenceArray<AtomicIntegerArray> chunks =
-          new AtomicReferenceArray<>(CHUNK_COUNT);
+      private final AtomicIntegerArray[] chunks = new AtomicIntegerArray[CHUNK_COUNT];
 
       int get(int index) {
-        AtomicIntegerArray chunk = chunks.get(index >>> CHUNK_BITS);
+        AtomicIntegerArray chunk =
+            (AtomicIntegerArray)
+                U.getObjectVolatile(chunks, objectArrayOffset(index >>> CHUNK_BITS));
         return chunk == null ? 0 : chunk.get(index & (CHUNK_SIZE - 1));
       }
 
@@ -1018,13 +1042,14 @@ public final class NativeMemory {
 
       private AtomicIntegerArray ensureChunk(int index) {
         int chunkIndex = index >>> CHUNK_BITS;
-        AtomicIntegerArray chunk = chunks.get(chunkIndex);
+        AtomicIntegerArray chunk =
+            (AtomicIntegerArray) U.getObjectVolatile(chunks, objectArrayOffset(chunkIndex));
         if (chunk != null) {
           return chunk;
         }
         AtomicIntegerArray created = new AtomicIntegerArray(CHUNK_SIZE);
-        if (!chunks.compareAndSet(chunkIndex, null, created)) {
-          return chunks.get(chunkIndex);
+        if (!U.compareAndSwapObject(chunks, objectArrayOffset(chunkIndex), null, created)) {
+          return (AtomicIntegerArray) U.getObjectVolatile(chunks, objectArrayOffset(chunkIndex));
         }
         return created;
       }

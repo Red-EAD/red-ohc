@@ -14,7 +14,6 @@ import java.lang.reflect.Modifier;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
-import java.util.concurrent.atomic.AtomicReferenceArray;
 
 import org.testng.annotations.Test;
 
@@ -143,11 +142,11 @@ public class PageIdReuseTest {
       Object readyNext = readyNextField.get(memory);
       Field chunksField = readyNext.getClass().getDeclaredField("chunks");
       chunksField.setAccessible(true);
-      AtomicReferenceArray<?> chunks = (AtomicReferenceArray<?>) chunksField.get(readyNext);
+      AtomicIntegerArray[] chunks = (AtomicIntegerArray[]) chunksField.get(readyNext);
       assertTrue(
-          chunks.length() <= 1 << 12,
+          chunks.length <= 1 << 12,
           "ready-link outer storage must be bounded to the 24-bit page-id namespace");
-      AtomicIntegerArray prepared = (AtomicIntegerArray) chunks.get(0);
+      AtomicIntegerArray prepared = chunks[0];
       assertNotNull(
           prepared,
           "a live page must never reach the allocation-free ready publication path unprepared");
@@ -155,7 +154,7 @@ public class PageIdReuseTest {
           prepared.length() <= 1 << 12,
           "the first pooled page must not allocate a 256 KiB ready-link chunk");
       assertEquals(
-          (long) chunks.length() * prepared.length(),
+          (long) chunks.length * prepared.length(),
           1L << WriterArena.HANDLE_PAGE_BITS,
           "ready-link storage must cover exactly the valid page-id namespace");
     } finally {
