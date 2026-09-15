@@ -134,10 +134,10 @@ public final class WriterArena {
     if (remaining == 0) {
       // A completely free page must not stay hidden in owner retention.
       page.releaseRetentionToSharedStack();
-    }
-    Runnable hook = retirementHookForTest;
-    if (hook != null) {
-      hook.run();
+      Runnable hook = retirementHookForTest;
+      if (hook != null) {
+        hook.run();
+      }
     }
   }
 
