@@ -3492,7 +3492,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void resourceSweepContinuesAfterPartialPoolingWithoutAnotherWake() throws Exception {
+  public void resourceSweepCompletesTheReadySetWithoutAnotherWake() throws Exception {
     assertResourceSweepContinuation(false);
   }
 
@@ -3527,26 +3527,21 @@ public class MaintenanceEventLoopTest {
       }
       consumeCancelledLifecycle(second, secondSequence);
       resources.requestRetirementScan();
-      forceMinimumWorkQuota(loop);
 
       invokeMaintenancePass(loop);
-      assertEquals(resources.pooledCount(), blockedHead ? 0 : 1);
-      assertTrue(invokeBooleanMethod(loop, "hasRunnableWork"),
-          "the unvisited part of the resource sweep must keep the actor runnable");
-      assertTrue(invokeBooleanMethod(loop, "hasShutdownWork"),
-          "shutdown must also finish the bounded resource sweep");
-      // Resume through the real run loop: it must accept the resource-only WorkPlan before
-      // calling maintenancePass, and it must park after scanning the fixed boundary.
+      // Fixed per-phase quanta: one bounded sweep covers the whole ready set, so the
+      // resources behind a blocked head pool in the same pass instead of waiting for a
+      // continuation turn. A partial sweep now requires more retiring resources than the
+      // advisory hard cap.
+      assertEquals(resources.pooledCount(), blockedHead ? 1 : 2);
+      // Resume through the real run loop: it must drain the resource-owned retirement work
+      // from the pooled resources and park once the registry is quiet.
       loop.start();
-      int expectedPooled = blockedHead ? 1 : 2;
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-      while ((resources.pooledCount() != expectedPooled || !loop.isParked())
-          && System.nanoTime() < deadline) {
+      while (!loop.isParked() && System.nanoTime() < deadline) {
         Thread.yield();
       }
-      assertEquals(resources.pooledCount(), expectedPooled,
-          "the real actor must execute the remaining resource-only maintenance plan");
-      assertTrue(loop.isParked(), "the actor must park after a fully blocked or completed sweep");
+      assertTrue(loop.isParked(), "the actor must park after a completed or fully blocked sweep");
       if (blockedHead) {
         first.lifecycleLane().cancel(firstSequence);
         deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
@@ -3802,14 +3797,18 @@ public class MaintenanceEventLoopTest {
       int ttlQuota = intField(plan, "ttlQuota");
       int readerLifecycleQuota = intField(plan, "readerLifecycleQuota");
       int advisoryQuota = intField(plan, "advisoryQuota");
-      MaintenanceBudgetController controller =
-          (MaintenanceBudgetController) getField(loop, "maintenanceBudgetController");
-      assertTrue(
-          accessQuota + ttlQuota + advisoryQuota <= controller.workQuota(),
-          "access and TTL must not be counted again inside the shared advisory quota");
+      assertTrue(accessQuota > 0, "access keeps its own bounded quota");
+      assertTrue(ttlQuota > 0, "ttl keeps its own bounded quota");
       assertTrue(
           readerLifecycleQuota >= 1,
           "reader lifecycle must retain a minimum quota while its sweep is active");
+      Object ghostOnlyPlan = workPlanConstructor.newInstance();
+      setBooleanField(ghostOnlyPlan, "ghostRehash", true);
+      prepare.invoke(loop, ghostOnlyPlan, turn);
+      assertEquals(
+          advisoryQuota,
+          intField(ghostOnlyPlan, "advisoryQuota"),
+          "access and TTL must not be counted again inside the shared advisory quota");
 
       Object readerOnlyPlan = workPlanConstructor.newInstance();
       setBooleanField(readerOnlyPlan, "readerLifecycle", true);

@@ -1587,92 +1587,55 @@ public final class MaintenanceEventLoop
 
   private void prepareMaintenanceQuotas(WorkPlan plan, TurnCuts turn) {
     WriterLifecycleJournal lifecycle = writerLifecycleJournal;
-    int lifecycleDemand =
+    // Fixed per-phase quanta: a phase runs its full bounded cap whenever its source has work.
+    // The previous fair-share division scaled every quota by an EWMA unit-cost estimate. A
+    // heavy reclaim window collapsed that estimate for ~700ms and divided the capacity phase
+    // down to a fraction of its cap while the backlog kept growing - the self-reinforcing
+    // divergence amplifier - while an optimistic estimate overspent whole turns on reclaim
+    // with the mailbox unserved. Backlog never participates in a shared denominator here;
+    // each drain loop self-limits once its source runs empty.
+    plan.lifecycleQuota =
         plan.removals
-            // Demand above one turn's hard cap is unprocessable this turn anyway; letting it
-            // into the fair-share division only starves the capacity phase in proportion to
-            // the backlog - the exact self-reinforcing divergence amplifier.
             ? Math.min(
                 LIFECYCLE_MAX_PER_TURN,
                 boundedWorkCount(
                     Math.max(1L, lifecycle == null ? 0L : lifecycle.lagRecords())))
             : 0;
-    int capacityDemand = plan.capacity ? CAPACITY_MAX_PER_TURN : 0;
+    plan.capacityQuota = plan.capacity ? CAPACITY_MAX_PER_TURN : 0;
     boolean retirementPending =
         plan.seal
             || plan.flush
             || plan.safe
             || retirements.hasSealedSegments()
             || retirements.hasSafeSegments();
-    int retirementDemand =
+    plan.retirementQuota =
         retirementPending
-            ? boundedWorkCount(Math.max(1L, retirements.safeSegmentDebt()))
+            ? Math.min(
+                RECLAIM_MAX_SEGMENTS,
+                boundedWorkCount(Math.max(1L, retirements.safeSegmentDebt())))
             : 0;
-    int accessDemand =
+    plan.accessQuota =
         plan.access ? Math.max(1, Math.min(turn.accessRecords, ACCESS_MAX_PER_TURN)) : 0;
-    int ttlDemand =
+    plan.ttlQuota =
         plan.ttl
             ? Math.max(
                 1, Math.min((int) Math.min(Integer.MAX_VALUE, ttlBacklog()), TTL_MAX_PER_TURN))
             : 0;
-    int ghostDemand = plan.ghostRehash ? NativeS3GhostMap.REHASH_PASS_BUDGET : 0;
-    int readerDemand = plan.readerLifecycle ? READER_LIFECYCLE_SCAN_LIMIT : 0;
+    plan.readerLifecycleQuota = plan.readerLifecycle ? READER_LIFECYCLE_SCAN_LIMIT : 0;
     WriterResourceRegistry resources = writerResources;
     // Only an unvisited scan or a newly queued resource is demand. Progress discovered by an
     // earlier phase reopens the scan for the next immediate continuation.
     boolean resourcePending = resources != null && resources.hasRetirementWork();
-    int resourceDemand =
-        resourcePending ? boundedWorkCount(Math.max(1L, resources.retiringCount())) : 0;
-    int advisoryDemand = saturatingIntAdd(ghostDemand, resourceDemand);
-    int totalDemand =
-        saturatingIntAdd(
-            saturatingIntAdd(
-                saturatingIntAdd(lifecycleDemand, capacityDemand), retirementDemand),
-            saturatingIntAdd(
-                saturatingIntAdd(accessDemand, ttlDemand), advisoryDemand));
-    int baseQuota = maintenanceBudgetController.workQuota();
-
-    plan.lifecycleQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota,
-            lifecycleDemand,
-            totalDemand,
-            LIFECYCLE_MAX_PER_TURN,
-            plan.removals ? 1 : 0);
-    plan.capacityQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota,
-            capacityDemand,
-            totalDemand,
-            CAPACITY_MAX_PER_TURN,
-            plan.capacity ? 1 : 0);
-    plan.retirementQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota,
-            retirementDemand,
-            totalDemand,
-            RECLAIM_MAX_SEGMENTS,
-            retirementPending ? 1 : 0);
-    plan.accessQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota, accessDemand, totalDemand, ACCESS_MAX_PER_TURN, 0);
-    plan.ttlQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota, ttlDemand, totalDemand, TTL_MAX_PER_TURN, plan.ttl ? 1 : 0);
-    plan.readerLifecycleQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota,
-            readerDemand,
-            totalDemand,
-            READER_LIFECYCLE_SCAN_LIMIT,
-            plan.readerLifecycle ? 1 : 0);
     plan.advisoryQuota =
-        maintenanceBudgetController.phaseQuota(
-            baseQuota,
-            advisoryDemand,
-            totalDemand,
-            ADVISORY_MAX_PER_TURN,
-            resourcePending ? 1 : 0);
+        plan.ghostRehash || resourcePending
+            ? Math.min(
+                ADVISORY_MAX_PER_TURN,
+                saturatingIntAdd(
+                    plan.ghostRehash ? NativeS3GhostMap.REHASH_PASS_BUDGET : 0,
+                    resourcePending
+                        ? boundedWorkCount(Math.max(1L, resources.retiringCount()))
+                        : 0))
+            : 0;
   }
 
   /**
