@@ -52,6 +52,7 @@ public final class MaintenanceEventLoop
   private static final int RECLAIM_MAX_SEGMENTS = 128;
   private static final int ADVISORY_MAX_PER_TURN =
       MaintenanceBudgetController.TOTAL_MAINTENANCE_HARD_CAP;
+  private static final long MAX_CAPACITY_RETRY_BACKOFF_NANOS = 10_000_000L;
   private static final int READER_LIFECYCLE_SCAN_LIMIT = 256;
   private static final int WORK_MUTATION = 1;
   private static final int WORK_REMOVAL = 1 << 1;
@@ -189,6 +190,8 @@ public final class MaintenanceEventLoop
   private volatile boolean capacityBlocked;
   private volatile Entry capacityBlockedEntry;
   private long capacityRetryNanos = Long.MAX_VALUE;
+  /** Current capacity-retry backoff; doubles per consecutive failed retry, resets on removal. */
+  private long capacityRetryBackoffNanos;
   /** Actor-created retirement records that must be added to the active flush fence. */
   private boolean actorRetirementNeedsFlushFence;
 
@@ -1664,6 +1667,10 @@ public final class MaintenanceEventLoop
     while (admission.isOverTarget()
         && removed < removalBudget
         && attempts < attemptBudget) {
+      // Kept per attempt: completed writer removals must stop excess eviction mid-pass (see
+      // capacityDrainObservesConcurrentRemoval). The flag gate makes the no-reduction case a
+      // single volatile read; a removal-heavy window pays the exact sum, which is what lets
+      // the loop break early.
       admission.actorReconcileExternalReductions();
       if (!admission.isOverTarget()) {
         break;
@@ -1703,6 +1710,14 @@ public final class MaintenanceEventLoop
         capacityVictimsLocked.incrementAndGet();
         capacityBlockedEntry = victim;
         capacityBlocked = true;
+        if (!victim.isWriterLocked()) {
+          // The writer released between the check and the record. Publishing the block now
+          // would aim the writer's unblock wake at a freed (possibly recycled) reference;
+          // clear it and let this turn retry the tail.
+          capacityBlockedEntry = null;
+          capacityBlocked = false;
+          continue;
+        }
         scheduleCapacityRetry();
         break;
       }
@@ -1728,6 +1743,13 @@ public final class MaintenanceEventLoop
         capacityVictimsLocked.incrementAndGet();
         capacityBlockedEntry = victim;
         capacityBlocked = true;
+        if (!victim.isWriterLocked()) {
+          // Same stale-block race as the selection-time check: the writer released between
+          // the failed removal and the record, so the block must not be published.
+          capacityBlockedEntry = null;
+          capacityBlocked = false;
+          continue;
+        }
         scheduleCapacityRetry();
         break;
       }
@@ -1754,6 +1776,10 @@ public final class MaintenanceEventLoop
 
     admission.actorReconcileCapacity();
 
+    if (removed > 0) {
+      // Any successful removal proves the tail is live: collapse the retry backoff ladder.
+      capacityRetryBackoffNanos = 0L;
+    }
     if (!admission.isOverTarget()) {
       capacityBlockedEntry = null;
       capacityBlocked = false;
@@ -1772,7 +1798,15 @@ public final class MaintenanceEventLoop
   }
 
   private void scheduleCapacityRetry() {
-    capacityRetryNanos = saturatingAdd(sampleMonotonicNow(), tuning.capacityRetryNanos);
+    // Exponential backoff, so a persistently locked or unremovable tail stops paying a
+    // full ledger sample plus a victim walk on every retry. Any successful removal in
+    // drainCapacityPressure resets the ladder.
+    long backoff =
+        Math.min(
+            MAX_CAPACITY_RETRY_BACKOFF_NANOS,
+            Math.max(tuning.capacityRetryNanos, capacityRetryBackoffNanos << 1));
+    capacityRetryBackoffNanos = backoff;
+    capacityRetryNanos = saturatingAdd(sampleMonotonicNow(), backoff);
   }
 
   private void sampleRetirementRates() {
@@ -2309,8 +2343,13 @@ public final class MaintenanceEventLoop
 
     long delay;
     if (wakeNanos == Long.MAX_VALUE) {
-      delay = idleBackoff.nextParkNanos();
+      // No deadline source: the idle backoff ladder stays clamped so a fully idle cache
+      // still wakes periodically for liveness checks.
+      delay = Math.min(idleBackoff.nextParkNanos(), MAX_IDLE_PARK_NANOS);
     } else {
+      // A real deadline (TTL, reader lifecycle, capacity/retirement retry) parks for its
+      // true duration: clamping it to the idle cap turned every deadline into 100Hz
+      // polling, each wake paying the stale-bit sweep and a fresh work decision.
       delay = wakeNanos - System.nanoTime();
       if (delay <= 0L) {
         // A deadline can expire between the final source check and the park setup. Return to the
@@ -2320,7 +2359,6 @@ public final class MaintenanceEventLoop
         return;
       }
     }
-    delay = Math.min(delay, MAX_IDLE_PARK_NANOS);
 
     parked = true;
     long parkStart = System.nanoTime();

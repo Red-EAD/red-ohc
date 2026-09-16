@@ -54,8 +54,12 @@ public final class LogicalAdmission {
 
   /** Writer-side hint only; it does not participate in admission or capacity correctness. */
   public boolean needsCapacityWake() {
+    // Over-target is exactly when the actor most needs the wake: it may be parked in the
+    // capacity-retry backoff window after a locked victim, and a writer's unblock (or mere
+    // continued pressure) should break that wait immediately. The suppression used to keep
+    // writers silent during the deepest divergence window.
     if (actorOverTarget) {
-      return false;
+      return true;
     }
     return logicalCharge.sum() > target;
   }

@@ -38,7 +38,9 @@ public final class LogicalAdmissionTest {
     assertTrue(admission.needsCapacityWake());
     admission.refreshActorSnapshot();
     assertTrue(admission.isOverTarget());
-    assertFalse(admission.needsCapacityWake());
+    assertTrue(
+        admission.needsCapacityWake(),
+        "an actor parked in capacity-retry backoff must stay wakeable while over target");
     assertEquals(admission.logicalCharge(), 101L);
   }
 
