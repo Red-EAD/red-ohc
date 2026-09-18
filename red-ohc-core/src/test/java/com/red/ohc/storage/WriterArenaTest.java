@@ -585,6 +585,31 @@ public class WriterArenaTest {
           ownerLine,
           name + " must not share the owner cache line");
     }
+
+    // The actor-only cumulative freed counter must stay off the bitmap lines the writers read
+    // on every allocation: its remote-free RMWs would otherwise invalidate the writer-side line.
+    long freedLine = requirePageLayoutField(fields, "freedSlots").offset() / 64L;
+    for (String name :
+        new String[] {
+          "nextSlot",
+          "allocatedSlots",
+          "freeSummary",
+          "freeBits0",
+          "freeBits1",
+          "freeBits2",
+          "freeBits3",
+          "freeBits4",
+          "freeBits5",
+          "freeBits6",
+          "freeBits7",
+          "state",
+          "ownerClass"
+        }) {
+      Assert.assertNotEquals(
+          requirePageLayoutField(fields, name).offset() / 64L,
+          freedLine,
+          name + " must not share the freed-counter cache line");
+    }
   }
 
   @Test

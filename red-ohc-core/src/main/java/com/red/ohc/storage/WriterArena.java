@@ -287,9 +287,13 @@ public final class WriterArena {
     }
   }
 
-  /** Owner-only allocation cursor and counter; padding keeps shared state out of this line. */
+  /**
+   * Owner-only allocation cursor and counter; padding keeps shared state out of this line. The
+   * cursor is a long so it stays inside this line: the JVM lays int fields after the long group,
+   * which would drop the cursor into the contended reclaimer region below.
+   */
   static class PageOwnerLine {
-    int nextSlot;
+    long nextSlot;
     long allocatedSlots;
     long ownerPadding0;
     long ownerPadding1;
@@ -302,7 +306,18 @@ public final class WriterArena {
 
   /** Reclaimer-shared bitmap, counter, state, and owner handoff fields. */
   static class PageSharedLine extends PageOwnerLine {
+    // Actor-only cumulative freed count. Isolated on both sides so the writer-side allocation
+    // read of freeSummary never shares a line with this counter's remote-free RMWs; with only
+    // 8-byte object alignment, double-sided padding is the sole deterministic isolation.
     volatile long freedSlots;
+    long freedPad0;
+    long freedPad1;
+    long freedPad2;
+    long freedPad3;
+    long freedPad4;
+    long freedPad5;
+    long freedPad6;
+    long freedPad7;
     volatile long freeSummary;
     volatile long freeBits0;
     volatile long freeBits1;
@@ -397,7 +412,7 @@ public final class WriterArena {
     long allocateSlot() {
       int slot = popFreeSlot();
       if (slot < 0) {
-        slot = nextSlot;
+        slot = (int) nextSlot;
         if (slot >= slotCount) {
           return 0L;
         }

@@ -1,5 +1,7 @@
 package com.red.ohc.maintenance;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -102,12 +104,16 @@ public final class MaintenanceEventLoop
    * defers instead of unlinking it out from under that protocol), or SCAN_EMPTY/SCAN_RETRY
    * (selection found nothing). DroppedUnmapped vs skippedMapped is the divergence signature.
    */
-  private final AtomicLong capacityVictimsRemoved = new AtomicLong();
-  private final AtomicLong capacityVictimsLocked = new AtomicLong();
-  private final AtomicLong capacityVictimsDroppedUnmapped = new AtomicLong();
-  private final AtomicLong capacityVictimsSkippedMapped = new AtomicLong();
-  private final AtomicLong capacityScanEmpty = new AtomicLong();
-  private final AtomicLong capacityScanRetry = new AtomicLong();
+  // Actor-thread-only capacity diagnostics: one plain increment per drain attempt/removal.
+  // Plain fields keep the per-attempt locked-RMW count down and these counters out of the
+  // writer-hot atomic instances allocated next to durableMailboxDepth; nothing reads them
+  // off the actor thread.
+  private long capacityVictimsRemoved;
+  private long capacityVictimsLocked;
+  private long capacityVictimsDroppedUnmapped;
+  private long capacityVictimsSkippedMapped;
+  private long capacityScanEmpty;
+  private long capacityScanRetry;
 
   private final AtomicLong asyncSubmitted = new AtomicLong();
   private final AtomicLong asyncFailed = new AtomicLong();
@@ -224,8 +230,25 @@ public final class MaintenanceEventLoop
   private final AtomicLong residenceSampleTotalMillis = new AtomicLong();
   private volatile long timeoutLagMillis;
   private final AtomicLong nativeAllocationFailures = new AtomicLong();
-  private final AtomicLong evictionCount = new AtomicLong();
-  private final AtomicLong evictionWeight = new AtomicLong();
+  /** Volatile read paths for the actor-owned eviction counters; writes stay plain and unlocked. */
+  private static final VarHandle EVICTION_COUNT;
+  private static final VarHandle EVICTION_WEIGHT;
+
+  static {
+    try {
+      MethodHandles.Lookup lookup = MethodHandles.lookup();
+      EVICTION_COUNT =
+          lookup.findVarHandle(MaintenanceEventLoop.class, "evictionCount", long.class);
+      EVICTION_WEIGHT =
+          lookup.findVarHandle(MaintenanceEventLoop.class, "evictionWeight", long.class);
+    } catch (ReflectiveOperationException failure) {
+      throw new ExceptionInInitializerError(failure);
+    }
+  }
+
+  /** Actor-thread-only SIZE-eviction counters; snapshot() reads them with volatile semantics. */
+  private long evictionCount;
+  private long evictionWeight;
 
   private final AtomicBoolean unhealthy = new AtomicBoolean();
   private volatile LogicalAdmission logicalAdmission;
@@ -798,18 +821,8 @@ public final class MaintenanceEventLoop
   }
 
   private void recordSizeEvictionWeight(long logicalBytes) {
-    evictionCount.incrementAndGet();
-    addSaturated(evictionWeight, logicalBytes);
-  }
-
-  private static void addSaturated(AtomicLong counter, long delta) {
-    for (;;) {
-      long current = counter.get();
-      long next = saturatingAdd(current, delta);
-      if (counter.compareAndSet(current, next)) {
-        return;
-      }
-    }
+    evictionCount++;
+    evictionWeight = saturatingAdd(evictionWeight, logicalBytes);
   }
 
   public void throwIfUnavailable() {
@@ -1298,8 +1311,8 @@ public final class MaintenanceEventLoop
     return new Snapshot(
         hits,
         misses,
-        evictionCount.get(),
-        evictionWeight.get(),
+        (long) EVICTION_COUNT.getVolatile(this),
+        (long) EVICTION_WEIGHT.getVolatile(this),
         physicalExpired,
         publishedLiveWeight,
         timeoutLagMillis,
@@ -1681,33 +1694,37 @@ public final class MaintenanceEventLoop
       if (victim == null) {
         if (selection.kind == MaintenancePolicy.Selection.Kind.SCAN_EXHAUSTED
             && attempts < attemptBudget) {
-          capacityScanRetry.incrementAndGet();
+          capacityScanRetry++;
           continue;
         }
-        capacityScanEmpty.incrementAndGet();
+        capacityScanEmpty++;
         scheduleCapacityRetry();
         break;
       }
       long taggedValue = victim.valueAddress;
       long value = Entry.rawValueAddress(taggedValue);
-      if (!victim.isAlive() || victim.isLogicallyAbsent() || value == 0L) {
+      if (!Entry.isAliveTagged(taggedValue) || victim.isLogicallyAbsent() || value == 0L) {
         // A dead victim may still be mapped: its own removal protocol (writer remove, expiry,
         // or a queued lifecycle record) owns the CHM unlink. Unlinking it here would orphan a
         // mapped entry out of the policy - invisible to every future selection - so only
         // unlink once the mapping is verifiably gone; otherwise defer via skipLocked so the
         // tail selection moves on without losing the victim.
         if (isMappedEntry(victim)) {
-          capacityVictimsSkippedMapped.incrementAndGet();
+          capacityVictimsSkippedMapped++;
           policy.skipLocked(victim);
           attempts++;
           continue;
         }
-        capacityVictimsDroppedUnmapped.incrementAndGet();
+        capacityVictimsDroppedUnmapped++;
         policy.remove(victim, false);
         continue;
       }
-      if (victim.isWriterLocked()) {
-        capacityVictimsLocked.incrementAndGet();
+      // One state-word snapshot serves both the writer-lock check and the generation that
+      // removeFromMap validates against; the pair stays coherent at a single instant instead
+      // of straddling a racing finishWriter.
+      long claimState = victim.writerClaimStateWord();
+      if ((claimState & Entry.WRITER_LOCK) != 0L) {
+        capacityVictimsLocked++;
         capacityBlockedEntry = victim;
         capacityBlocked = true;
         if (!victim.isWriterLocked()) {
@@ -1721,7 +1738,7 @@ public final class MaintenanceEventLoop
         scheduleCapacityRetry();
         break;
       }
-      long generation = victim.generation();
+      long generation = Entry.generationOfStateWord(claimState);
       long victimCharge = admission.chargeOf(victim);
       if (removeFromMap(
           victim,
@@ -1730,7 +1747,7 @@ public final class MaintenanceEventLoop
           taggedValue,
           RemovalCause.SIZE)) {
         removed++;
-        capacityVictimsRemoved.incrementAndGet();
+        capacityVictimsRemoved++;
         // The shared LongAdder is updated by the logical-absent transition. Keep this actor-local
         // sample in step without paying for a contended exact sum after every victim.
         admission.actorSubtractReleasedCharge(victimCharge);
@@ -1740,7 +1757,7 @@ public final class MaintenanceEventLoop
         continue;
       }
       if (victim.isWriterLocked()) {
-        capacityVictimsLocked.incrementAndGet();
+        capacityVictimsLocked++;
         capacityBlockedEntry = victim;
         capacityBlocked = true;
         if (!victim.isWriterLocked()) {
@@ -1753,21 +1770,22 @@ public final class MaintenanceEventLoop
         scheduleCapacityRetry();
         break;
       }
-      if (!victim.isAlive()
+      long retiredTaggedValue = victim.valueAddress;
+      if (!Entry.isAliveTagged(retiredTaggedValue)
           || victim.isLogicallyAbsent()
-          || Entry.rawValueAddress(victim.valueAddress) == 0L) {
+          || Entry.rawValueAddress(retiredTaggedValue) == 0L) {
         // Same rule as the selection-time drop: only unlink once the mapping is verifiably
         // gone; a still-mapped dead victim stays linked and selectable for its own protocol.
         if (isMappedEntry(victim)) {
-          capacityVictimsSkippedMapped.incrementAndGet();
+          capacityVictimsSkippedMapped++;
           policy.skipLocked(victim);
           attempts++;
           continue;
         }
-        capacityVictimsDroppedUnmapped.incrementAndGet();
+        capacityVictimsDroppedUnmapped++;
         policy.remove(victim, false);
       } else {
-        capacityVictimsSkippedMapped.incrementAndGet();
+        capacityVictimsSkippedMapped++;
         policy.skipLocked(victim);
         scheduleCapacityRetry();
         break;

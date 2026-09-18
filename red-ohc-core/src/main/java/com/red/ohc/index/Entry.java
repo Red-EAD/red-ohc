@@ -292,8 +292,22 @@ public final class Entry {
     return NativeMemory.getLongVolatile(stateWordAddress()) & GENERATION_MASK;
   }
 
+  /** One volatile read of the state word; callers extract the writer bit and the generation. */
+  public long writerClaimStateWord() {
+    return NativeMemory.getLongVolatile(stateWordAddress());
+  }
+
+  public static long generationOfStateWord(long stateWord) {
+    return stateWord & GENERATION_MASK;
+  }
+
   public boolean isAlive() {
     return (valueAddress & VALUE_LIFECYCLE_MASK) == 0L;
+  }
+
+  /** Lifecycle check on an already-loaded tagged pointer; avoids a second volatile field read. */
+  public static boolean isAliveTagged(long taggedValue) {
+    return (taggedValue & VALUE_LIFECYCLE_MASK) == 0L;
   }
 
   /** Marks this entry as logically present and reports whether the counter needs an increment. */
