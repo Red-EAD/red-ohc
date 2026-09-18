@@ -834,15 +834,11 @@ public final class MaintenancePolicy implements AutoCloseable {
   }
 
   private void link(EntryDeque deque, Entry entry, int state) {
-    // Publish actor ownership before exposing the entry through either neighbor pointer. The
-    // writer admission policy may remove an entry concurrently; EntryLinks must not reclaim its
-    // record in the interval where the actor deque is already linking it but policyState is still
-    // NONE.
-    int linkId;
-    synchronized (links) {
-      linkId = links.ensure(entry);
-      setPolicyState(entry, state);
-    }
+    // Publish actor ownership before exposing the entry through either neighbor pointer: every
+    // EntryLinks access (including maybeRelease) is actor-confined, so program order on this
+    // thread is the publication order; no monitor is needed.
+    int linkId = links.ensure(entry);
+    setPolicyState(entry, state);
     deque.linkHead(entry, linkId);
   }
 

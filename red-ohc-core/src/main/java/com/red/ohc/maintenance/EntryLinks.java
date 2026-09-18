@@ -69,7 +69,7 @@ public final class EntryLinks implements AutoCloseable {
   }
 
   /** Returns the native record id, allocating one lazily on the first policy/timer link. */
-  synchronized int ensure(Entry entry) {
+  int ensure(Entry entry) {
     checkOpen();
     int id = entry.policyLinkId();
     if (id != 0) {
@@ -79,9 +79,15 @@ public final class EntryLinks implements AutoCloseable {
       }
       return id;
     }
+    boolean fromFreeList = false;
     id = freeHead;
     if (id != 0) {
-      freeHead = NativeMemory.getInt(recordAddress(id)) & LINK_ID_MASK;
+      // Reused records are pre-zeroed except the free-list successor stored at offset 0; clear
+      // that one word (maybeRelease's policyPrev gate would otherwise refuse the release).
+      fromFreeList = true;
+      long reusedAddress = recordAddress(id);
+      freeHead = NativeMemory.getInt(reusedAddress) & LINK_ID_MASK;
+      NativeMemory.putInt(reusedAddress + POLICY_PREVIOUS_OFFSET, 0);
     } else {
       id = nextId++;
       if (id <= 0 || id > MAX_LINK_ID) {
@@ -91,8 +97,9 @@ public final class EntryLinks implements AutoCloseable {
     ensureRegistryCapacity(id);
     ensureSuperpage(id);
     registry[id] = entry;
-    long address = recordAddress(id);
-    NativeMemory.setMemory(address, RECORD_BYTES, (byte) 0);
+    if (!fromFreeList) {
+      NativeMemory.setMemory(recordAddress(id), RECORD_BYTES, (byte) 0);
+    }
     entry.policyLinkId(id);
     return id;
   }
@@ -305,7 +312,7 @@ public final class EntryLinks implements AutoCloseable {
   }
 
   /** Releases the record only after both policy and timer ownership have been removed. */
-  synchronized void maybeRelease(Entry entry) {
+  void maybeRelease(Entry entry) {
     int id = entry.policyLinkId();
     if (id == 0) {
       return;

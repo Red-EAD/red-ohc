@@ -21,6 +21,13 @@ public final class WriterLifecycleLane {
   public static final long UNSEEDED_MUTATION_VERSION = Long.MIN_VALUE;
   private static final long EMPTY = Long.MIN_VALUE;
 
+  /**
+   * Cached enum table: {@code RemovalCause.values()} clones a fresh array per call and this poll
+   * runs on the maintenance actor for every expiry-cause record. Ordinals of a public enum are
+   * de-facto frozen; the clone is never mutated.
+   */
+  private static final RemovalCause[] REMOVAL_CAUSES = RemovalCause.values();
+
   private final int segmentCapacity;
   private final long segmentMask;
   private final SegmentPool segmentPool;
@@ -239,7 +246,7 @@ public final class WriterLifecycleLane {
     record.generation = consumerSegment.generations[consumerIndex];
     record.operation = consumerSegment.operations[consumerIndex];
     int cause = consumerSegment.causes[consumerIndex];
-    record.cause = cause < 0 ? null : RemovalCause.values()[cause];
+    record.cause = cause < 0 ? null : REMOVAL_CAUSES[cause];
     return true;
   }
 

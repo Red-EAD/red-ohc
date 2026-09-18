@@ -330,43 +330,10 @@ public final class RetirementSegment {
     return sealed && SEGMENT_CLAIM_STATE.compareAndSet(this, 0, 1);
   }
 
-  /** Releases one claimed segment directly from its native columns without a Java payload copy. */
-  int releaseRecords(NativeMemory.Memory releaseMemory) {
-    if (releaseMemory == null) {
-      throw new NullPointerException("releaseMemory");
-    }
-    int tail = snapshotTail;
-    if (tail < 0) {
-      throw new IllegalStateException("retirement segment is not sealed");
-    }
-    int releasedSlotsBefore = releasedSlotCount;
-    for (int index = 0; index < tail; index++) {
-      long addressOffset = addressesAddress + (long) index * WORD_BYTES;
-      long address = NativeMemory.getLong(addressOffset);
-      if (address != 0L) {
-        long allocation =
-            NativeMemory.getLong(allocationsAddress + (long) index * WORD_BYTES);
-        releaseMemory.releaseEntry(address, allocation);
-        // The allocator release methods validate ownership before mutating it. Clear the slot
-        // only after a successful release so a task failure can be retried by teardown without
-        // losing an unreleased native block.
-        clearAddressColumn(index);
-        recordReleased(1, WriterArena.allocationWeight(allocation));
-        releasedSlotCount++;
-      }
-    }
-    // A successful segment release completes every committed slot, including structural slots
-    // that do not own a native value allocation. The incremental progress above is retained if
-    // the allocator throws part-way through the loop so a later retry cannot double-count freed
-    // data. A zero address has no allocator work left to perform, so its corresponding logical
-    // retirement counters can be completed here as well.
-    releasedSlotCount = tail;
-    releasedRecordCount = retiredRecordCount;
-    releasedBytes = retiredBytes;
-    return tail - releasedSlotsBefore;
-  }
-
-  /** Releases a claimed segment with actor-owned page grouping scratch and no column copy. */
+  /**
+   * Releases a claimed segment with actor-owned grouping scratch. Address is the sole liveness
+   * marker: cleared only after the free is accepted; partial progress is retry-safe.
+   */
   int releaseRecords(NativeMemory.Memory releaseMemory, ThreadContext context) {
     if (releaseMemory == null) {
       throw new NullPointerException("releaseMemory");
@@ -392,12 +359,48 @@ public final class RetirementSegment {
         releasedSlotCount += released;
       }
       if (success) {
-        releasedSlotCount = tail;
-        releasedRecordCount = retiredRecordCount;
-        releasedBytes = retiredBytes;
+        completeReleaseProgress();
       }
     }
     return releasedSlotCount - releasedSlotsBefore;
+  }
+
+  /** Native address of the segment's address column; read by the merged turn release. */
+  long addressesAddress() {
+    return addressesAddress;
+  }
+
+  /** Native address of the segment's allocation column; read by the merged turn release. */
+  long allocationsAddress() {
+    return allocationsAddress;
+  }
+
+  /** Native address of the segment's handle column; read by the merged turn release. */
+  long handlesAddress() {
+    return handlesAddress;
+  }
+
+  /**
+   * Applies one merged-release wave's physical progress to this claimant-owned counters. Only
+   * the thread holding the segment claim may call this; identical semantics to the incremental
+   * accounting inside {@link #releaseRecords(NativeMemory.Memory, ThreadContext)}.
+   */
+  void applyReleaseProgress(int records, long bytes) {
+    if (records != 0 || bytes != 0L) {
+      recordReleased(records, bytes);
+      releasedSlotCount += records;
+    }
+  }
+
+  /**
+   * Completes the logical counters after every committed slot of a claimed segment has been
+   * released (including structural slots with no native allocation and slots whose address was
+   * already zero from a prior partial attempt).
+   */
+  void completeReleaseProgress() {
+    releasedSlotCount = snapshotTail;
+    releasedRecordCount = retiredRecordCount;
+    releasedBytes = retiredBytes;
   }
 
   int pendingRecordCount() {
@@ -424,11 +427,13 @@ public final class RetirementSegment {
     if (records < 0 || bytes < 0L) {
       throw new IllegalArgumentException("invalid released retirement progress");
     }
-    releasedRecordCount += records;
-    releasedBytes += bytes;
-    if (releasedRecordCount > retiredRecordCount || releasedBytes > retiredBytes) {
+    // Validate before mutating so a suppressed failure leaves the counters consistent.
+    if ((long) releasedRecordCount + records > retiredRecordCount
+        || releasedBytes + bytes > retiredBytes) {
       throw new IllegalStateException("retirement release progress exceeds segment totals");
     }
+    releasedRecordCount += records;
+    releasedBytes += bytes;
   }
 
   void finishSegmentClaim() {

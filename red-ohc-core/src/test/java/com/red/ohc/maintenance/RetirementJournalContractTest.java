@@ -418,6 +418,353 @@ public final class RetirementJournalContractTest {
     }
   }
 
+  /**
+   * One reclaim wave must publish a page shared by multiple segments exactly once: the merged
+   * decode groups the wave's records per page before any publication, so the availability
+   * callback (and its freeBits/summary/freedSlots rounds) fires once per page per wave instead
+   * of once per segment.
+   */
+  @Test
+  public void mergedWavePublishesASharedPageOnce() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    RetirementJournal journal = new RetirementJournal(memory);
+    long[] entries = new long[RetirementSegment.CAPACITY + 1];
+    long allocation = 112L;
+    try {
+      WriterArena arena = memory.newWriterArena();
+      for (int index = 0; index < entries.length; index++) {
+        entries[index] = arena.allocate(allocation);
+      }
+      long pageKey =
+          NativeMemory.Memory.entryAllocatorHandle(entries[0]) >>> 14;
+      for (long entry : entries) {
+        assertEquals(
+            NativeMemory.Memory.entryAllocatorHandle(entry) >>> 14,
+            pageKey,
+            "the fixture must span two segments while retaining one allocator page");
+      }
+
+      RetirementJournal.Lane lane = journal.actorLane();
+      RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
+      for (int index = 0; index < entries.length; index++) {
+        assertTrue(lane.reserve(reservation));
+        lane.write(reservation, entries[index], allocation);
+        lane.commit(reservation);
+      }
+      journal.cutAllProducersAtWatermark();
+      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY + 1);
+      assertEquals(journal.publishSafe(Long.MAX_VALUE), 2);
+
+      Method hook = WriterArena.class.getDeclaredMethod("setRetirementHookForTest", Runnable.class);
+      hook.setAccessible(true);
+      AtomicInteger availabilityCallbacks = new AtomicInteger();
+      hook.invoke(
+          arena,
+          (Runnable) () -> availabilityCallbacks.incrementAndGet());
+
+      RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 2);
+      assertEquals(result.segments, 2);
+      assertEquals(result.records, entries.length);
+      assertEquals(result.physicalRecords, entries.length);
+      assertEquals(
+          availabilityCallbacks.get(),
+          1,
+          "one shared page must be published exactly once per merged wave");
+      assertEquals(journal.safeSegmentDebt(), 0L);
+      assertEquals(journal.completedRecordsTotal(), entries.length);
+      // Every slot of the shared page must be reusable at its original address.
+      for (long entry : entries) {
+        assertEquals(arena.allocate(allocation), entry, "freed slots must recycle in place");
+      }
+    } finally {
+      journal.close();
+      memory.closeArenas();
+    }
+  }
+
+  /**
+   * A decode-phase validation failure must leave the whole wave unreleased: no address column
+   * cleared, no ledger move, both segments re-queued, and a retry after the fix completes
+   * everything exactly once.
+   */
+  @Test
+  public void mergedWaveDecodeFailureReleasesNothing() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    RetirementJournal journal = new RetirementJournal(memory);
+    long[] entries = new long[RetirementSegment.CAPACITY + 1];
+    long allocation = 112L;
+    long handleAddress = 0L;
+    long validHandle = 0L;
+    try {
+      WriterArena arena = memory.newWriterArena();
+      for (int index = 0; index < entries.length; index++) {
+        entries[index] = arena.allocate(allocation);
+      }
+      long readyPagesBefore = memory.pageReadyCount();
+      RetirementJournal.Lane lane = journal.actorLane();
+      RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
+      RetirementSegment corruptedSegment = null;
+      int corruptedIndex = -1;
+      for (int index = 0; index < entries.length; index++) {
+        assertTrue(lane.reserve(reservation));
+        if (index == RetirementSegment.CAPACITY) {
+          corruptedSegment = reservation.segment();
+          corruptedIndex = reservation.index();
+        }
+        lane.write(reservation, entries[index], allocation);
+        lane.commit(reservation);
+      }
+      journal.cutAllProducersAtWatermark();
+      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY + 1);
+      assertEquals(journal.publishSafe(Long.MAX_VALUE), 2);
+
+      Field handlesAddressField = RetirementSegment.class.getDeclaredField("handlesAddress");
+      handlesAddressField.setAccessible(true);
+      handleAddress =
+          handlesAddressField.getLong(corruptedSegment) + (long) corruptedIndex * Long.BYTES;
+      validHandle = NativeMemory.getLong(handleAddress);
+      NativeMemory.putLong(handleAddress, validHandle ^ (1L << 38));
+
+      try {
+        journal.reclaimActorSafeBatchResult(memory, 2);
+        throw new AssertionError("the corrupted handle must fail the merged wave decode");
+      } catch (IllegalStateException expected) {
+        assertTrue(expected.getMessage().contains("unknown allocator slot handle"));
+      }
+      assertEquals(journal.safeSegmentDebt(), 2L, "both segments must return to the safe queue");
+      assertEquals(journal.safeRecords(), (long) entries.length);
+      assertEquals(journal.claimedRecords(), 0L);
+      assertEquals(journal.completedRecordsTotal(), 0L);
+      assertEquals(
+          memory.pageReadyCount(),
+          readyPagesBefore,
+          "no page may be published to the ready stack before a successful release");
+
+      NativeMemory.putLong(handleAddress, validHandle);
+      RetirementJournal.ReclaimResult retry = journal.reclaimActorSafeBatchResult(memory, 2);
+      assertEquals(retry.segments, 2);
+      assertEquals(retry.records, entries.length);
+      assertEquals(journal.completedRecordsTotal(), entries.length);
+      assertEquals(journal.safeSegmentDebt(), 0L);
+      assertEquals(
+          memory.pageReadyCount(),
+          readyPagesBefore,
+          "the arena's still-active current page is retained by its owner, not pushed");
+      for (long entry : entries) {
+        assertEquals(arena.allocate(allocation), entry, "freed slots must recycle in place");
+      }
+    } finally {
+      if (handleAddress != 0L) {
+        NativeMemory.putLong(handleAddress, validHandle);
+      }
+      journal.close();
+      memory.closeArenas();
+    }
+  }
+
+  /**
+   * A publication-phase failure must settle per segment: a segment whose every record was
+   * already cleared by a published group finishes exactly like the success path, while untouched
+   * segments abort, reverse their ledger move, and re-queue; the retry frees the remainder
+   * exactly once.
+   */
+  @Test
+  public void mergedWaveCallbackFailureSettlesCompleteSegments() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    RetirementJournal journal = new RetirementJournal(memory);
+    int firstSegmentRecords = 3;
+    int secondSegmentRecords = 2;
+    long allocation = 112L;
+    try {
+      // Two arenas so each segment's records land on a different allocator page, i.e. in
+      // exactly one publication group each.
+      WriterArena firstArena = memory.newWriterArena();
+      WriterArena secondArena = memory.newWriterArena();
+      long[] firstPageEntries = new long[firstSegmentRecords];
+      for (int index = 0; index < firstPageEntries.length; index++) {
+        firstPageEntries[index] = firstArena.allocate(allocation);
+      }
+      long[] secondPageEntries = new long[secondSegmentRecords];
+      for (int index = 0; index < secondPageEntries.length; index++) {
+        secondPageEntries[index] = secondArena.allocate(allocation);
+      }
+
+      RetirementJournal.Lane lane = journal.actorLane();
+      RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
+      for (long entry : firstPageEntries) {
+        assertTrue(lane.reserve(reservation));
+        lane.write(reservation, entry, allocation);
+        lane.commit(reservation);
+      }
+      journal.cutAllProducersAtWatermark();
+      assertEquals(journal.sealReadySegments(1L), firstSegmentRecords);
+      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      for (long entry : secondPageEntries) {
+        assertTrue(lane.reserve(reservation));
+        lane.write(reservation, entry, allocation);
+        lane.commit(reservation);
+      }
+      journal.cutAllProducersAtWatermark();
+      assertEquals(journal.sealReadySegments(2L), secondSegmentRecords);
+      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+
+      Method hook = WriterArena.class.getDeclaredMethod("setRetirementHookForTest", Runnable.class);
+      hook.setAccessible(true);
+      // Fail the availability callback of the first published group (the first segment's page).
+      AtomicReference<Runnable> hookSlot = new AtomicReference<>();
+      hookSlot.set(
+          () -> {
+            throw new IllegalStateException("injected availability failure");
+          });
+      hook.invoke(
+          firstArena,
+          (Runnable)
+              () -> {
+                Runnable pending = hookSlot.getAndSet(null);
+                if (pending != null) {
+                  pending.run();
+                }
+              });
+
+      try {
+        journal.reclaimActorSafeBatchResult(memory, 2);
+        throw new AssertionError("the injected availability failure must fail the wave");
+      } catch (IllegalStateException expected) {
+        assertTrue(expected.getMessage().contains("injected availability failure"));
+      }
+      // The first segment's records were cleared by the published group: completed exactly
+      // once, segment finished. The second segment was never published: re-queued untouched.
+      assertEquals(journal.completedRecordsTotal(), firstSegmentRecords);
+      assertEquals(journal.safeSegmentDebt(), 1L);
+      assertEquals(journal.safeRecords(), secondSegmentRecords);
+      assertEquals(journal.claimedRecords(), 0L);
+      assertEquals(
+          firstArena.allocate(allocation),
+          firstPageEntries[0],
+          "the published page's first slot must recycle after the failed wave");
+
+      RetirementJournal.ReclaimResult retry = journal.reclaimActorSafeBatchResult(memory, 2);
+      assertEquals(retry.segments, 1);
+      assertEquals(retry.records, secondSegmentRecords);
+      assertEquals(journal.completedRecordsTotal(), firstSegmentRecords + secondSegmentRecords);
+      assertEquals(journal.safeSegmentDebt(), 0L);
+      for (long entry : secondPageEntries) {
+        assertEquals(secondArena.allocate(allocation), entry, "freed slots must recycle in place");
+      }
+    } finally {
+      journal.close();
+      memory.closeArenas();
+    }
+  }
+
+  /**
+   * Whole-page fast path: a detached (FULL) page whose last live slots are freed by one merged
+   * wave must recycle in fresh bump mode at full capacity — no bitmap publication, page pushed
+   * to the shared ready stack, and every slot served again in slot order by the next owner.
+   */
+  @Test
+  public void wholePageDeathRecyclesAFreshBumpModePageAtFullCapacity() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    RetirementJournal journal = new RetirementJournal(memory);
+    long allocation = 112L;
+    try {
+      WriterArena source = memory.newWriterArena();
+      WriterArena target = memory.newWriterArena();
+      int sizeClass = com.red.ohc.storage.SizeClasses.indexForEntry(allocation);
+      int slotsPerPage =
+          com.red.ohc.storage.SizeClasses.pageBytes(sizeClass)
+              / com.red.ohc.storage.SizeClasses.slotBytes(sizeClass);
+      long[] entries = new long[slotsPerPage];
+      for (int index = 0; index < slotsPerPage; index++) {
+        entries[index] = source.allocate(allocation);
+      }
+      source.detach();
+      long readyPages = memory.pageReadyCount();
+
+      RetirementJournal.Lane lane = journal.actorLane();
+      RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
+      for (long entry : entries) {
+        assertTrue(lane.reserve(reservation));
+        lane.write(reservation, entry, allocation);
+        lane.commit(reservation);
+      }
+      int segments =
+          (slotsPerPage + RetirementSegment.CAPACITY - 1) / RetirementSegment.CAPACITY;
+      journal.cutAllProducersAtWatermark();
+      assertEquals(journal.sealReadySegments(1L), slotsPerPage);
+      assertEquals(
+          journal.publishSafe(Long.MAX_VALUE), segments, "the fixture must publish every segment");
+
+      RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, segments);
+      assertEquals(result.records, slotsPerPage);
+      assertEquals(
+          memory.pageReadyCount(),
+          readyPages + 1,
+          "the fully-freed detached page must be published to the shared ready stack");
+      for (int index = 0; index < slotsPerPage; index++) {
+        assertEquals(
+            target.allocate(allocation),
+            entries[index],
+            "the recycled page must serve its full capacity in fresh bump order");
+      }
+    } finally {
+      journal.close();
+      memory.closeArenas();
+    }
+  }
+
+  /**
+   * Production retirement streams alternate size classes (value block, then key block, per
+   * eviction). The grouped decode must keep one last-page memo slot per class so the alternation
+   * still groups each class's records onto its page; a class-confused memo would fail ownership
+   * validation or mis-account the release.
+   */
+  @Test
+  public void mergedWaveGroupsAlternatingSizeClassesPerClassPage() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    RetirementJournal journal = new RetirementJournal(memory);
+    long valueAllocation = ValueBlock.allocationLength(5_120);
+    long keyAllocation = 112L;
+    int pairs = 4;
+    try {
+      WriterArena arena = memory.newWriterArena();
+      long[] values = new long[pairs];
+      long[] keys = new long[pairs];
+      for (int index = 0; index < pairs; index++) {
+        values[index] = arena.allocate(valueAllocation);
+        keys[index] = arena.allocate(keyAllocation);
+      }
+
+      RetirementJournal.Lane lane = journal.actorLane();
+      RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
+      for (int index = 0; index < pairs; index++) {
+        assertTrue(lane.reserve(reservation));
+        lane.write(reservation, values[index], valueAllocation);
+        lane.commit(reservation);
+        assertTrue(lane.reserve(reservation));
+        lane.write(reservation, keys[index], keyAllocation);
+        lane.commit(reservation);
+      }
+      journal.cutAllProducersAtWatermark();
+      assertEquals(journal.sealReadySegments(1L), pairs * 2);
+      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+
+      RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 1);
+      assertEquals(result.segments, 1);
+      assertEquals(result.records, pairs * 2);
+      assertEquals(journal.completedRecordsTotal(), pairs * 2L);
+      assertEquals(journal.safeSegmentDebt(), 0L);
+      for (int index = 0; index < pairs; index++) {
+        assertEquals(
+            arena.allocate(valueAllocation), values[index], "value slots must recycle in place");
+        assertEquals(arena.allocate(keyAllocation), keys[index], "key slots must recycle in place");
+      }
+    } finally {
+      journal.close();
+      memory.closeArenas();
+    }
+  }
+
   private static void appendSegment(RetirementJournal.Lane lane) {
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     for (int index = 0; index < RetirementSegment.CAPACITY; index++) {

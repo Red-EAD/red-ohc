@@ -826,83 +826,215 @@ public final class RetirementJournal {
       long reclaimedBytes = 0L;
       int reclaimedSegments = 0;
       int attempts = Math.min(maximumSegments, Math.max(1, safeSegmentCount.get()));
-      while (reclaimed < maximumRecords
-          && reclaimedSegments < maximumSegments
-          && attempts-- > 0) {
-        RetirementSegment segment = safeSegments.relaxedPoll();
-        if (segment == null) {
+      TurnReleaseWave wave = turnReleaseWave();
+      while (reclaimed < maximumRecords && reclaimedSegments < maximumSegments) {
+        // Phase 0: claim one bounded wave of SAFE segments (unchanged poll/requeue/claim
+        // protocol; the wave only widens the release granularity).
+        wave.reset();
+        boolean queueEmpty = false;
+        while (reclaimedSegments < maximumSegments
+            && wave.count < TurnReleaseWave.MAX_SEGMENTS
+            && attempts-- > 0) {
+          RetirementSegment segment = safeSegments.relaxedPoll();
+          if (segment == null) {
+            queueEmpty = true;
+            break;
+          }
+          int remainingSafeSegments = safeSegmentCount.decrementAndGet();
+          if (remainingSafeSegments < 0) {
+            throw new IllegalStateException("retirement safe segment count underflow");
+          }
+          if (segment.safeTicket() > maximumSafeTicket
+              || (watermark != null
+                  && (segment.laneIndex() >= watermark.length
+                      || segment.baseSequence() + segment.snapshotTail()
+                          > watermark[segment.laneIndex()]))) {
+            enqueueSafeSegment(segment);
+            continue;
+          }
+          if (!segment.tryClaimSegment()) {
+            continue;
+          }
+          int slot = wave.count;
+          wave.segments[slot] = segment;
+          wave.tails[slot] = segment.snapshotTail();
+          wave.addressesColumns[slot] = segment.addressesAddress();
+          wave.allocationsColumns[slot] = segment.allocationsAddress();
+          wave.handlesColumns[slot] = segment.handlesAddress();
+          wave.retiredRecords[slot] = segment.pendingRecordCount();
+          wave.retiredBytes[slot] = segment.pendingBytes();
+          wave.beforeReleasedSlots[slot] = segment.releasedSlotCount();
+          wave.beforeReleasedRecords[slot] = segment.releasedRecordCount();
+          wave.beforeReleasedBytes[slot] = segment.releasedBytes();
+          safeRecords.addAndGet(-wave.retiredRecords[slot]);
+          safeBytes.addAndGet(-wave.retiredBytes[slot]);
+          claimedRecords.addAndGet(wave.retiredRecords[slot]);
+          claimedBytes.addAndGet(wave.retiredBytes[slot]);
+          wave.count++;
+          reclaimedSegments++;
+          // Mirrors the previous post-hoc record bound: the crossing segment still releases
+          // fully, then claiming stops.
+          wave.records += wave.tails[slot] - wave.beforeReleasedSlots[slot];
+          if (reclaimed + wave.records >= maximumRecords) {
+            break;
+          }
+        }
+        if (wave.count == 0) {
           break;
         }
-        int remainingSafeSegments = safeSegmentCount.decrementAndGet();
-        if (remainingSafeSegments < 0) {
-          throw new IllegalStateException("retirement safe segment count underflow");
-        }
-        if (segment.safeTicket() > maximumSafeTicket
-            || (watermark != null
-                && (segment.laneIndex() >= watermark.length
-                    || segment.baseSequence() + segment.snapshotTail()
-                        > watermark[segment.laneIndex()]))) {
-          enqueueSafeSegment(segment);
-          continue;
-        }
-        if (!segment.tryClaimSegment()) {
-          continue;
-        }
-        reclaimedSegments++;
-        int segmentRetiredRecords = segment.pendingRecordCount();
-        long segmentRetiredBytes = segment.pendingBytes();
-        int releasedSlotsBefore = segment.releasedSlotCount();
-        int releasedBefore = segment.releasedRecordCount();
-        long releasedBytesBefore = segment.releasedBytes();
-        int ownerLaneIndex = segment.laneIndex();
-        safeRecords.addAndGet(-segmentRetiredRecords);
-        safeBytes.addAndGet(-segmentRetiredBytes);
-        claimedRecords.addAndGet(segmentRetiredRecords);
-        claimedBytes.addAndGet(segmentRetiredBytes);
+        // Reset progress before the release so a scratch-growth failure settles on zeros.
+        actorContext.resetReleaseTurnProgress(wave.count);
         try {
-          segment.releaseRecords(releaseMemory, actorContext);
+          releaseMemory.releaseEntryBatchTurn(
+              actorContext,
+              wave.addressesColumns,
+              wave.allocationsColumns,
+              wave.handlesColumns,
+              wave.tails,
+              wave.count);
         } catch (Throwable failure) {
-          try {
-            segment.abortSegmentClaim();
-          } catch (Throwable abortFailure) {
-            failure.addSuppressed(abortFailure);
-          }
-          int releasedSlots = segment.releasedSlotCount() - releasedSlotsBefore;
-          int releasedRecords = segment.releasedRecordCount() - releasedBefore;
-          long releasedBytes = segment.releasedBytes() - releasedBytesBefore;
-          int remainingRecords = segment.pendingRecordCount();
-          long remainingBytes = segment.pendingBytes();
-          claimedRecords.addAndGet(-segmentRetiredRecords);
-          claimedBytes.addAndGet(-segmentRetiredBytes);
-          safeRecords.addAndGet(remainingRecords);
-          safeBytes.addAndGet(remainingBytes);
-          recordCompleted(releasedSlots, releasedRecords, releasedBytes);
-          try {
-            enqueueSafeSegment(segment);
-          } catch (Throwable enqueueFailure) {
-            failure.addSuppressed(enqueueFailure);
-          }
+          settleFailedWave(wave, failure);
           throw failure;
         }
-        claimedRecords.addAndGet(-segmentRetiredRecords);
-        claimedBytes.addAndGet(-segmentRetiredBytes);
-        int releasedSlots = segment.releasedSlotCount() - releasedSlotsBefore;
-        int releasedRecords = segment.releasedRecordCount() - releasedBefore;
-        long releasedBytes = segment.releasedBytes() - releasedBytesBefore;
-        recordCompleted(releasedSlots, releasedRecords, releasedBytes);
-        // FINISHED permits a concurrent completion owner to recycle and reset this descriptor.
-        // Capture and account all release progress before publishing it; do not read the segment
-        // again after this point.
-        segment.finishSegmentClaim();
-        lane(ownerLaneIndex).segmentFinished(segment);
-        reclaimed += releasedSlots;
-        reclaimedPhysicalRecords += releasedRecords;
-        reclaimedBytes = addSaturated(reclaimedBytes, releasedBytes);
+        // Phase C: settle in claim order; all progress is captured before finishSegmentClaim
+        // (FINISHED lets a concurrent owner recycle and reset the descriptor).
+        int[] clearedRecords = actorContext.releaseTurnClearedRecords();
+        long[] clearedBytes = actorContext.releaseTurnClearedBytes();
+        for (int slot = 0; slot < wave.count; slot++) {
+          RetirementSegment segment = wave.segments[slot];
+          int ownerLaneIndex = segment.laneIndex();
+          segment.applyReleaseProgress(clearedRecords[slot], clearedBytes[slot]);
+          segment.completeReleaseProgress();
+          claimedRecords.addAndGet(-wave.retiredRecords[slot]);
+          claimedBytes.addAndGet(-wave.retiredBytes[slot]);
+          int releasedSlots = segment.releasedSlotCount() - wave.beforeReleasedSlots[slot];
+          int releasedRecords = segment.releasedRecordCount() - wave.beforeReleasedRecords[slot];
+          long releasedBytes = segment.releasedBytes() - wave.beforeReleasedBytes[slot];
+          recordCompleted(releasedSlots, releasedRecords, releasedBytes);
+          segment.finishSegmentClaim();
+          wave.rememberFinishedLane(ownerLaneIndex);
+          reclaimed += releasedSlots;
+          reclaimedPhysicalRecords += releasedRecords;
+          reclaimedBytes = addSaturated(reclaimedBytes, releasedBytes);
+        }
+        // One completion drain per touched lane for the whole wave.
+        for (int index = 0; index < wave.finishedLaneCount; index++) {
+          lane(wave.finishedLaneIndexes[index]).finishedSegmentsDrained();
+        }
+        wave.finishedLaneCount = 0;
+        if (queueEmpty) {
+          break;
+        }
       }
       return new ReclaimResult(
           reclaimedSegments, reclaimed, reclaimedPhysicalRecords, reclaimedBytes);
     } finally {
       actorContext.endReleasePageMemo();
+    }
+  }
+
+  /**
+   * Settles a wave whose merged release failed part-way. Progress is durable per cleared
+   * address: segments whose every record was released are finished exactly like the success
+   * path; the rest abort their claim, reverse the claimed→safe ledger move for their remaining
+   * pending, and re-queue at the tail for a later retry that skips cleared addresses.
+   */
+  private void settleFailedWave(TurnReleaseWave wave, Throwable failure) {
+    int[] clearedRecords = actorContext.releaseTurnClearedRecords();
+    long[] clearedBytes = actorContext.releaseTurnClearedBytes();
+    int[] preZeroRecords = actorContext.releaseTurnPreZeroRecords();
+    for (int slot = 0; slot < wave.count; slot++) {
+      RetirementSegment segment = wave.segments[slot];
+      boolean complete;
+      try {
+        segment.applyReleaseProgress(clearedRecords[slot], clearedBytes[slot]);
+        complete = clearedRecords[slot] + preZeroRecords[slot] == wave.tails[slot];
+        if (complete) {
+          segment.completeReleaseProgress();
+        }
+      } catch (Throwable secondary) {
+        failure.addSuppressed(secondary);
+        complete = false;
+      }
+      try {
+        if (!complete) {
+          segment.abortSegmentClaim();
+        }
+        int releasedSlots = segment.releasedSlotCount() - wave.beforeReleasedSlots[slot];
+        int releasedRecords = segment.releasedRecordCount() - wave.beforeReleasedRecords[slot];
+        long releasedBytes = segment.releasedBytes() - wave.beforeReleasedBytes[slot];
+        claimedRecords.addAndGet(-wave.retiredRecords[slot]);
+        claimedBytes.addAndGet(-wave.retiredBytes[slot]);
+        if (complete) {
+          // Capture the owner lane before FINISHED (same rule as the success path).
+          int ownerLaneIndex = segment.laneIndex();
+          recordCompleted(releasedSlots, releasedRecords, releasedBytes);
+          segment.finishSegmentClaim();
+          wave.rememberFinishedLane(ownerLaneIndex);
+        } else {
+          int remainingRecords = segment.pendingRecordCount();
+          long remainingBytes = segment.pendingBytes();
+          safeRecords.addAndGet(remainingRecords);
+          safeBytes.addAndGet(remainingBytes);
+          recordCompleted(releasedSlots, releasedRecords, releasedBytes);
+          enqueueSafeSegment(segment);
+        }
+      } catch (Throwable secondary) {
+        failure.addSuppressed(secondary);
+      }
+    }
+    for (int index = 0; index < wave.finishedLaneCount; index++) {
+      lane(wave.finishedLaneIndexes[index]).finishedSegmentsDrained();
+    }
+    wave.finishedLaneCount = 0;
+  }
+
+  private TurnReleaseWave turnReleaseWave() {
+    Object held = actorContext.releaseTurnWave();
+    if (held instanceof TurnReleaseWave) {
+      return (TurnReleaseWave) held;
+    }
+    TurnReleaseWave wave = new TurnReleaseWave();
+    actorContext.releaseTurnWave(wave);
+    return wave;
+  }
+
+  /** Per-thread claim bookkeeping for one merged release wave (fixed 128-segment cap). */
+  private static final class TurnReleaseWave {
+    static final int MAX_SEGMENTS = 128;
+
+    final RetirementSegment[] segments = new RetirementSegment[MAX_SEGMENTS];
+    final int[] tails = new int[MAX_SEGMENTS];
+    final long[] addressesColumns = new long[MAX_SEGMENTS];
+    final long[] allocationsColumns = new long[MAX_SEGMENTS];
+    final long[] handlesColumns = new long[MAX_SEGMENTS];
+    final int[] retiredRecords = new int[MAX_SEGMENTS];
+    final long[] retiredBytes = new long[MAX_SEGMENTS];
+    final int[] beforeReleasedSlots = new int[MAX_SEGMENTS];
+    final int[] beforeReleasedRecords = new int[MAX_SEGMENTS];
+    final long[] beforeReleasedBytes = new long[MAX_SEGMENTS];
+    int count;
+    int records;
+    /** Distinct owner lanes finished this wave; drained once at wave end. */
+    final int[] finishedLaneIndexes = new int[MAX_SEGMENTS];
+    int finishedLaneCount;
+
+    void reset() {
+      for (int slot = 0; slot < count; slot++) {
+        segments[slot] = null;
+      }
+      count = 0;
+      records = 0;
+      finishedLaneCount = 0;
+    }
+
+    void rememberFinishedLane(int laneIndex) {
+      for (int index = 0; index < finishedLaneCount; index++) {
+        if (finishedLaneIndexes[index] == laneIndex) {
+          return;
+        }
+      }
+      finishedLaneIndexes[finishedLaneCount++] = laneIndex;
     }
   }
 
@@ -1420,7 +1552,12 @@ public final class RetirementJournal {
       return completionPrefix >= watermark;
     }
 
-    private void segmentFinished(RetirementSegment segment) {
+    /**
+     * Drains completions for every segment this lane's reclaim wave already FINISHED. The WIP
+     * counter absorbs any number of finishSegmentClaim calls between two invocations, so a wave
+     * pays one advance/drain per lane instead of one per segment.
+     */
+    private void finishedSegmentsDrained() {
       advanceCompletion();
       if (hasRunnableCompletion()) {
         signalReady();

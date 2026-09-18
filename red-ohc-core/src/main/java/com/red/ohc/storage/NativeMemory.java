@@ -51,6 +51,8 @@ public final class NativeMemory {
 
   public static final class Memory {
     private static final long ALIGNMENT_PADDING_BYTES = 128L;
+    /** Merged-release marker: direct-class record decoded, free deferred to the publish pass. */
+    private static final int DIRECT_RELEASE_PENDING = -2;
     private final NativeAllocator allocator;
     private final AtomicLong allocated = new AtomicLong();
     private final AtomicLong rawAllocations = new AtomicLong();
@@ -623,15 +625,15 @@ public final class NativeMemory {
       int groupMask = groupKeys.length - 1;
       int groupCount = 0;
       int pooledCount = 0;
-      long previousPageKey = 0L;
-      int previousGroupSlot = -1;
+      context.resetReleaseGroupCache();
+      long[] cacheKeys = context.releaseGroupCacheKeys();
+      int[] cacheSlots = context.releaseGroupCacheSlots();
+      int cacheMask = cacheKeys.length - 1;
       try {
         for (int index = 0; index < count; index++) {
           entryGroupSlots[index] = -1;
           long entryAddress = NativeMemory.getLong(entryAddressesAddress + (long) index * 8L);
           if (entryAddress == 0L) {
-            previousPageKey = 0L;
-            previousGroupSlot = -1;
             continue;
           }
           long allocation = NativeMemory.getLong(entryAllocationsAddress + (long) index * 8L);
@@ -641,8 +643,6 @@ public final class NativeMemory {
           int expectedClass = SizeClasses.indexForEntry(allocation);
           int sizeClass = expectedClass < 0 ? WriterArena.DIRECT_CLASS : expectedClass;
           if (sizeClass == WriterArena.DIRECT_CLASS) {
-            previousPageKey = 0L;
-            previousGroupSlot = -1;
             freeDirectEntry(block, WriterArena.directAllocationBytes(allocation));
             // Address is the sole liveness marker. The other columns are dead once it is cleared
             // and will be overwritten before this segment slot is reused.
@@ -655,10 +655,14 @@ public final class NativeMemory {
           }
           long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
           int slot = WriterArena.Page.slotOf(handle);
+          // Direct-mapped pageKey->groupSlot cache (probe runs once per page).
+          int cacheIndex = (int) ((pageKey ^ (pageKey >>> 32)) & cacheMask);
           int groupSlot =
-              previousGroupSlot >= 0 && pageKey == previousPageKey
-                  ? previousGroupSlot
+              cacheKeys[cacheIndex] == pageKey
+                  ? cacheSlots[cacheIndex]
                   : groupSlot(pageKey, groupKeys, groupMask);
+          cacheKeys[cacheIndex] = pageKey;
+          cacheSlots[cacheIndex] = groupSlot;
           WriterArena.Page page;
           if (groupKeys[groupSlot] == 0L) {
             // The unreleased retirement slot is still included in allocatedSlots-freedSlots, so
@@ -695,8 +699,6 @@ public final class NativeMemory {
           groupCounts[groupSlot]++;
           groupBytes[groupSlot] += WriterArena.allocationWeight(allocation);
           pooledCount++;
-          previousPageKey = pageKey;
-          previousGroupSlot = groupSlot;
         }
 
         int offset = 0;
@@ -720,11 +722,16 @@ public final class NativeMemory {
           int groupSlot = groupSlots[group];
           WriterArena.Page page = (WriterArena.Page) groupPages[groupSlot];
           int remaining =
-              page.freeValidatedSlots(
+              page.freeValidatedSlotsTurn(
                   entrySlots,
                   groupIndexes,
                   groupOffsets[groupSlot],
-                  groupCounts[groupSlot]);
+                  groupCounts[groupSlot],
+                  context.releaseFreeMask());
+          boolean recycled = remaining == WriterArena.Page.PAGE_RECYCLED_PENDING_PUBLICATION;
+          if (recycled) {
+            remaining = 0;
+          }
           if (remaining == 0) {
             context.releasePageMemoInvalidate(groupKeys[groupSlot], page);
           }
@@ -738,7 +745,13 @@ public final class NativeMemory {
           // Record the group before the availability callback. If that callback fails, the cleared
           // records are already durable and the retry must account only for the remaining groups.
           context.recordReleaseBatchProgress(groupCounts[groupSlot], groupBytes[groupSlot]);
-          page.completeRemoteFree(remaining);
+          if (recycled) {
+            // The page was reset while undiscoverable; publishing is the single availability
+            // transition, replacing completeRemoteFree for this group.
+            page.publishRecycledPage();
+          } else {
+            page.completeRemoteFree(remaining);
+          }
         }
         return context.releaseBatchRecords();
       } finally {
@@ -756,6 +769,240 @@ public final class NativeMemory {
         slot = (slot + 1) & groupMask;
       }
       return slot;
+    }
+
+    /**
+     * Merged release for one reclaim wave: decodes every claimed segment's columns into one
+     * shared page grouping, then publishes each page exactly once. Decode is side-effect free
+     * (a validation failure leaves the wave unreleased); per-segment progress lands in the
+     * context's turn-progress arrays.
+     */
+    public void releaseEntryBatchTurn(
+        ThreadContext context,
+        long[] segmentAddressesColumns,
+        long[] segmentAllocationsColumns,
+        long[] segmentHandlesColumns,
+        int[] segmentTails,
+        int segmentCount) {
+      if (context == null) {
+        throw new NullPointerException("context");
+      }
+      if (segmentAddressesColumns == null
+          || segmentAllocationsColumns == null
+          || segmentHandlesColumns == null
+          || segmentTails == null
+          || segmentCount < 0
+          || segmentCount > segmentTails.length
+          || segmentCount > segmentAddressesColumns.length
+          || segmentCount > segmentAllocationsColumns.length
+          || segmentCount > segmentHandlesColumns.length) {
+        throw new IllegalArgumentException("invalid merged native release wave");
+      }
+      int total = 0;
+      int[] segmentBases = new int[segmentCount];
+      for (int segment = 0; segment < segmentCount; segment++) {
+        int tail = segmentTails[segment];
+        if (tail < 0) {
+          throw new IllegalArgumentException("invalid merged native release tail");
+        }
+        segmentBases[segment] = total;
+        total += tail;
+      }
+      context.ensureReleaseTurnScratch(Math.max(1, total), segmentCount);
+      context.resetReleaseTurnProgress(segmentCount);
+      if (total == 0) {
+        return;
+      }
+      long[] groupKeys = context.releaseGroupKeys();
+      int[] groupCounts = context.releaseGroupCounts();
+      int[] groupOffsets = context.releaseGroupOffsets();
+      int[] groupPositions = context.releaseGroupPositions();
+      int[] groupSlots = context.releaseGroupSlots();
+      int[] groupIndexes = context.releaseGroupIndexes();
+      long[] groupBytes = context.releaseGroupBytes();
+      int[] entryGroupSlots = context.releaseEntryGroupSlots();
+      Object[] groupPages = context.releaseGroupPages();
+      int[] entrySlots = context.releaseEntrySlots();
+      int[] entrySegments = context.releaseTurnSegmentIndexes();
+      long[] entryWeights = context.releaseTurnEntryWeights();
+      int[] clearedRecords = context.releaseTurnClearedRecords();
+      long[] clearedBytes = context.releaseTurnClearedBytes();
+      int[] preZeroRecords = context.releaseTurnPreZeroRecords();
+      int groupMask = groupKeys.length - 1;
+      int groupCount = 0;
+      int pooledCount = 0;
+      int directCount = 0;
+      context.resetReleaseGroupCache();
+      long[] cacheKeys = context.releaseGroupCacheKeys();
+      int[] cacheSlots = context.releaseGroupCacheSlots();
+      int cacheMask = cacheKeys.length - 1;
+      try {
+        // Phase A: decode every segment's columns into the shared grouping. No side effects.
+        int record = 0;
+        for (int segment = 0; segment < segmentCount; segment++) {
+          int tail = segmentTails[segment];
+          long addressesColumn = segmentAddressesColumns[segment];
+          long allocationsColumn = segmentAllocationsColumns[segment];
+          long handlesColumn = segmentHandlesColumns[segment];
+          for (int index = 0; index < tail; index++, record++) {
+            entryGroupSlots[record] = -1;
+            long entryAddress = NativeMemory.getLong(addressesColumn + (long) index * 8L);
+            if (entryAddress == 0L) {
+              preZeroRecords[segment]++;
+              continue;
+            }
+            long allocation =
+                NativeMemory.getLong(allocationsColumn + (long) index * 8L);
+            long block = entryAddress - WriterArena.PREFIX_BYTES;
+            long handle =
+                NativeMemory.getLong(handlesColumn + (long) index * Long.BYTES);
+            int expectedClass = SizeClasses.indexForEntry(allocation);
+            int sizeClass = expectedClass < 0 ? WriterArena.DIRECT_CLASS : expectedClass;
+            long weight = WriterArena.allocationWeight(allocation);
+            entrySegments[record] = segment;
+            entryWeights[record] = weight;
+            if (sizeClass == WriterArena.DIRECT_CLASS) {
+              // Deferred to the publication pass so a decode failure stays side-effect free.
+              entryGroupSlots[record] = DIRECT_RELEASE_PENDING;
+              directCount++;
+              continue;
+            }
+            if (handle == 0L) {
+              throw new IllegalStateException("pooled retirement record has no allocator handle");
+            }
+            long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
+            int slot = WriterArena.Page.slotOf(handle);
+            // Direct-mapped pageKey->groupSlot cache: the probe runs once per page.
+            int cacheIndex = (int) ((pageKey ^ (pageKey >>> 32)) & cacheMask);
+            int groupSlot =
+                cacheKeys[cacheIndex] == pageKey
+                    ? cacheSlots[cacheIndex]
+                    : groupSlot(pageKey, groupKeys, groupMask);
+            cacheKeys[cacheIndex] = pageKey;
+            cacheSlots[cacheIndex] = groupSlot;
+            WriterArena.Page page;
+            if (groupKeys[groupSlot] == 0L) {
+              Object cached = context.releasePageMemoLookup(pageKey);
+              page = cached instanceof WriterArena.Page ? (WriterArena.Page) cached : null;
+              if (page != null && !page.matchesRelease(pageKey, sizeClass, block, slot)) {
+                context.releasePageMemoInvalidate(pageKey, cached);
+                page = null;
+              }
+              if (page == null) {
+                page = pageForHandle(handle);
+              }
+              if (page == null || !page.matchesRelease(pageKey, sizeClass, block, slot)) {
+                throw new IllegalStateException("unknown allocator slot handle " + handle);
+              }
+              context.releasePageMemoRemember(pageKey, page);
+              groupKeys[groupSlot] = pageKey;
+              groupPages[groupSlot] = page;
+              groupCounts[groupSlot] = 0;
+              groupBytes[groupSlot] = 0L;
+              groupSlots[groupCount++] = groupSlot;
+            } else {
+              page = (WriterArena.Page) groupPages[groupSlot];
+              if (page.sizeClass != sizeClass || !page.ownsEntry(pageKey, block, slot)) {
+                throw new IllegalStateException("unknown allocator slot handle " + handle);
+              }
+            }
+            entrySlots[record] = slot;
+            entryGroupSlots[record] = groupSlot;
+            groupCounts[groupSlot]++;
+            groupBytes[groupSlot] += weight;
+            pooledCount++;
+          }
+        }
+
+        // Phase B1: direct entries, in record order; skipped when the wave decoded none.
+        if (directCount != 0) {
+          for (int index = 0; index < record; index++) {
+            if (entryGroupSlots[index] != DIRECT_RELEASE_PENDING) {
+              continue;
+            }
+            int segment = entrySegments[index];
+            int localIndex = index - segmentRecordBase(segmentBases, segment);
+            long entryAddress =
+                NativeMemory.getLong(segmentAddressesColumns[segment] + (long) localIndex * 8L);
+            long allocation =
+                NativeMemory.getLong(segmentAllocationsColumns[segment] + (long) localIndex * 8L);
+            freeDirectEntry(
+                entryAddress - WriterArena.PREFIX_BYTES,
+                WriterArena.directAllocationBytes(allocation));
+            NativeMemory.putLong(
+                segmentAddressesColumns[segment] + (long) localIndex * Long.BYTES, 0L);
+            clearedRecords[segment]++;
+            clearedBytes[segment] += entryWeights[index];
+          }
+        }
+
+        // Phase B2: one publication round per page for the whole wave.
+        int offset = 0;
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          groupOffsets[groupSlot] = offset;
+          groupPositions[groupSlot] = offset;
+          offset += groupCounts[groupSlot];
+        }
+        for (int index = 0; index < record; index++) {
+          int groupSlot = entryGroupSlots[index];
+          if (groupSlot < 0) {
+            continue;
+          }
+          groupIndexes[groupPositions[groupSlot]++] = index;
+        }
+        if (offset != pooledCount) {
+          throw new IllegalStateException("allocator release grouping lost a pooled entry");
+        }
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          WriterArena.Page page = (WriterArena.Page) groupPages[groupSlot];
+          int remaining =
+              page.freeValidatedSlotsTurn(
+                  entrySlots,
+                  groupIndexes,
+                  groupOffsets[groupSlot],
+                  groupCounts[groupSlot],
+                  context.releaseFreeMask());
+          boolean recycled = remaining == WriterArena.Page.PAGE_RECYCLED_PENDING_PUBLICATION;
+          if (recycled) {
+            remaining = 0;
+          }
+          if (remaining == 0) {
+            context.releasePageMemoInvalidate(groupKeys[groupSlot], page);
+          }
+          for (int index = 0; index < groupCounts[groupSlot]; index++) {
+            int recordIndex = groupIndexes[groupOffsets[groupSlot] + index];
+            int segment = entrySegments[recordIndex];
+            int localIndex = recordIndex - segmentRecordBase(segmentBases, segment);
+            // Address is the sole liveness marker: cleared only after the page accepted the
+            // free, before the availability callback, so a callback failure keeps this group
+            // durable and a retry accounts only the remaining groups.
+            NativeMemory.putLong(
+                segmentAddressesColumns[segment] + (long) localIndex * Long.BYTES, 0L);
+            clearedRecords[segment]++;
+            clearedBytes[segment] += entryWeights[recordIndex];
+          }
+          if (recycled) {
+            // The page was reset while undiscoverable; publishing is the single availability
+            // transition, replacing completeRemoteFree for this group.
+            page.publishRecycledPage();
+          } else {
+            page.completeRemoteFree(remaining);
+          }
+        }
+      } finally {
+        for (int group = 0; group < groupCount; group++) {
+          int groupSlot = groupSlots[group];
+          groupKeys[groupSlot] = 0L;
+          groupPages[groupSlot] = null;
+        }
+      }
+    }
+
+    /** Wave-relative record index of the first record of {@code segment}. */
+    private static int segmentRecordBase(int[] segmentBases, int segment) {
+      return segmentBases[segment];
     }
 
     public void closeArenas() {

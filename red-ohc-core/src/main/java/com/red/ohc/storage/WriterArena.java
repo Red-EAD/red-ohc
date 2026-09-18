@@ -145,6 +145,10 @@ public final class WriterArena {
     retirementHookForTest = hook;
   }
 
+  Runnable retirementHookForTest() {
+    return retirementHookForTest;
+  }
+
   /** Called only after the writer context is no longer active. */
   public void detach() {
     for (SizeClassState sizeClass : sizeClasses) {
@@ -318,6 +322,8 @@ public final class WriterArena {
    * trimmable state.
    */
   static final class Page extends PageSharedLine {
+    /** Whole-page fast-path sentinel: recycled in place, caller publishes after its epilogue. */
+    static final int PAGE_RECYCLED_PENDING_PUBLICATION = -1;
     private static final int ACTIVE = 1;
     private static final int FULL = 2;
     private static final int AVAILABLE = 3;
@@ -474,59 +480,82 @@ public final class WriterArena {
       return remaining;
     }
 
-    /** All slots were checked against this page before any pooled group was released. */
-    int freeValidatedSlots(int[] slots, int[] indexes, int offset, int count) {
+    /**
+     * Grouped release with a whole-page fast path: when this group frees the last live slots
+     * of a detached (FULL) page, skip the bitmap publication, reset the page to fresh bump
+     * state under the FULL→AVAILABLE claim, and return {@link #PAGE_RECYCLED_PENDING_PUBLICATION}
+     * — the caller publishes after its per-record epilogue. Misses fall back to the exact
+     * slow-path publication (the freed count is never taken twice).
+     */
+    int freeValidatedSlotsTurn(
+        int[] slots, int[] indexes, int offset, int count, long[] mask) {
       if (slots == null
           || indexes == null
+          || mask == null
+          || mask.length < FREE_BITMAP_WORDS
           || offset < 0
           || count <= 0
           || offset > indexes.length - count) {
         throw new IllegalArgumentException("invalid native page free batch");
       }
-      long bits0 = 0L;
-      long bits1 = 0L;
-      long bits2 = 0L;
-      long bits3 = 0L;
-      long bits4 = 0L;
-      long bits5 = 0L;
-      long bits6 = 0L;
-      long bits7 = 0L;
-      for (int index = 0; index < count; index++) {
-        int slot = slots[indexes[offset + index]];
-        long bit = 1L << (slot & 63);
-        switch (slot >>> 6) {
-          case 0:
-            bits0 |= bit;
-            break;
-          case 1:
-            bits1 |= bit;
-            break;
-          case 2:
-            bits2 |= bit;
-            break;
-          case 3:
-            bits3 |= bit;
-            break;
-          case 4:
-            bits4 |= bit;
-            break;
-          case 5:
-            bits5 |= bit;
-            break;
-          case 6:
-            bits6 |= bit;
-            break;
-          case 7:
-            bits7 |= bit;
-            break;
-          default:
-            throw new AssertionError(slot);
+      // Whole-page candidacy first: the fast path never publishes a bitmap, so its slot mask
+      // is built only when a publication actually needs it.
+      long freed = (long) FREED_SLOTS.getVolatile(this);
+      long allocated = (long) ALLOCATED_SLOTS.getAcquire(this);
+      if (freed + (long) count == allocated && state() == FULL) {
+        int remaining = recordFreedSlots(count);
+        if (remaining == 0 && STATE.compareAndSet(this, FULL, AVAILABLE)) {
+          resetFreeStateForReuse();
+          return PAGE_RECYCLED_PENDING_PUBLICATION;
         }
+        // Candidate miss after the count was recorded (owner raced the counters or the
+        // transition): publish only the bitmap; the freed count is already durable.
+        buildFreeMaskInto(slots, indexes, offset, count, mask);
+        publishFreeBits(
+            mask[0], mask[1], mask[2], mask[3], mask[4], mask[5], mask[6], mask[7]);
+        checkRemaining(remaining, 0L, 0L);
+        return remaining;
       }
-      publishFreeBits(bits0, bits1, bits2, bits3, bits4, bits5, bits6, bits7);
+      buildFreeMaskInto(slots, indexes, offset, count, mask);
+      publishFreeBits(
+          mask[0], mask[1], mask[2], mask[3], mask[4], mask[5], mask[6], mask[7]);
       int remaining = recordFreedSlots(count);
       checkRemaining(remaining, 0L, 0L);
       return remaining;
+    }
+
+    /** Publishes a recycled page after the caller's epilogue; fires the test hook like the
+     * availability callback path. */
+    void publishRecycledPage() {
+      publishAvailable();
+      Runnable hook = ownerClass.arena.retirementHookForTest();
+      if (hook != null) {
+        hook.run();
+      }
+    }
+
+    /** Rewinds the allocator to fresh (bump-mode) state; caller holds the FULL→AVAILABLE claim. */
+    private void resetFreeStateForReuse() {
+      FREE_BITS_0.set(this, 0L);
+      FREE_BITS_1.set(this, 0L);
+      FREE_BITS_2.set(this, 0L);
+      FREE_BITS_3.set(this, 0L);
+      FREE_BITS_4.set(this, 0L);
+      FREE_BITS_5.set(this, 0L);
+      FREE_BITS_6.set(this, 0L);
+      FREE_BITS_7.set(this, 0L);
+      FREE_SUMMARY.set(this, 0L);
+      nextSlot = 0;
+    }
+
+    private void buildFreeMaskInto(int[] slots, int[] indexes, int offset, int count, long[] mask) {
+      for (int word = 0; word < FREE_BITMAP_WORDS; word++) {
+        mask[word] = 0L;
+      }
+      for (int index = 0; index < count; index++) {
+        int slot = slots[indexes[offset + index]];
+        mask[slot >>> 6] |= 1L << (slot & 63);
+      }
     }
 
     void ownerExhausted() {
@@ -562,7 +591,7 @@ public final class WriterArena {
       publishAvailable();
     }
 
-    private void publishAvailable() {
+    void publishAvailable() {
       // Read the owner after the FULL->AVAILABLE CAS won; a pre-CAS snapshot could be stale.
       SizeClassState owner = ownerClass;
       // Retain only pages with live slots; completely free pages must stay trimmable.

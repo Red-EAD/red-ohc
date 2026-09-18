@@ -66,6 +66,20 @@ public final class ThreadContext {
   private int releaseBatchRecords;
   private long releaseBatchBytes;
   private ReleasePageMemo releasePageMemo;
+  // Turn-level merged release scratch: per-record provenance across one reclaim wave plus
+  // per-segment progress outputs. Indexed by wave-relative record/segment positions.
+  private int[] releaseTurnSegmentIndexes;
+  private long[] releaseTurnEntryWeights;
+  private int[] releaseTurnClearedRecords;
+  private long[] releaseTurnClearedBytes;
+  private int[] releaseTurnPreZeroRecords;
+  /** Opaque per-thread reclaim-wave bookkeeping owned by the retirement journal. */
+  private Object releaseTurnWave;
+  /** Per-thread register spill for the whole-page fast path's slot mask (8 bitmap words). */
+  private final long[] releaseFreeMask = new long[8];
+  /** Direct-mapped pageKey→group-slot cache for the grouped release decode. */
+  private long[] releaseGroupCacheKeys;
+  private int[] releaseGroupCacheSlots;
 
   public ThreadContext(WriterArena writerArena) {
     if (writerArena != null) {
@@ -295,6 +309,107 @@ public final class ThreadContext {
       releasePageMemo = memo;
     }
     memo.begin();
+  }
+
+  /**
+   * Ensures reusable storage for one merged turn release wave: {@code recordCapacity} decode
+   * slots (grouping scratch plus per-record provenance) and {@code segmentCapacity} per-segment
+   * progress slots. Sizing follows {@link #ensureReleaseBatchScratch}; arrays only ever grow.
+   */
+  public void ensureReleaseTurnScratch(int recordCapacity, int segmentCapacity) {
+    if (recordCapacity <= 0 || segmentCapacity <= 0) {
+      throw new IllegalArgumentException("release turn scratch capacities must be positive");
+    }
+    ensureReleaseBatchScratch(recordCapacity);
+    if (releaseTurnSegmentIndexes != null
+        && releaseTurnSegmentIndexes.length >= recordCapacity
+        && releaseTurnEntryWeights.length >= recordCapacity
+        && releaseTurnClearedRecords != null
+        && releaseTurnClearedRecords.length >= segmentCapacity
+        && releaseTurnClearedBytes.length >= segmentCapacity
+        && releaseTurnPreZeroRecords.length >= segmentCapacity) {
+      return;
+    }
+    if (releaseTurnSegmentIndexes == null || releaseTurnSegmentIndexes.length < recordCapacity) {
+      releaseTurnSegmentIndexes = new int[recordCapacity];
+      releaseTurnEntryWeights = new long[recordCapacity];
+    }
+    if (releaseTurnClearedRecords == null || releaseTurnClearedRecords.length < segmentCapacity) {
+      releaseTurnClearedRecords = new int[segmentCapacity];
+      releaseTurnClearedBytes = new long[segmentCapacity];
+      releaseTurnPreZeroRecords = new int[segmentCapacity];
+    }
+  }
+
+  /** Zeroes the wave's per-segment progress outputs; self-ensuring (fresh arrays are zeroed). */
+  public void resetReleaseTurnProgress(int segmentCount) {
+    if (releaseTurnClearedRecords == null || releaseTurnClearedRecords.length < segmentCount) {
+      releaseTurnClearedRecords = new int[segmentCount];
+      releaseTurnClearedBytes = new long[segmentCount];
+      releaseTurnPreZeroRecords = new int[segmentCount];
+      return;
+    }
+    for (int index = 0; index < segmentCount; index++) {
+      releaseTurnClearedRecords[index] = 0;
+      releaseTurnClearedBytes[index] = 0L;
+      releaseTurnPreZeroRecords[index] = 0;
+    }
+  }
+
+  public int[] releaseTurnSegmentIndexes() {
+    return releaseTurnSegmentIndexes;
+  }
+
+  public long[] releaseTurnEntryWeights() {
+    return releaseTurnEntryWeights;
+  }
+
+  public int[] releaseTurnClearedRecords() {
+    return releaseTurnClearedRecords;
+  }
+
+  public long[] releaseTurnClearedBytes() {
+    return releaseTurnClearedBytes;
+  }
+
+  public int[] releaseTurnPreZeroRecords() {
+    return releaseTurnPreZeroRecords;
+  }
+
+  /** Opaque, journal-owned claim bookkeeping for the merged turn release; never inspected here. */
+  public Object releaseTurnWave() {
+    return releaseTurnWave;
+  }
+
+  /** Reusable 8-word slot-mask spill for {@code Page.freeValidatedSlotsTurn}. */
+  public long[] releaseFreeMask() {
+    return releaseFreeMask;
+  }
+
+  /** Number of release group-cache slots; a power of two, indexed by mixed page key. */
+  public static final int RELEASE_GROUP_CACHE_ENTRIES = 256;
+
+  /** Clears the page-group cache at the start of a grouped release call. */
+  public void resetReleaseGroupCache() {
+    if (releaseGroupCacheKeys == null) {
+      releaseGroupCacheKeys = new long[RELEASE_GROUP_CACHE_ENTRIES];
+      releaseGroupCacheSlots = new int[RELEASE_GROUP_CACHE_ENTRIES];
+      return;
+    }
+    java.util.Arrays.fill(releaseGroupCacheKeys, 0L);
+    java.util.Arrays.fill(releaseGroupCacheSlots, 0);
+  }
+
+  public long[] releaseGroupCacheKeys() {
+    return releaseGroupCacheKeys;
+  }
+
+  public int[] releaseGroupCacheSlots() {
+    return releaseGroupCacheSlots;
+  }
+
+  public void releaseTurnWave(Object wave) {
+    this.releaseTurnWave = wave;
   }
 
   /** Returns an opaque Page only when the full page key matches in the current reclaim scope. */
