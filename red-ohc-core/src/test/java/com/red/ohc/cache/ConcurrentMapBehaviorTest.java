@@ -116,32 +116,97 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   @Test
-  public void ordinaryNewPutPublishesWithOneChmPutIfAbsentWithoutPreLookup() throws Exception {
+  public void ordinaryNewPutProbesOnceThenPublishesWithOnePutIfAbsent() throws Exception {
     try (OffHeapCache<String, String> cache = newCache()) {
       CountingPutMap countingMap = new CountingPutMap();
       replaceDataMaps(cache, countingMap);
 
       cache.put("new-key", "value");
 
-      assertEquals(countingMap.lookupCalls.get(), 0);
+      assertEquals(countingMap.lookupCalls.get(), 1);
       assertEquals(countingMap.putIfAbsentCalls.get(), 1);
       assertEquals(cache.get("new-key"), "value");
     }
   }
 
   @Test
-  public void ordinaryPutRetriesRemovedCollisionWithoutUsingItsNativeKey() throws Exception {
-    assertRemovedCollisionIsRetried(false);
+  public void ordinaryExistingPutReplacesThroughTheProbeWithoutInsertion() throws Exception {
+    try (OffHeapCache<String, String> cache = newCache()) {
+      CountingPutMap countingMap = new CountingPutMap();
+      replaceDataMaps(cache, countingMap);
+
+      cache.put("key", "old");
+      cache.put("key", "new");
+
+      assertEquals(countingMap.lookupCalls.get(), 2, "one probe per put");
+      assertEquals(countingMap.putIfAbsentCalls.get(), 1, "only the first put inserts");
+      assertEquals(cache.get("key"), "new");
+      assertEquals(cache.size(), 1);
+    }
   }
 
   @Test
-  public void ordinaryPutRevalidatesCollisionIdentityAfterConcurrentReinsertion() throws Exception {
-    assertRemovedCollisionIsRetried(true);
+  public void ordinaryPutRetriesARemovedProbeWinnerWithoutUsingItsNativeKey() throws Exception {
+    assertRemovedProbeWinnerIsRetried(false);
   }
 
-  private void assertRemovedCollisionIsRetried(boolean reinsert) throws Exception {
+  @Test
+  public void ordinaryPutRevalidatesProbeIdentityAfterConcurrentReinsertion() throws Exception {
+    assertRemovedProbeWinnerIsRetried(true);
+  }
+
+  @Test
+  public void ordinaryPutRetiresAStalePutIfAbsentWinnerWithoutUsingItsNativeKey() throws Exception {
     try (OffHeapCache<String, String> cache = newCache()) {
-      PausedCollisionMap map = new PausedCollisionMap();
+      PausedInsertCollisionMap map = new PausedInsertCollisionMap();
+      replaceDataMaps(cache, map);
+
+      // Keep the retired winner's blocks allocated so a regression reads garbage-but-mapped
+      // memory instead of freed native memory.
+      ThreadContext pinned = context(cache);
+      ReaderGuard guard = new ReaderGuard(worker(cache));
+      assertTrue(guard.enter(pinned));
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      try {
+        // The key is absent, so the put thread's probe misses (and pauses); the main thread
+        // inserts a live mapping in that window, the put thread's insert then collides with
+        // it in putIfAbsent (second pause), and the main thread retires that winner before
+        // the pause lifts — the insert path must observe the stale winner, drop it without
+        // touching its native key, and retry to a fresh mapping.
+        Future<?> put = executor.submit(() -> cache.put("key", "latest"));
+        assertTrue(map.probeObserved.await(5L, TimeUnit.SECONDS));
+        cache.put("key", "interleaved");
+        map.resumeProbe.countDown();
+        assertTrue(map.collisionObserved.await(5L, TimeUnit.SECONDS));
+        cache.remove("key");
+        assertFalse(map.collisionWinner.isAlive());
+        map.resumeCollision.countDown();
+        put.get(5L, TimeUnit.SECONDS);
+
+        assertEquals(cache.get("key"), "latest");
+        assertEquals(cache.size(), 1);
+        assertEquals(
+            map.retiredKeyUses.get(),
+            0,
+            "a retired putIfAbsent winner must not be reused as a native CHM key");
+      } finally {
+        map.resumeProbe.countDown();
+        map.resumeCollision.countDown();
+        executor.shutdown();
+        try {
+          assertTrue(executor.awaitTermination(5L, TimeUnit.SECONDS));
+        } finally {
+          guard.exit(pinned);
+        }
+      }
+      cache.flushAsync().get(5L, TimeUnit.SECONDS);
+      assertTrue(cache.stats().retirementActorReclaimedRecords() >= 2L);
+    }
+  }
+
+  private void assertRemovedProbeWinnerIsRetried(boolean reinsert) throws Exception {
+    try (OffHeapCache<String, String> cache = newCache()) {
+      PausedProbeMap map = new PausedProbeMap();
       replaceDataMaps(cache, map);
       cache.put("key", "old");
       cache.flushAsync().get(5L, TimeUnit.SECONDS);
@@ -154,13 +219,15 @@ public final class ConcurrentMapBehaviorTest {
       ExecutorService executor = Executors.newSingleThreadExecutor();
       try {
         Future<?> put = executor.submit(() -> cache.put("key", "latest"));
-        assertTrue(map.collisionObserved.await(5L, TimeUnit.SECONDS));
+        assertTrue(map.probeObserved.await(5L, TimeUnit.SECONDS));
+        // The put thread is parked inside its probe with the live winner in hand; retire that
+        // winner underneath it and (optionally) let a fresh mapping reappear.
         cache.remove("key");
-        assertFalse(map.collisionWinner.isAlive());
+        assertFalse(map.probedWinner.isAlive());
         if (reinsert) {
           cache.put("key", "interleaved");
         }
-        map.resumeCollision.countDown();
+        map.resumeProbe.countDown();
         put.get(5L, TimeUnit.SECONDS);
 
         assertEquals(cache.get("key"), "latest");
@@ -168,9 +235,9 @@ public final class ConcurrentMapBehaviorTest {
         assertEquals(
             map.retiredKeyUses.get(),
             0,
-            "a removed collision must not be reused as a native CHM key after its guard exits");
+            "a removed probe winner must not be reused as a native CHM key after its guard exits");
       } finally {
-        map.resumeCollision.countDown();
+        map.resumeProbe.countDown();
         executor.shutdown();
         try {
           assertTrue(executor.awaitTermination(5L, TimeUnit.SECONDS));
@@ -1038,22 +1105,40 @@ public final class ConcurrentMapBehaviorTest {
     }
   }
 
-  private static final class PausedCollisionMap
+  private static final class PausedInsertCollisionMap
       extends ConcurrentHashMap<
           com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+    private final CountDownLatch probeObserved = new CountDownLatch(1);
+    private final CountDownLatch resumeProbe = new CountDownLatch(1);
     private final CountDownLatch collisionObserved = new CountDownLatch(1);
     private final CountDownLatch resumeCollision = new CountDownLatch(1);
-    private final AtomicBoolean pauseClaimed = new AtomicBoolean();
+    private final AtomicBoolean probeClaimed = new AtomicBoolean();
+    private final AtomicBoolean collisionClaimed = new AtomicBoolean();
     private final AtomicInteger retiredKeyUses = new AtomicInteger();
     private volatile com.red.ohc.index.Entry collisionWinner;
     private volatile Thread collisionWriter;
+
+    @Override
+    public com.red.ohc.index.Entry get(Object key) {
+      com.red.ohc.index.Entry result = super.get(key);
+      if (probeClaimed.compareAndSet(false, true)) {
+        probeObserved.countDown();
+        try {
+          assertTrue(resumeProbe.await(5L, TimeUnit.SECONDS));
+        } catch (InterruptedException interruption) {
+          Thread.currentThread().interrupt();
+          throw new AssertionError(interruption);
+        }
+      }
+      return result;
+    }
 
     @Override
     public com.red.ohc.index.Entry putIfAbsent(
         com.red.ohc.index.Entry key,
         com.red.ohc.index.Entry value) {
       com.red.ohc.index.Entry winner = super.putIfAbsent(key, value);
-      if (winner != null && pauseClaimed.compareAndSet(false, true)) {
+      if (winner != null && collisionClaimed.compareAndSet(false, true)) {
         collisionWinner = winner;
         collisionWriter = Thread.currentThread();
         collisionObserved.countDown();
@@ -1076,6 +1161,48 @@ public final class ConcurrentMapBehaviorTest {
                 ? extends com.red.ohc.index.Entry>
             remappingFunction) {
       if (Thread.currentThread() == collisionWriter && key == collisionWinner) {
+        retiredKeyUses.incrementAndGet();
+      }
+      return super.compute(key, remappingFunction);
+    }
+  }
+
+  private static final class PausedProbeMap
+      extends ConcurrentHashMap<
+          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+    private final CountDownLatch probeObserved = new CountDownLatch(1);
+    private final CountDownLatch resumeProbe = new CountDownLatch(1);
+    private final AtomicBoolean pauseClaimed = new AtomicBoolean();
+    private final AtomicInteger retiredKeyUses = new AtomicInteger();
+    private volatile com.red.ohc.index.Entry probedWinner;
+    private volatile Thread probeWriter;
+
+    @Override
+    public com.red.ohc.index.Entry get(Object key) {
+      com.red.ohc.index.Entry winner = super.get(key);
+      if (winner != null && pauseClaimed.compareAndSet(false, true)) {
+        probedWinner = winner;
+        probeWriter = Thread.currentThread();
+        probeObserved.countDown();
+        try {
+          assertTrue(resumeProbe.await(5L, TimeUnit.SECONDS));
+        } catch (InterruptedException interruption) {
+          Thread.currentThread().interrupt();
+          throw new AssertionError(interruption);
+        }
+      }
+      return winner;
+    }
+
+    @Override
+    public com.red.ohc.index.Entry compute(
+        com.red.ohc.index.Entry key,
+        BiFunction<
+                ? super com.red.ohc.index.Entry,
+                ? super com.red.ohc.index.Entry,
+                ? extends com.red.ohc.index.Entry>
+            remappingFunction) {
+      if (Thread.currentThread() == probeWriter && key == probedWinner) {
         retiredKeyUses.incrementAndGet();
       }
       return super.compute(key, remappingFunction);

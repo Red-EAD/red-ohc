@@ -1451,9 +1451,37 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (isClosing()) {
         throw new IllegalStateException("cache is closed");
       }
+      // Get-first: probe with the encoded key before building an insert candidate; a live hit
+      // routes straight to the replace transaction. The probe runs under a reader epoch like
+      // the insert's putIfAbsent — equals reads the resident entry's native key block.
+      com.red.ohc.index.Entry existing;
+      if (!enterWriterReader(context)) {
+        throw new IllegalStateException("cache is closed");
+      }
+      try {
+        existing = data.get(lookup);
+      } finally {
+        exit(context);
+      }
+      if (existing != null && existing.isAlive()) {
+        if (replaceExistingResolvedResult(
+            context,
+            existing,
+            value,
+            null,
+            valueLength,
+            valueAllocation,
+            deadlineNanos,
+            deferMaintenanceWake,
+            0L)) {
+          return;
+        }
+        // The replace revalidation rejected the entry (claimed, retired, or replaced
+        // concurrently); the insert path re-resolves from scratch.
+      }
       // Prepare the value before the CHM operation and let the insertion decide whether this is
-      // a new mapping or a replacement. New-heavy workloads avoid a lookup-only round trip; a
-      // collision reuses the prepared value in the existing replacement transaction.
+      // a new mapping or a replacement; a collision reuses the prepared value in the existing
+      // replacement transaction.
       if (insertNewEntry(
           context,
           hash64,
