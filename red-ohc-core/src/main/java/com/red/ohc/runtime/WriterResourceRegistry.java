@@ -170,6 +170,15 @@ public final class WriterResourceRegistry {
     return resourceCount;
   }
 
+  /** Fixed-slot accessor for actor-side patrols; indices are dense and stable once assigned. */
+  public WriterResource resourceAt(int index) {
+    if (index < 0 || index >= resourceCount) {
+      return null;
+    }
+    WriterResource[] chunk = resourceChunks[index >>> RESOURCE_CHUNK_SHIFT];
+    return chunk == null ? null : chunk[index & RESOURCE_CHUNK_MASK];
+  }
+
   public long captureRegistrationVersion() {
     return registrationVersion;
   }

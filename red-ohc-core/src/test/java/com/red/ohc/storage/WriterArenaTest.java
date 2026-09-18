@@ -165,6 +165,63 @@ public class WriterArenaTest {
   }
 
   @Test
+  public void idleSealPublishesRetainedPagesAndTheOwnerSelfHeals() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      long bytes = 112L;
+      int slotsPerPage = SizeClasses.pageBytes(SizeClasses.indexForEntry(bytes))
+          / SizeClasses.slotBytes(SizeClasses.indexForEntry(bytes));
+      WriterArena source = memory.newWriterArena();
+      long[] firstPageEntries = new long[slotsPerPage];
+      for (int index = 0; index < slotsPerPage; index++) {
+        firstPageEntries[index] = source.allocate(bytes);
+      }
+      source.allocate(bytes);
+      for (int index = 0; index < slotsPerPage / 2; index++) {
+        memory.releaseEntry(firstPageEntries[index], bytes);
+      }
+      Assert.assertEquals(memory.retainedPagesInUse(), 1L);
+      Assert.assertEquals(memory.pageReadyCount(), 0L);
+
+      long pagesBefore = memory.pageAllocatedCount();
+      source.sealRetention();
+
+      Assert.assertEquals(memory.retainedPagesInUse(), 0L, "the seal must spill the retained page");
+      Assert.assertEquals(memory.pageReadyCount(), 1L);
+      Assert.assertEquals(memory.pageAllocatedCount(), pagesBefore, "the seal frees nothing");
+
+      WriterArena other = memory.newWriterArena();
+      other.allocate(bytes);
+      Assert.assertEquals(memory.pageReadyCount(), 0L, "another arena must steal the spilled page");
+      Assert.assertEquals(memory.pageAllocatedCount(), pagesBefore);
+
+      source.allocate(bytes);
+      Assert.assertEquals(
+          memory.pageAllocatedCount(), pagesBefore, "the sealed owner keeps its current page");
+
+      for (int index = 0; index < slotsPerPage + 4; index++) {
+        long address = source.allocate(bytes);
+        Assert.assertNotEquals(address, 0L, "allocation must survive the seal");
+      }
+
+      // The cold allocation re-armed retention: a later partial page is retained again.
+      int largeClass = SizeClasses.indexForEntry(5_000L);
+      int largeSlotsPerPage = SizeClasses.pageBytes(largeClass) / SizeClasses.slotBytes(largeClass);
+      long[] largeEntries = new long[largeSlotsPerPage];
+      for (int index = 0; index < largeSlotsPerPage; index++) {
+        largeEntries[index] = source.allocate(5_000L);
+      }
+      source.allocate(5_000L);
+      for (int index = 0; index < largeSlotsPerPage / 2; index++) {
+        memory.releaseEntry(largeEntries[index], 5_000L);
+      }
+      Assert.assertEquals(memory.retainedPagesInUse(), 1L, "retention must re-arm after the heal");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void smallEntriesAllocateOnlyThePagesRequiredByTheirSizeClass() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     try {

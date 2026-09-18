@@ -33,6 +33,8 @@ public final class WriterArena {
   private final NativeMemory.Memory memory;
   private final int id;
   private volatile Runnable retirementHookForTest;
+  /** Set by the actor's idle seal; cleared by the owner's next cold allocation. */
+  private volatile boolean retentionSealed;
 
   /** Lazily populated by the exclusive writer; remote frees use Page.ownerClass instead. */
   private final SizeClassState[] sizeClasses = new SizeClassState[SizeClasses.count()];
@@ -58,6 +60,11 @@ public final class WriterArena {
       Page page = ownerClass.currentPage;
       if (page == null) {
         page = pollRetainedOwnerPage(ownerClass);
+        if (page == null && retentionSealed) {
+          retentionSealed = false;
+          reopenRetention();
+          page = pollRetainedOwnerPage(ownerClass);
+        }
         if (page == null) {
           page = memory.tryStealAvailablePage(sizeClass, ownerClass);
         }
@@ -174,6 +181,19 @@ public final class WriterArena {
     }
   }
 
+  /**
+   * Actor-side idle seal: publishes retained pages to the shared stack. Current pages and the
+   * resource lifecycle stay untouched; the owner re-arms retention on its next cold allocation.
+   */
+  public void sealRetention() {
+    for (SizeClassState sizeClass : sizeClasses) {
+      if (sizeClass != null) {
+        sizeClass.closeRetention();
+      }
+    }
+    retentionSealed = true;
+  }
+
   public static long directAllocationBytes(long entryBytes) {
     return SizeClasses.directBytes(entryBytes);
   }
@@ -251,6 +271,7 @@ public final class WriterArena {
       for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
         if (retainedPages.get(slot) == page
             && retainedPages.compareAndSet(slot, page, null)) {
+          arena.memory.recordRetainedPageReleased();
           return true;
         }
       }
@@ -279,6 +300,7 @@ public final class WriterArena {
             continue;
           }
           if (retainedPages.compareAndSet(slot, page, RETENTION_CLOSED_PAGE)) {
+            arena.memory.recordRetainedPageReleased();
             arena.memory.publishAvailablePageGlobal(page);
             break;
           }

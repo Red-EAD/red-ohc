@@ -2,6 +2,7 @@ package com.red.ohc.maintenance;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1617,6 +1618,7 @@ public final class MaintenanceEventLoop
     }
     sampleRetirementRates();
     trimReadyPagesWhenOverCapacity();
+    sealIdleArenaRetention();
     return work;
   }
 
@@ -1642,6 +1644,65 @@ public final class MaintenanceEventLoop
     long trimmedBytes = memory.trimAvailablePages();
     nextReadyTrimCheckNanos =
         now + (trimmedBytes > 0L ? READY_TRIM_CHECK_INTERVAL_NANOS : READY_TRIM_BACKOFF_NANOS);
+  }
+
+  private static final long IDLE_RETENTION_SEAL_NANOS = 60_000_000_000L;
+  private static final int RETENTION_PATROL_PER_TURN = 16;
+  private static final long RETENTION_PATROL_SWEEP_INTERVAL_NANOS = 10_000_000_000L;
+  private int retentionPatrolCursor;
+  private long nextRetentionPatrolNanos;
+  private long[] retentionPatrolRecords = new long[0];
+  private long[] retentionPatrolChangeNanos = new long[0];
+
+  /** Seals the private page retention of writers whose lifecycle lane has been silent for 60s. */
+  private void sealIdleArenaRetention() {
+    long now = sampleMonotonicNow();
+    if (now < nextRetentionPatrolNanos) {
+      return;
+    }
+    WriterResourceRegistry resources = writerResources;
+    int count = resources == null ? 0 : resources.resourceCount();
+    if (count == 0) {
+      nextRetentionPatrolNanos = now + RETENTION_PATROL_SWEEP_INTERVAL_NANOS;
+      return;
+    }
+    if (retentionPatrolRecords.length < count) {
+      long[] records = new long[count];
+      long[] changeNanos = new long[count];
+      System.arraycopy(retentionPatrolRecords, 0, records, 0, retentionPatrolRecords.length);
+      System.arraycopy(retentionPatrolChangeNanos, 0, changeNanos, 0, retentionPatrolChangeNanos.length);
+      for (int index = retentionPatrolChangeNanos.length; index < count; index++) {
+        changeNanos[index] = Long.MIN_VALUE;
+      }
+      retentionPatrolRecords = records;
+      retentionPatrolChangeNanos = changeNanos;
+    }
+    int cursor = retentionPatrolCursor;
+    int visited = 0;
+    while (visited < RETENTION_PATROL_PER_TURN && cursor < count) {
+      WriterResource resource = resources.resourceAt(cursor);
+      if (resource != null) {
+        long published = resource.lifecycleLane().publishedRecordsTotal();
+        if (published == retentionPatrolRecords[cursor]) {
+          long changedAt = retentionPatrolChangeNanos[cursor];
+          if (changedAt != Long.MIN_VALUE && now - changedAt >= IDLE_RETENTION_SEAL_NANOS) {
+            resource.arena().sealRetention();
+            retentionPatrolChangeNanos[cursor] = now;
+          }
+        } else {
+          retentionPatrolRecords[cursor] = published;
+          retentionPatrolChangeNanos[cursor] = now;
+        }
+      }
+      cursor++;
+      visited++;
+    }
+    if (cursor >= count) {
+      retentionPatrolCursor = 0;
+      nextRetentionPatrolNanos = now + RETENTION_PATROL_SWEEP_INTERVAL_NANOS;
+    } else {
+      retentionPatrolCursor = cursor;
+    }
   }
 
   private static final int PAGE_AUDIT_MAX_PER_STEP = 512;

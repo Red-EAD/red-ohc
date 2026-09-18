@@ -428,6 +428,10 @@ public final class NativeMemory {
       retainedPageConsumedCount.increment();
     }
 
+    void recordRetainedPageReleased() {
+      retainedPageCount.decrement();
+    }
+
     void recordPageReuse() {
       pageReusedCount.increment();
     }
