@@ -14,7 +14,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.ChmSizing;
@@ -99,7 +98,7 @@ public final class CHMArchitectureTest {
 
   @Test
   public void chmLookupMustEvaluateTheProbeSideEquals() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       byte[] keyBytes = {(byte) 0xa1, 0x02, 0x33, 0x7f};
       LookupKey probe = new LookupKey();

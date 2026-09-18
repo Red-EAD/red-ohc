@@ -30,7 +30,6 @@ import java.util.function.ToIntFunction;
 import java.util.function.ToLongBiFunction;
 import java.util.function.ToLongFunction;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheLoader;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.DirectEntryConsumer;
@@ -121,7 +120,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long defaultTtlMillis,
       java.util.concurrent.Executor loaderExecutor,
       long closeTimeoutMillis,
-      AllocatorType allocatorType,
       Ticker ticker,
       Eviction eviction,
       EvictionListener<K, V> evictionListener,
@@ -146,7 +144,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     int initialCapacity = ChmSizing.constructorCapacity(entryEstimate, limit);
     this.data = new ConcurrentHashMap<>(initialCapacity, 0.75f, 1);
     this.writerLifecycleJournal = new WriterLifecycleJournal();
-    this.memory = new NativeMemory.Memory(allocatorType);
+    this.memory = new NativeMemory.Memory();
     this.readers = new ReaderRegistry(this.memory);
     EntryLinks links = new EntryLinks(memory);
     this.logicalAdmission = new LogicalAdmission(limit, countBounded);

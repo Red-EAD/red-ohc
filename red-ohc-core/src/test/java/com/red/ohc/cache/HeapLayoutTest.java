@@ -13,7 +13,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.openjdk.jol.info.ClassLayout;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
@@ -72,7 +71,7 @@ public class HeapLayoutTest {
     Runtime runtime = Runtime.getRuntime();
     System.gc();
     long heapBefore = runtime.totalMemory() - runtime.freeMemory();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> index = new ConcurrentHashMap<>(count);
     try {
       for (int i = 0; i < count; i++) {

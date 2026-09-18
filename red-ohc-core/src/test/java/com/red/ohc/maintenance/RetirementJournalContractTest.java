@@ -17,7 +17,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ThreadContext;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
@@ -63,7 +62,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void queueDepthNeverReportsNegativeDuringAWeakSnapshot() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     try {
       Field completedRecords = RetirementJournal.class.getDeclaredField("completedRecords");
@@ -79,7 +78,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void committedRetirementCountsBeforeItsProducerSegmentIsSealed() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     long allocation = ValueBlock.allocationLength(64);
@@ -115,7 +114,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void completionOwnerHandsOffAConcurrentSegmentFinish() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     long allocation = ValueBlock.allocationLength(64);
@@ -156,7 +155,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void actorReclaimConsumesOneSafeSegmentPerBatch() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     try {
       appendSegment(journal.actorLane());
@@ -182,7 +181,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void actorReclaimBatchAggregatesMultipleSafeSegments() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     try {
       appendSegment(journal.actorLane());
@@ -216,7 +215,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void actorPageMemoSpansSegmentsAndEndsBeforeReclaimReturns() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     long[] entries = new long[RetirementSegment.CAPACITY + 1];
     long allocation = 112L;
@@ -281,7 +280,7 @@ public final class RetirementJournalContractTest {
 
   @Test
   public void lookupFailureEndsMemoScopeAndRequeuesTheUnreleasedSegment() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     long allocation = 112L;
     long entry = 0L;
@@ -344,7 +343,7 @@ public final class RetirementJournalContractTest {
 
   @Test(timeOut = 20_000L)
   public void multipleSafePublishersAndOneActorConsumerPreserveAllSegments() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 4);
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch publishersFinished = new CountDownLatch(4);
@@ -426,7 +425,7 @@ public final class RetirementJournalContractTest {
    */
   @Test
   public void mergedWavePublishesASharedPageOnce() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     long[] entries = new long[RetirementSegment.CAPACITY + 1];
     long allocation = 112L;
@@ -489,7 +488,7 @@ public final class RetirementJournalContractTest {
    */
   @Test
   public void mergedWaveDecodeFailureReleasesNothing() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     long[] entries = new long[RetirementSegment.CAPACITY + 1];
     long allocation = 112L;
@@ -570,7 +569,7 @@ public final class RetirementJournalContractTest {
    */
   @Test
   public void mergedWaveCallbackFailureSettlesCompleteSegments() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     int firstSegmentRecords = 3;
     int secondSegmentRecords = 2;
@@ -664,7 +663,7 @@ public final class RetirementJournalContractTest {
    */
   @Test
   public void wholePageDeathRecyclesAFreshBumpModePageAtFullCapacity() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     long allocation = 112L;
     try {
@@ -721,7 +720,7 @@ public final class RetirementJournalContractTest {
    */
   @Test
   public void mergedWaveGroupsAlternatingSizeClassesPerClassPage() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     long valueAllocation = ValueBlock.allocationLength(5_120);
     long keyAllocation = 112L;

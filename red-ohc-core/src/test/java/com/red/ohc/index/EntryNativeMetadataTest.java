@@ -5,14 +5,13 @@ import static org.testng.Assert.assertTrue;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
 
 public final class EntryNativeMetadataTest {
   @Test
   public void allocatorReuseResetsEveryNativeMetadataWord() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena arena = memory.newWriterArena();
     long allocation = Entry.keyAllocationLengthForKeyLength(0);
     long firstAddress = arena.allocate(allocation);
@@ -53,7 +52,7 @@ public final class EntryNativeMetadataTest {
 
   @Test
   public void currentValueAllocationIsPublishedInNativeMetadata() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(0);
     long keyAddress = memory.newWriterArena().allocate(allocation);
     try {

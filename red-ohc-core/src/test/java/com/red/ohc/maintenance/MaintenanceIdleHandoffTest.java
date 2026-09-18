@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
@@ -118,7 +117,7 @@ public final class MaintenanceIdleHandoffTest {
 
   @Test(timeOut = 5_000L)
   public void lowWatermarkAccessDeadlineUsesWallClockWithFrozenTicker() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot slot = new ReaderSlot();
     MaintenanceEventLoop loop =
@@ -196,7 +195,7 @@ public final class MaintenanceIdleHandoffTest {
 
   @Test(timeOut = 5_000L)
   public void actorWithoutReadersUsesCappedIdlePark() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             new ConcurrentHashMap<>(),
@@ -230,7 +229,7 @@ public final class MaintenanceIdleHandoffTest {
   }
 
   static final class Fixture implements AutoCloseable {
-    final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    final NativeMemory.Memory memory = new NativeMemory.Memory();
     final ReaderRegistry readers = new ReaderRegistry(memory);
     final ReaderSlot slot = new ReaderSlot();
     final MaintenanceEventLoop loop =

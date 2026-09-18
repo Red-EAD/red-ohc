@@ -13,7 +13,6 @@ import java.util.concurrent.TimeUnit;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.index.Entry;
@@ -62,7 +61,6 @@ public class CapacityAccountingTest {
             .capacity(logicalEntryBytes)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .buildTyped();
     try {
       cache.put(new byte[keyLength], new byte[valueLength]);
@@ -90,7 +88,6 @@ public class CapacityAccountingTest {
             .capacity(logicalEntryBytes * 2L)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .buildTyped()) {
       cache.put(key, new byte[valueLength]);
       cache.flushAsync().join();
@@ -117,7 +114,6 @@ public class CapacityAccountingTest {
             .capacity(entryBytes)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       cache.put(new byte[keyLength], new byte[valueLength]);
 
@@ -143,7 +139,6 @@ public class CapacityAccountingTest {
             .capacity(entryBytes)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       byte[] firstKey = new byte[keyLength];
       byte[] secondKey = new byte[keyLength];
@@ -173,7 +168,6 @@ public class CapacityAccountingTest {
             .capacity(entryBytes)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .buildTyped();
     CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch releaseActor = new CountDownLatch(1);
@@ -202,7 +196,6 @@ public class CapacityAccountingTest {
             .capacity(80L)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       cache.put(new byte[32], new byte[128]);
       cache.flushAsync().join();
@@ -223,7 +216,6 @@ public class CapacityAccountingTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .eviction(com.red.ohc.api.Eviction.LRU)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       cache.put(new byte[keyLength], new byte[valueLength]);
 
@@ -256,7 +248,6 @@ public class CapacityAccountingTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .eviction(com.red.ohc.api.Eviction.LRU)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       byte[] firstKey = new byte[keyLength];
       byte[] secondKey = new byte[keyLength];
@@ -289,7 +280,6 @@ public class CapacityAccountingTest {
             .capacity(capacity)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .eviction(com.red.ohc.api.Eviction.LRU)
             .buildTyped();
     CountDownLatch actorPaused = new CountDownLatch(1);
@@ -333,7 +323,6 @@ public class CapacityAccountingTest {
             .capacity(capacity)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .eviction(com.red.ohc.api.Eviction.LRU)
             .build()) {
       for (int index = 0; index < residentCount; index++) {
@@ -367,7 +356,6 @@ public class CapacityAccountingTest {
             .capacity(capacity)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       cache.put(key, oldValue);
       cache.flushAsync().join();
@@ -395,7 +383,6 @@ public class CapacityAccountingTest {
             .capacity(512L)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       cache.put(key, oldValue);
       cache.flushAsync().join();

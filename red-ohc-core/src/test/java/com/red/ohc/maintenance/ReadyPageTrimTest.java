@@ -8,7 +8,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.runtime.ReaderRegistry;
@@ -18,7 +17,7 @@ import com.red.ohc.storage.WriterArena;
 public final class ReadyPageTrimTest {
   @Test
   public void overCapacityReturnsEmptyReadyPagesToTheAllocator() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try (Fixture fixture = new Fixture(memory, 1 << 10)) {
       assertEquals(memory.pageReadyCount(), 1L);
       assertTrue(memory.allocated() > (1 << 10), "the fixture must be over capacity");
@@ -39,7 +38,7 @@ public final class ReadyPageTrimTest {
 
   @Test
   public void underCapacityKeepsReadyPagesAsAllocationHeadroom() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try (Fixture fixture = new Fixture(memory, 1 << 22)) {
       assertEquals(memory.pageReadyCount(), 1L);
 
@@ -55,7 +54,7 @@ public final class ReadyPageTrimTest {
 
   @Test
   public void readyPagesWithLiveSlotsSurviveTheTrim() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       ReaderRegistry readers = new ReaderRegistry(memory);
       MaintenanceEventLoop loop =

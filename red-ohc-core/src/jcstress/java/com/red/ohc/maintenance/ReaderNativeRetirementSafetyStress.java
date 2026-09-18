@@ -10,7 +10,6 @@ import org.openjdk.jcstress.annotations.Outcome;
 import org.openjdk.jcstress.annotations.State;
 import org.openjdk.jcstress.infra.results.I_Result;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.NativeMemory;
@@ -26,7 +25,7 @@ public class ReaderNativeRetirementSafetyStress {
   private static final long READER_EPOCH = 1L;
   private static final int VALUE_LENGTH = 32_768;
 
-  private final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+  private final NativeMemory.Memory memory = new NativeMemory.Memory();
   private final WriterArena arena = memory.newWriterArena();
   private final ReaderRegistry readers = new ReaderRegistry(memory);
   private final ReaderSlot slot = new ReaderSlot();

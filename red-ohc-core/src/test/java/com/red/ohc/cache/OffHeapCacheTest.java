@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
@@ -159,7 +158,6 @@ public class OffHeapCacheTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .eviction(Eviction.S3_FIFO)
-            .allocator(AllocatorType.UNSAFE)
             .buildTyped()) {
       for (int index = 0; index < residentEntries; index++) {
         keys[index] = new byte[keyBytes];
@@ -973,7 +971,6 @@ public class OffHeapCacheTest {
             .nativeMemoryBudgetBytes(debtBudget)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .buildTyped();
     try {
       cache.put(firstKey, largeValue);
@@ -1006,7 +1003,6 @@ public class OffHeapCacheTest {
             .nativeMemoryBudgetBytes(debtBudget)
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
-            .allocator(AllocatorType.UNSAFE)
             .buildTyped();
     AtomicLong nextPageId = nextPageId(cache);
     long savedNextPageId = 0L;

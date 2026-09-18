@@ -17,7 +17,6 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 
 /**
@@ -50,7 +49,7 @@ public class NativeMemoryEqualsBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    memory = new NativeMemory.Memory(AllocatorType.JNA);
+    memory = new NativeMemory.Memory();
     expected = bytes(keyBytes + ARRAY_OFFSET, keyBytes * 17 + 3);
     left = memory.allocate(keyBytes);
     right = memory.allocate(keyBytes);

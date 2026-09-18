@@ -7,7 +7,6 @@ import static org.testng.Assert.assertTrue;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.maintenance.RetirementJournal;
 import com.red.ohc.maintenance.WriterLifecycleJournal;
 import com.red.ohc.maintenance.WriterLifecycleLane;
@@ -16,7 +15,7 @@ import com.red.ohc.storage.NativeMemory;
 public final class WriterResourceRegistryTest {
   @Test
   public void retiredResourceReturnsToTheHighWaterPoolWithANewGeneration() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     RetirementJournal retirement = new RetirementJournal(memory);
     WriterResourceRegistry registry =
@@ -50,7 +49,7 @@ public final class WriterResourceRegistryTest {
 
   @Test
   public void actorSnapshotDefersResourcesRegisteredAfterItsVersion() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     RetirementJournal retirement = new RetirementJournal(memory);
     WriterResourceRegistry registry =
@@ -76,7 +75,7 @@ public final class WriterResourceRegistryTest {
 
   @Test
   public void actorResourceDrainHonorsThePerTurnMaximum() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     RetirementJournal retirement = new RetirementJournal(memory);
     WriterResourceRegistry registry =
@@ -103,7 +102,7 @@ public final class WriterResourceRegistryTest {
 
   @Test
   public void newRetirementDuringAPartialSweepIsVisitedBeforeTheActorBecomesIdle() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     RetirementJournal retirement = new RetirementJournal(memory);
     WriterResourceRegistry registry = new WriterResourceRegistry(memory, lifecycle, retirement);
@@ -143,7 +142,7 @@ public final class WriterResourceRegistryTest {
 
   @Test
   public void resourceIsNotPooledUntilItsCapturedLifecycleWatermarkIsConsumed() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     RetirementJournal retirement = new RetirementJournal(memory);
     WriterResourceRegistry registry =

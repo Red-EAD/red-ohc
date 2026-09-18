@@ -11,10 +11,9 @@ import java.util.concurrent.atomic.LongAdder;
 
 import sun.misc.Unsafe;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ThreadContext;
 
-/** Native allocation and primitive access. JNA remains the production default. */
+/** Native allocation and primitive access. */
 public final class NativeMemory {
   static final Unsafe U;
   static final long BYTE_ARRAY_BASE;
@@ -97,8 +96,8 @@ public final class NativeMemory {
     private static final int PAGE_MAPPING_BUDGET = 30_000;
     private final AtomicLong directMappedPageCount = new AtomicLong();
 
-    public Memory(AllocatorType type) {
-      this(new NativeAllocator(type));
+    public Memory() {
+      this(new NativeAllocator());
     }
 
     Memory(NativeAllocator allocator) {

@@ -17,13 +17,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ThreadContext;
 
 public final class NativeReleaseBatchTest {
   @Test
   public void mixedNativeColumnsReusePagesAndSkipClearedRecords() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(15L * Long.BYTES);
     long allocations = columns + 5L * Long.BYTES;
@@ -71,7 +70,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void aBadSlotInAnAlreadySeenPageFailsBeforeAnyPooledRelease() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(9L * Long.BYTES);
     long allocations = columns + 3L * Long.BYTES;
@@ -108,7 +107,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void stalePageGenerationIsRejectedBeforeRelease() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(3L * Long.BYTES);
     long allocations = columns + Long.BYTES;
@@ -140,7 +139,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void zeroPageKeyHandleUsesTheUnknownHandleFailurePath() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(3L * Long.BYTES);
     long allocations = columns + Long.BYTES;
@@ -180,7 +179,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void callbackFailureKeepsProgressAndRetryReleasesOnlyTheRemainingGroup() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(12L * Long.BYTES);
     long allocations = columns + 4L * Long.BYTES;
@@ -228,7 +227,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void lastLiveSlotInvalidatesTheScopedMemoBeforeAvailabilityCallback() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(3L * Long.BYTES);
     long allocations = columns + Long.BYTES;
@@ -269,7 +268,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void invalidMemoDescriptorFallsBackToTheCurrentPageTableEntry() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long columns = memory.allocateRaw(3L * Long.BYTES);
     long allocations = columns + Long.BYTES;
@@ -310,7 +309,7 @@ public final class NativeReleaseBatchTest {
 
   @Test
   public void releaseMatcherChecksEveryDecodedDescriptorDimension() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long bytes = 112L;
     long entry = 0L;
     try {
@@ -342,7 +341,7 @@ public final class NativeReleaseBatchTest {
   @Test(timeOut = 5_000L)
   public void memoHitOnTheLastLiveSlotCanRacePhysicalTrimWithoutRepublishingThePage()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long bytes = 112L;
     int sizeClass = SizeClasses.indexForEntry(bytes);
@@ -454,7 +453,7 @@ public final class NativeReleaseBatchTest {
   }
 
   private static void assertWarmMemoLastSlotTrimRace(int round) throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ThreadContext context = new ThreadContext(null);
     long bytes = 112L;
     int sizeClass = SizeClasses.indexForEntry(bytes);

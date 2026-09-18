@@ -7,7 +7,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.runtime.ReaderRegistry;
@@ -20,7 +19,7 @@ public final class IdleArenaSealTest {
   @Test
   public void silentLifecycleLaneIsSealedAfterTheIdleWindow() throws Exception {
     MutableTicker ticker = new MutableTicker(0L);
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try (Fixture fixture = new Fixture(memory, ticker)) {
       publishOneRecord(fixture.resource);
 
@@ -43,7 +42,7 @@ public final class IdleArenaSealTest {
   @Test
   public void activeLifecycleLaneIsNeverSealed() throws Exception {
     MutableTicker ticker = new MutableTicker(0L);
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try (Fixture fixture = new Fixture(memory, ticker)) {
       publishOneRecord(fixture.resource);
 

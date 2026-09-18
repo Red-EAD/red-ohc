@@ -21,7 +21,6 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
@@ -43,8 +42,6 @@ public class OHCMaxSizeAdmissionBenchmark {
   private static final int BATCH_SIZE = 1 << 6;
   private static final int KEY_BYTES = 32;
 
-  @Param({"UNSAFE", "JNA"})
-  public AllocatorType allocator;
 
   @Param({"256", "5120", "32768"})
   public int valueBytes;
@@ -71,7 +68,6 @@ public class OHCMaxSizeAdmissionBenchmark {
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
-                .allocator(allocator)
                 .build();
     for (int index = 0; index < WORKING_SET; index++) {
       keys[index] = OHCWriteAdmissionBenchmark.bytes(KEY_BYTES, index);

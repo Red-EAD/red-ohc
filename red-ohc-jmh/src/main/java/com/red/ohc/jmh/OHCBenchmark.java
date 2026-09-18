@@ -20,7 +20,6 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.DirectEntryConsumer;
 import com.red.ohc.api.DirectValueConsumer;
 import com.red.ohc.api.Eviction;
@@ -44,8 +43,6 @@ import com.red.ohc.storage.ValueBlock;
     jvmArgsAppend = {"-Xms2g", "-Xmx2g"})
 @State(Scope.Benchmark)
 public class OHCBenchmark {
-  @Param({"JNA", "UNSAFE"})
-  public AllocatorType allocator;
   @Param({"16", "64"})
   public int keyBytes;
 
@@ -90,7 +87,6 @@ public class OHCBenchmark {
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(eviction)
-                .allocator(allocator)
                 .build();
     for (int i = 0; i < WORKING_SET; i++) {
       ohc.put(rawKeys[i], values[i]);

@@ -15,7 +15,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
@@ -52,7 +51,7 @@ public final class RetirementJournalProducerReuseTest {
   public void concurrentWritersKeepReservationsInTheirOwnRecycledLane() throws Exception {
     int writers = 10;
     int recordsPerWriter = 1_000_000;
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, writers);
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch finished = new CountDownLatch(writers);
@@ -130,7 +129,7 @@ public final class RetirementJournalProducerReuseTest {
 
   @Test(timeOut = 30_000L)
   public void completedWatermarkNeverOvertakesReclaimAccounting() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementJournal.Lane lane = journal.lane(1);
     int rounds = 100_000;
@@ -201,7 +200,7 @@ public final class RetirementJournalProducerReuseTest {
 
   private static void assertDelayedProducerKeepsRecycledLaneOpen(
       Operation operation) throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementJournal.Lane lane = journal.lane(1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();

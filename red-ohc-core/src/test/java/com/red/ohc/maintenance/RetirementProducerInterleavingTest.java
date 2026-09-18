@@ -27,7 +27,6 @@ import com.sun.jdi.request.ClassPrepareRequest;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 
 /** Uses JDK debugger breakpoints to control races without adding hooks to the producer hot path. */
@@ -114,7 +113,7 @@ public final class RetirementProducerInterleavingTest {
 
     public static void main(String[] arguments) {
       operation = arguments[0];
-      memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+      memory = new NativeMemory.Memory();
       if (operation.equals("reserve")) {
         original = new RetirementSegment(memory, RetirementSegment.CAPACITY, 0L, 1);
         owner = new AtomicReference<>(original);

@@ -11,7 +11,6 @@ import java.nio.charset.StandardCharsets;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.EncodedKey;
 import com.red.ohc.index.Entry;
@@ -111,7 +110,7 @@ public final class HashingTest {
   public void equalHashesStillRequireAnExactNativeKeyMatch() {
     byte[] lookupBytes = "hello".getBytes(StandardCharsets.US_ASCII);
     byte[] storedBytes = "world".getBytes(StandardCharsets.US_ASCII);
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(storedBytes.length);
     long address = memory.allocate(allocation);
     try {
@@ -132,7 +131,7 @@ public final class HashingTest {
 
   @Test
   public void lookupKeyMatchesExactNativeBytesAcrossComparisonBoundaries() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
     try {
       for (int length : new int[] {0, 7, 8, 63, 64, 127, 128, 129, 257}) {
@@ -168,7 +167,7 @@ public final class HashingTest {
 
   @Test
   public void lookupKeyRejectsFirstWordAndComparisonBoundaryMismatches() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
     try {
       for (int length : new int[] {1, 7, 8, 63, 64, 127, 128, 129, 257}) {

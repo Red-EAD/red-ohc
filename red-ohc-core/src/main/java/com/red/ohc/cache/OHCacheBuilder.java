@@ -3,7 +3,6 @@ package com.red.ohc.cache;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.EvictionListener;
@@ -25,7 +24,6 @@ public final class OHCacheBuilder<K, V> {
   private Ticker ticker = Ticker.DEFAULT;
   private Eviction eviction = Eviction.S3_FIFO;
   private EvictionListener<K, V> evictionListener;
-  private AllocatorType allocatorType = AllocatorType.JNA;
   private Executor loaderExecutor;
   private long closeTimeoutMillis = 30_000L;
 
@@ -122,11 +120,6 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
-  public OHCacheBuilder<K, V> allocator(AllocatorType allocatorType) {
-    this.allocatorType = Objects.requireNonNull(allocatorType, "allocatorType");
-    return this;
-  }
-
   public OHCacheBuilder<K, V> loaderExecutor(Executor loaderExecutor) {
     this.loaderExecutor = Objects.requireNonNull(loaderExecutor, "loaderExecutor");
     return this;
@@ -161,7 +154,6 @@ public final class OHCacheBuilder<K, V> {
         defaultTtlMillis,
         loaderExecutor,
         closeTimeoutMillis,
-        allocatorType,
         ticker,
         eviction,
         evictionListener,

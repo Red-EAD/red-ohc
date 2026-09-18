@@ -10,7 +10,6 @@ import org.openjdk.jcstress.annotations.Outcome;
 import org.openjdk.jcstress.annotations.State;
 import org.openjdk.jcstress.infra.results.II_Result;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 
 /** Writer admission must become visible before the writer accepts an open cache state. */
@@ -24,7 +23,7 @@ import com.red.ohc.storage.NativeMemory;
     desc = "writer enters while shutdown misses its admission")
 @State
 public class WriterAdmissionStoreLoadStress {
-  private final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+  private final NativeMemory.Memory memory = new NativeMemory.Memory();
   private final ReaderRegistry registry = new ReaderRegistry(memory);
   private final int slot = registry.register(new ReaderSlot());
   private final AtomicInteger closing = new AtomicInteger();

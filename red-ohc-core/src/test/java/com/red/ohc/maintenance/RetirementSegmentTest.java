@@ -15,7 +15,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.runtime.ThreadContext;
@@ -26,7 +25,7 @@ import com.red.ohc.storage.WriterArena;
 public final class RetirementSegmentTest {
   @Test
   public void closedJournalRejectsProducersInsteadOfWritingFreedSegments() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     RetirementJournal.Lane lane = journal.createLane();
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
@@ -52,7 +51,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void staleProducerCannotReserveAcrossRecycledOwnerGeneration() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementSegment segment = new RetirementSegment(memory, 2, 0L, 3);
     AtomicReference<RetirementSegment> producer = new AtomicReference<>(segment);
     try {
@@ -75,7 +74,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void anUnpublishedReservationPreventsSegmentRecycle() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementSegment segment = new RetirementSegment(memory, 2, 0L, 0);
     AtomicReference<RetirementSegment> producer = new AtomicReference<>(segment);
     try {
@@ -99,7 +98,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void fastReservationRejectsAProducerThatNoLongerOwnsTheSegment() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementSegment segment = new RetirementSegment(memory, 2, 0L, 0);
     RetirementSegment replacement = new RetirementSegment(memory, 2, 2L, 1);
     AtomicReference<RetirementSegment> producer = new AtomicReference<>(replacement);
@@ -115,7 +114,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void resetDoesNotAcceptPreviousGenerationPublicationWords() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementSegment segment = new RetirementSegment(memory, 2, 0L, 0);
     AtomicReference<RetirementSegment> producer = new AtomicReference<>(segment);
     try {
@@ -151,7 +150,7 @@ public final class RetirementSegmentTest {
 
   @Test(timeOut = 10_000L)
   public void concurrentExclusiveLanesKeepOneSequencePerPublishedRecord() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     int writers = 4;
     RetirementJournal journal = new RetirementJournal(memory, writers);
     int recordsPerWriter = 2_048;
@@ -215,7 +214,7 @@ public final class RetirementSegmentTest {
 
   private static void assertStaleProducerCannotReserveDuringReuse(
       int oldLaneIndex, int newLaneIndex) throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementSegment segment = new RetirementSegment(memory, 2, 0L, oldLaneIndex);
     RetirementSegment replacement = new RetirementSegment(memory, 2, 2L, newLaneIndex);
     AtomicReference<RetirementSegment> producer = new AtomicReference<>(segment);
@@ -284,7 +283,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void trimmedDescriptorsLeaveCloseTrackingOwnership() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     try {
       int records = RetirementSegment.CAPACITY * 8 + 1;
@@ -311,7 +310,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void writerAndActorRecordsShareOneSafeReclaimQueue() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 2);
     try {
       RetirementJournal.Lane writer = journal.lane(1);
@@ -335,7 +334,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void retirementCountersTrackUnsafeSafeClaimedAndCompletedStates() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     long allocation = 112L;
     long entry = memory.newWriterArena().allocate(allocation);
@@ -366,7 +365,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void actorReclaimsNativeColumnsGroupedByOneAllocatorPage() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     WriterArena arena = memory.newWriterArena();
     int count = 12;
@@ -402,7 +401,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void actorBatchReclaimsMixedPooledAndDirectEntriesWithoutReadingFreedMetadata() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     WriterArena arena = memory.newWriterArena();
     long pooledAllocation = ValueBlock.allocationLength(5_120);
@@ -434,7 +433,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void groupedReleaseMakesCompletedRecordsIdempotentForRetry() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena arena = memory.newWriterArena();
     RetirementSegment segment = new RetirementSegment(memory, 4, 0L, 0);
     AtomicReference<RetirementSegment> producer = new AtomicReference<>(segment);
@@ -479,7 +478,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void journalGroupedRetryCountsAcceptedNativeGroupsOnlyOnce() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     WriterArena arena = memory.newWriterArena();
     long allocation = ValueBlock.allocationLength(64);
@@ -543,7 +542,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void activeReaderPinsSealedSegmentUntilEpochIsQuiescent() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot active = new ReaderSlot();
     readers.register(active);
@@ -571,7 +570,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void pinnedSealedSegmentIsNotActorRunnableUntilReaderQuiesces() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot active = new ReaderSlot();
     readers.register(active);
@@ -598,7 +597,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void segmentClaimInProgressIsNotActorRunnable() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     try {
       RetirementJournal.Lane lane = journal.lane(0);
@@ -633,7 +632,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void closeReclaimsRecordsSealedDuringClose() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     long allocation = 112L;
     long address = memory.newWriterArena().allocate(allocation);
@@ -654,7 +653,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void producerGrowsWithoutAnAdmissionDebtOrSegmentLimit() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     int records = RetirementSegment.CAPACITY * 16 + 3;
     try {
@@ -682,7 +681,7 @@ public final class RetirementSegmentTest {
 
   @Test(timeOut = 10_000L)
   public void singleLaneLargeTailKeepsSequenceAndCompletionCountsAligned() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     int records = 1_000_000;
     try {
@@ -708,7 +707,7 @@ public final class RetirementSegmentTest {
 
   @Test(timeOut = 45_000L)
   public void concurrentWriterAndActorReclaimKeepCompletionCountsAligned() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     int records = 1_000_000;
     CountDownLatch start = new CountDownLatch(1);
@@ -781,7 +780,7 @@ public final class RetirementSegmentTest {
 
   @Test(timeOut = 45_000L)
   public void concurrentWriterLaneAndActorReclaimKeepReservationProgress() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     int records = 250_000;
     CountDownLatch start = new CountDownLatch(1);
@@ -856,7 +855,7 @@ public final class RetirementSegmentTest {
 
   @Test(timeOut = 75_000L)
   public void concurrentWriterLaneAndBoundedActorReclaimKeepReservationProgress() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     int records = 1_000_000;
     CountDownLatch start = new CountDownLatch(1);
@@ -934,7 +933,7 @@ public final class RetirementSegmentTest {
 
   @Test
   public void actorOwnsSafeSegmentReclaim() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     try {
       for (int index = 0; index < RetirementSegment.CAPACITY * 4; index++) {

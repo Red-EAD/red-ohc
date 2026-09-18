@@ -6,7 +6,6 @@ import static org.testng.Assert.assertTrue;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 
 public final class NativeMemoryEqualsTest {
   @Test
@@ -17,7 +16,7 @@ public final class NativeMemoryEqualsTest {
 
   @Test
   public void comparesHeapSlicesAndNativeBlocksAcrossWordAndTailBoundaries() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     byte[] bytes = new byte[259];
     for (int index = 0; index < bytes.length; index++) {
       bytes[index] = (byte) (index * 37 + 11);
@@ -50,7 +49,7 @@ public final class NativeMemoryEqualsTest {
 
   @Test
   public void comparesTheNonZeroArrayOffsetAndTailAfterBulkBlocks() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     byte[] bytes = new byte[300];
     for (int index = 0; index < bytes.length; index++) {
       bytes[index] = (byte) (index * 13 + 5);

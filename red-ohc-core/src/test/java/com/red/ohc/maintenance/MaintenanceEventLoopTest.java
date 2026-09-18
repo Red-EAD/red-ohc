@@ -28,7 +28,6 @@ import org.jctools.util.PaddedAtomicLong;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
@@ -102,7 +101,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void shutdownReaderExitSignalsKeepStopAndWaiterBitsIndependent() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
@@ -145,7 +144,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void lifecycleTurnDrainsOnlyRecordsReservedBeforeItsPerLaneWatermark()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(2);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -177,7 +176,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void lifecycleTurnRotatesLanesWhenTheRecordLimitIsReached() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(2);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -230,7 +229,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void actorDoesNotExposeDynamicBatchPressureState() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -255,7 +254,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void lifecycleTurnCleansTerminatedReaderSlotsWithoutAccessRecords() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     Thread owner =
         new Thread(
@@ -283,7 +282,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void lifecycleScanCountsInspectedReadersAsMaintenanceProgress() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     readers.register(new ReaderSlot());
     MaintenanceEventLoop loop =
@@ -336,7 +335,7 @@ public class MaintenanceEventLoopTest {
             2_000_000L,
             4_000_000L,
             10L);
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     RetirementJournal journal = new RetirementJournal(memory);
     EntryLinks links = new EntryLinks(memory);
@@ -384,7 +383,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void actorActivityCountersAreIndependentOfPolicyPressure() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -410,7 +409,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void readySegmentsRemainUnpublishedUntilTheActorRuns() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -442,7 +441,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void sealedRetirementIsReclaimedByTheActorMailbox() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -491,7 +490,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 10_000L)
   public void actorReclaimDrainsSafeSegmentsWithoutWriterAssistance()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     int segmentCount = 8;
     long allocation = ValueBlock.allocationLength(1);
@@ -544,7 +543,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void blockedRetirementIsNotRunnable() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -587,7 +586,7 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -639,7 +638,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void idleRetryDeadlineReusesTheRunnableReaderSnapshot() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
@@ -694,7 +693,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void quiescentSealedRetirementAlwaysProducesAPublishPlan() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -743,7 +742,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void flushDoesNotBusyLoopWhileReaderRetirementIsPinned() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -777,7 +776,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void closingFlushKeepsAccessInMaintenancePlan() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot slot = new ReaderSlot();
     slot.access = new AccessRing();
@@ -812,7 +811,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void flushDoesNotRestartACompletedReaderLifecycleSweepWhileQsbrIsBlocked()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -846,7 +845,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void newerFlushMustReceiveAReaderLifecycleSweepStartedAfterItsPublication()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     readers.register(new ReaderSlot());
     MaintenanceEventLoop loop =
@@ -881,7 +880,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void readerAdmittedAfterRetirementCutDoesNotArmAReclaimNotification()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot oldReader = new ReaderSlot();
     readers.register(oldReader);
@@ -924,7 +923,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void flushCannotCompleteBeforeItsReaderLifecycleSweepIsObserved() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     AtomicReference<ReaderSlot> slotReference = new AtomicReference<>();
     Thread owner =
@@ -959,7 +958,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void flushCompletesAfterEveryCoveredAsyncBatchRunsInOrder() throws Exception {
     CountingTicker ticker = new CountingTicker();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -999,7 +998,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 15_000L)
   public void asyncFlushFenceSurvivesConcurrentPublishers() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1060,7 +1059,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 10_000L)
   public void asyncSequenceReservationAndMailboxOfferAreOnePublication() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -1112,7 +1111,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 10_000L)
   public void concurrentFlushCannotLoseActorRetirementWatermark() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1208,7 +1207,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 10_000L)
   public void concurrentFlushCallsPublishACompleteFence() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1257,7 +1256,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushCutsEveryWriterRetirementProducerBeforeItsRecordBudget() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 4);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1287,7 +1286,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushCompletesWithoutWaitingForPostWatermarkRetirementReservation() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1323,7 +1322,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushCompletesWithoutWaitingForPostFlushLifecycleReservation() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1352,7 +1351,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushWaitsForLifecycleReservationCapturedBeforeIt() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1387,7 +1386,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void ordinaryActorDoesNotCutAProducerWhileReservationsKeepArriving() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1416,7 +1415,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void closingAStartedWorkerRejectsRemainingAsyncBatchesAndClearsDepth()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1468,7 +1467,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void prePublicationAsyncRejectionsAreCounted() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -1484,7 +1483,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void shutdownRejectsEveryQueuedAsyncBatchAndClearsDepth() throws Exception {
     CountingTicker ticker = new CountingTicker();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1525,7 +1524,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void idleWorkerStopsWithoutWaitingForAWorkWindow() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1553,7 +1552,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void asyncDepthReportsPhysicalQueueSize() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1589,7 +1588,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void asyncDepthDoesNotTraverseTheMutationQueue() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1613,7 +1612,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void mailboxWorkContributesToActorActivityCounters() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -1642,7 +1641,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void mailboxDrainHonorsTheActorTurnLimit() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -1669,7 +1668,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void publishedMailboxWorkCannotBeMaskedByAnOlderUnpublishedHead() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -1717,7 +1716,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void asyncMutationQueueGrowsWithoutRejectingAdmittedWork() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -1749,7 +1748,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void terminalFailureDrainsAdmittedAsyncMessagesWithoutASequenceHole() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1776,7 +1775,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void oneBrokenRejectCallbackCannotStrandLaterAsyncTasks() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1809,7 +1808,7 @@ public class MaintenanceEventLoopTest {
   @Test
   @SuppressWarnings("unchecked")
   public void terminalFailurePublishedBeforeAsyncExecutionRejectsTheTask() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1839,7 +1838,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void brokenAsyncRejectCallbackDoesNotBecomeAMaintenanceFailure() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1869,7 +1868,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushBarrierOrdersAsyncSequencesAcrossSignedLongWrap() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1904,7 +1903,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void removalNotificationObservesValueBeforeNativeRetirement() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena arena = memory.newWriterArena();
     ConcurrentHashMap<Entry, Entry> data = index();
     AtomicInteger observedPayload = new AtomicInteger(-1);
@@ -1957,7 +1956,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void actorTransportUsesOneGrowableQueueWithoutRescanState() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -1982,7 +1981,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void growableMutationTransportAcceptsMoreThanTheLegacyQueueCapacity() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU,
@@ -2027,7 +2026,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void accessScanRejectsAnOldGenerationEvenWhenTheValueAddressIsUnchanged()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1_000L, Eviction.S3_FIFO,
@@ -2054,7 +2053,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void accessScanUsesThePolicyStateCapturedAtHitTime() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 4_000L, Eviction.S3_FIFO,
@@ -2087,7 +2086,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void accessScanDrainsMultipleReaderRingsAndRotatesAfterTheBatchLimit() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2119,7 +2118,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void readerRegistrationRequestsTheColdAccessScanWake() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU,
@@ -2137,7 +2136,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void aPublishedQueueWorkBitMakesTheRunnableCheckConstantTime() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -2157,7 +2156,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void staleAccessHintDoesNotMakeTheActorRunnable() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -2176,7 +2175,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void continuationCounterAdvancesWhenTheNextCapturedAccessTurnActuallyStarts()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2209,7 +2208,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void readerRegistrationDoesNotKeepAnEmptyAccessScanActive() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -2232,7 +2231,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void readerRegistrationDoesNotSchedulePeriodicAccessScan() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -2256,7 +2255,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void idleParkingDoesNotReconcileTheWholeMappingTable() throws Exception {
     CountingIndex data = new CountingIndex();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             data,
@@ -2286,7 +2285,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void mapOwnershipProbeUsesOneMirroredHashLookup() throws Exception {
     CountingIndex data = new CountingIndex();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     Entry entry = EntryTestSupport.entry(memory, 0, 17, 0x1717L, 0L);
     data.put(entry, entry);
     MaintenanceEventLoop loop =
@@ -2317,7 +2316,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void sampledAccessSignalsTheActorWithoutPeriodicScan() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -2342,7 +2341,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void publishedReadCountersRemainAdvisoryUntilTheIdleDeadline() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -2368,7 +2367,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void idleWorkerDoesNotReadAClockWithoutTimerOrRetirementWork() throws Exception {
     CountingTicker ticker = new CountingTicker();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -2396,7 +2395,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void forcedPhysicalClockSampleIsReusedForRequestedWork() throws Exception {
     CountingTicker ticker = new CountingTicker();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena arena = memory.newWriterArena();
     long key = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
     long allocation = ValueBlock.allocationLength(1);
@@ -2447,7 +2446,7 @@ public class MaintenanceEventLoopTest {
             return wallNow.get();
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, TimerWheel.TICK_NANOS, 1, 0L);
@@ -2489,7 +2488,7 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -2528,7 +2527,7 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, TimerWheel.TICK_NANOS, 1, 0L);
@@ -2566,7 +2565,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void realPassCleansQueuedReaderRegistrationsWithoutCreatingWork() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     Thread owner =
         new Thread(
@@ -2591,7 +2590,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void boundedTransportAcceptsVisibleHintsWithoutMakingTheCacheUnhealthy() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -2627,7 +2626,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void actorAccessScanDrainsCountersWithoutReaderSideSignal() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2653,7 +2652,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void accessCounterConsumptionUsesModularDeltasAcrossSignedWrap() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2679,7 +2678,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void flushWaitsForEveryRegisteredReaderRingToDrain() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2709,7 +2708,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void closeFinalDrainConsumesPublishedReaderRingData() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2742,7 +2741,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void actorMarksQueuedMutationForTheNextWriterPublication() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     Entry entry = EntryTestSupport.entry(memory, 0, 77, 0L);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2773,7 +2772,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void actorRetryRetainsFlagsPublishedBeforeTheWriterFinishes() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     Entry entry = EntryTestSupport.entry(memory, 0, 78, 0L);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -2810,7 +2809,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void coalescedMutationAppliesTheLatestValueMetadata() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long firstAllocation = ValueBlock.allocationLength(1);
     long latestAllocation = ValueBlock.allocationLength(32);
@@ -2871,7 +2870,7 @@ public class MaintenanceEventLoopTest {
   }
 
   private void assertSeededMutationUsesTheLatestAllocation(boolean saturated) throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long firstAllocation = ValueBlock.allocationLength(1);
     long latestAllocation = ValueBlock.allocationLength(32);
@@ -2923,7 +2922,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void staleQueuedMutationCannotTouchAReusedNativeKeyBlock() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -2967,7 +2966,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void writerRetryAppliesThePointerPublishedByTheLaterWriter() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
@@ -3012,7 +3011,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void actorLeavesRetryMarkerBeforeTheConcurrentWriterPublishes()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long allocation = ValueBlock.allocationLength(1);
     long value = memory.newWriterArena().allocate(allocation);
@@ -3083,7 +3082,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void mutationPassDoesNotOwnLogicalCapacityEviction() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena arena = memory.newWriterArena();
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(0);
     long valueAllocation = ValueBlock.allocationLength(1);
@@ -3129,7 +3128,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void actorDoesNotEvictWhenPolicyWeightExceedsTarget() throws Exception {
     FrozenTicker ticker = new FrozenTicker();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     com.red.ohc.storage.WriterArena arena = memory.newWriterArena();
     long key = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
     long value = arena.allocate(ValueBlock.allocationLength(1));
@@ -3153,7 +3152,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void policyRetainsMappingsWithoutWriterAdmission() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena arena = memory.newWriterArena();
     long allocation = ValueBlock.allocationLength(1);
     long keyOne = arena.allocate(Entry.keyAllocationLengthForKeyLength(0));
@@ -3194,7 +3193,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void actorDoesNotScheduleCapacityRetryBackoff() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -3209,7 +3208,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void capacityDrainUsesActorPolicyAndLeavesTargetCharge() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -3242,7 +3241,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void capacityDrainObservesConcurrentRemoval() throws Exception {
     for (boolean countBounded : new boolean[] {false, true}) {
-      NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+      NativeMemory.Memory memory = new NativeMemory.Memory();
       AtomicReference<Runnable> afterRemoval = new AtomicReference<>();
       ConcurrentHashMap<Entry, Entry> data =
           new ConcurrentHashMap<Entry, Entry>() {
@@ -3315,7 +3314,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void explicitCapacityWakeReopensAWriterBlockedDrain() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3337,7 +3336,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void capacityWakeOnlyReopensTheDrainForTheBlockedWriter() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3374,7 +3373,7 @@ public class MaintenanceEventLoopTest {
   @Test
   public void partialCapacityQuotaPreservesRetryBackoffInsteadOfRearmingImmediately()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, new FrozenTicker(), 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3414,7 +3413,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void pressureSamplingKeepsTheIntervalBoundaryAndUpdatesTheBudget() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3462,7 +3461,7 @@ public class MaintenanceEventLoopTest {
         return 0L;
       }
     };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         data, memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3503,7 +3502,7 @@ public class MaintenanceEventLoopTest {
   }
 
   private void assertResourceSweepContinuation(boolean blockedHead) throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
         newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3571,7 +3570,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void ordinaryMailboxProgressDoesNotReopenBlockedResourceSweep() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
         newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3612,7 +3611,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void advisoryMaintenanceDoesNotReopenBlockedResourceSweep() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
         newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3658,7 +3657,7 @@ public class MaintenanceEventLoopTest {
   }
 
   private void assertLifecycleProgressRescansResources(boolean mailboxOwned) throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
         newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3700,7 +3699,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void safeReclaimRevisitsResourcesAlreadyCheckedByAPartialSweep() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
@@ -3760,7 +3759,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void advisoryQuotaIsNotCountedTwiceAcrossMaintenancePhases() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -3825,7 +3824,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void idleLoopParksInsteadOfBusySpinning() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -3850,7 +3849,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void terminalFailureKeepsActorAliveUntilExplicitStop() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -3885,7 +3884,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void terminalFailureUnparksEvenWhenTheWakeGateAlreadyRequiresProcessing()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -3926,7 +3925,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void failedActorRemovalCancelsTheUnusedActorRetirementBatch() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -3954,7 +3953,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushBarrierDoesNotWaitForAsyncMutationsSubmittedAfterIt() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -4003,7 +4002,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushFenceDefersPostFenceAsyncWhileRetirementIsPinned() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -4049,7 +4048,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void flushWaitsForRetirementReclaimWhileAReaderIsActive() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -4080,7 +4079,7 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void flushDoesNotChaseRetirementPublishedAfterItsCapturedWatermark() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -4119,7 +4118,7 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -4158,7 +4157,7 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -4227,7 +4226,7 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -4264,7 +4263,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void terminalFailureRejectsQueuedAsyncMutationsBeforeClose() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -4307,7 +4306,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void terminalFailureStopsFollowingLifecycleMessages() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(1);
     MaintenanceEventLoop loop =
@@ -4361,7 +4360,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 2_000L)
   public void terminalFailureCloseClearsPendingMutationQueues() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(),
@@ -4392,7 +4391,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void eachRetirementCutAdvancesTheReaderEpoch() throws Exception {
     Ticker ticker = new FrozenTicker();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -4436,7 +4435,7 @@ public class MaintenanceEventLoopTest {
             return 1_000L + nowNanos.get() / 1_000_000L;
           }
         };
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, ticker, 1 << 20, Eviction.S3_FIFO, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -4473,7 +4472,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 2_000L)
   public void ordinaryReaderQuiescenceUsesTheEpochDeadlineInsteadOfAnImmediateWake()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
@@ -4501,7 +4500,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void fullRetirementRingDoesNotBlockWriterAndLaterReclaimsAfterReaderQuiesces()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
@@ -4529,7 +4528,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void workerDoesNotParkWithMoreThanOneReclaimBatchStillPending() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 16L << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -4565,7 +4564,7 @@ public class MaintenanceEventLoopTest {
 
   @Test(timeOut = 5_000L)
   public void retirementPublicationSignalsParkedWorker() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
@@ -4596,7 +4595,7 @@ public class MaintenanceEventLoopTest {
   @Test(timeOut = 5_000L)
   public void firstPartialWriterReservationWakesTheIdleGateWithoutAReadyHint()
       throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(

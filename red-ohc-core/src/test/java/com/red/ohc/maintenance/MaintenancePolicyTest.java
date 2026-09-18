@@ -11,7 +11,6 @@ import java.nio.charset.StandardCharsets;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
@@ -243,7 +242,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void s3SkipWeightTracksVariableValuesInByteAndCountModes() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long value = 0L;
     try {
       MaintenancePolicy bytePolicy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
@@ -505,7 +504,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void updatesByteWeightAndKeepsCountBoundedPolicyWeightAtOne() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long value = 0L;
     try {
       Entry entry = EntryTestSupport.entry(1, 8, 0L);
@@ -558,7 +557,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void removeClearsStalePolicyPresentBeforeReleasingAnUnownedLink() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.LRU, 1_024L, false, links);
     Entry entry = EntryTestSupport.entry(memory, 1, 11, 0L);
@@ -583,7 +582,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void policyStateAccessAndWeightStaySynchronizedWithTheActorMirror() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L, false, links);
     Entry entry = EntryTestSupport.entry(memory, 1, 81, 0x8181L, 0L);

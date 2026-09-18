@@ -9,7 +9,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
@@ -65,7 +64,7 @@ public final class WorkConservingMaintenanceTest {
 
   @Test
   public void reservationHoleIsNotReportedAsRunnableActorWork() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(

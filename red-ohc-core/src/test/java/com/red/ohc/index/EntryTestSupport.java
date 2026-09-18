@@ -1,12 +1,11 @@
 package com.red.ohc.index;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
 
 /** Native-key fixture used by tests that exercise Entry metadata accessors. */
 public final class EntryTestSupport {
-  private static final NativeMemory.Memory MEMORY = new NativeMemory.Memory(AllocatorType.JNA);
+  private static final NativeMemory.Memory MEMORY = new NativeMemory.Memory();
 
   // This fixture is shared across test classes; release it only when the test JVM exits.
   static {

@@ -12,10 +12,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
@@ -32,24 +30,18 @@ public final class ConcurrentLifecycleFuzzTest {
   private static final CacheSerializer<Integer> KEY = fixedInteger(248);
   private static final CacheSerializer<Integer> VALUE = fixedInteger(240);
 
-  @DataProvider(name = "allocators")
-  public Object[][] allocators() {
-    return new Object[][] {{AllocatorType.JNA}, {AllocatorType.UNSAFE}};
-  }
-
-  @Test(dataProvider = "allocators", timeOut = 30_000L)
-  public void fullCpuPutRemoveAndTtlFuzzLeavesNoUnhealthyActorOrNativeLeak(AllocatorType allocator)
+  @Test(timeOut = 30_000L)
+  public void fullCpuPutRemoveAndTtlFuzzLeavesNoUnhealthyActorOrNativeLeak()
       throws Exception {
     OffHeapCache<Integer, Integer> cache =
         OHCacheBuilder.<Integer, Integer>newBuilder()
             // Full-CPU writers each keep partial 64KiB pages for the key and value classes.
             // This is deliberately large enough to exercise those real pages alongside the
             // fixed retirement ledger. Native hard-limit rejection is intentionally a
-            // best-effort write result and is covered by the allocator-specific tests.
+            // best-effort write result.
             .capacity(1L << 20)
             .keySerializer(KEY)
             .valueSerializer(VALUE)
-            .allocator(allocator)
             .eviction(Eviction.S3_FIFO)
             .buildTyped();
     int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
@@ -126,15 +118,14 @@ public final class ConcurrentLifecycleFuzzTest {
     }
   }
 
-  @Test(dataProvider = "allocators", timeOut = 30_000L)
-  public void fullCpuMixedReadAndConditionalWriteFuzzConverges(AllocatorType allocator)
+  @Test(timeOut = 30_000L)
+  public void fullCpuMixedReadAndConditionalWriteFuzzConverges()
       throws Exception {
     OffHeapCache<Integer, Integer> cache =
         OHCacheBuilder.<Integer, Integer>newBuilder()
             .capacity(1L << 20)
             .keySerializer(KEY)
             .valueSerializer(VALUE)
-            .allocator(allocator)
             .eviction(Eviction.S3_FIFO)
             .buildTyped();
     int threads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));

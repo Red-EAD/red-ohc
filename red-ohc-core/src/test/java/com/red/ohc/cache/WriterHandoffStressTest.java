@@ -8,10 +8,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
@@ -20,13 +18,8 @@ public final class WriterHandoffStressTest {
   private static final CacheSerializer<Integer> KEY = fixedInteger(64);
   private static final CacheSerializer<Integer> VALUE = fixedInteger(128);
 
-  @DataProvider(name = "allocators")
-  public Object[][] allocators() {
-    return new Object[][] {{AllocatorType.JNA}, {AllocatorType.UNSAFE}};
-  }
-
-  @Test(dataProvider = "allocators", timeOut = 60_000L)
-  public void contendedWritersOnOneKeyAlwaysMakeProgress(AllocatorType allocator)
+  @Test(timeOut = 60_000L)
+  public void contendedWritersOnOneKeyAlwaysMakeProgress()
       throws Exception {
     int threads = Math.max(4, Runtime.getRuntime().availableProcessors());
     int writesPerThread = 20_000;
@@ -36,7 +29,6 @@ public final class WriterHandoffStressTest {
             .keySerializer(KEY)
             .valueSerializer(VALUE)
             .eviction(Eviction.S3_FIFO)
-            .allocator(allocator)
             .buildTyped();
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch done = new CountDownLatch(threads);

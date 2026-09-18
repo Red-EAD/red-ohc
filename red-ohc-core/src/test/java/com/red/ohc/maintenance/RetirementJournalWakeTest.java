@@ -14,7 +14,6 @@ import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.NativeMemory;
@@ -43,7 +42,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void firstOpenProducerOnlySignalsTheIdleGate() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     AtomicInteger readySignals = new AtomicInteger();
     AtomicInteger openSignals = new AtomicInteger();
@@ -81,7 +80,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void writerReservationTrustEndsWhenTheTicketIsCommitted() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
@@ -101,7 +100,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void readySignalFailureDoesNotCancelACommittedRetirement() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
@@ -123,7 +122,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void aggregateWorkStateTracksOpenSealedAndSafeTransitions() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     Method workState = RetirementJournal.class.getDeclaredMethod("workState");
@@ -162,7 +161,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void readyLaneCountTracksOneQueuedMarkerPerReadyCycle() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 2);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     Field readyLaneCountField = RetirementJournal.class.getDeclaredField("readyLaneCount");
@@ -204,7 +203,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void closedCompleteProducerRemainsRunnableAfterReadyHintIsConsumed() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementJournal.Lane lane = journal.lane(1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
@@ -228,7 +227,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void latePublicationFromAClosedSegmentCannotClearItsOpenSuccessor() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementSegment.Reservation predecessor = new RetirementSegment.Reservation();
     RetirementSegment.Reservation successor = new RetirementSegment.Reservation();
@@ -270,7 +269,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void busyProgressOwnerKeepsTheJournalReadyHintSticky() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     RetirementJournal.Lane lane = journal.lane(1);
@@ -297,7 +296,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void stalledLaneDoesNotBlockActorProgressOnAnotherWriterLane() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 2);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     RetirementJournal.Lane stalled = journal.lane(1);
@@ -335,7 +334,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void lookupOnlyWriterDoesNotPinValueRetirement() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot lookupOnly = new ReaderSlot();
@@ -362,7 +361,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void lookupOnlyWriterStillPinsStructuralRetirement() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot lookupOnly = new ReaderSlot();
@@ -391,7 +390,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void writerLaneCoalescesWakeupsUntilItsFixedRecordBoundary() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     AtomicInteger signalCount = new AtomicInteger();
     try {
@@ -432,7 +431,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void readyTurnCutsOnlyTheWriterLaneThatReachedItsBoundary() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 2);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
@@ -464,7 +463,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void closedSegmentWakeDoesNotCutTheNextPartialProducer() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
@@ -493,7 +492,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void publicationAfterAnIncompleteCutRearmsTheLane() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     AtomicInteger signalCount = new AtomicInteger();
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
@@ -523,7 +522,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void sealStatisticsCountVisitedAndProductiveLanesRatherThanRecords() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 2);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
@@ -550,7 +549,7 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void laneRejectsAReservationOwnedByAnotherLane() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 2);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
@@ -609,7 +608,7 @@ public final class RetirementJournalWakeTest {
     assertEquals(
         RetirementSegment.Reservation.class.getDeclaredField("allocation").getType(), long.class);
 
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementSegment segment = new RetirementSegment(memory, 8, 0L, 1);
     try {
       assertEquals(segment.payloadBytes(), 8L * 3L * Long.BYTES);

@@ -21,7 +21,6 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.infra.ThreadParams;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.DirectValueConsumer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
@@ -40,8 +39,6 @@ import com.red.ohc.cache.OffHeapCache;
 @State(Scope.Benchmark)
 public class OHCSerializedBenchmark {
   // Keep the default smoke narrow; expand dimensions explicitly with JMH -p overrides.
-  @Param({"JNA"})
-  public AllocatorType allocator;
 
   @Param({"32"})
   public int keyBytes;
@@ -79,7 +76,6 @@ public class OHCSerializedBenchmark {
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
                 .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
-                .allocator(allocator)
                 .build();
     for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
       cache.put(dataset.keys[i], dataset.values[i]);

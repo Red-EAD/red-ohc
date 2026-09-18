@@ -24,12 +24,11 @@ import java.util.concurrent.locks.LockSupport;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 
 public final class ReaderRegistryTest {
   private static final NativeMemory.Memory TEST_MEMORY =
-      new NativeMemory.Memory(AllocatorType.UNSAFE);
+      new NativeMemory.Memory();
   private static final List<ReaderRegistry> OPEN_REGISTRIES = new ArrayList<>();
 
   private static synchronized ReaderRegistry newRegistry() {
@@ -405,7 +404,7 @@ public final class ReaderRegistryTest {
 
   @Test(timeOut = 5_000L)
   public void clearWaitsForAnInFlightNativePublicationBeforeUnbindingTheSlot() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry registry = new ReaderRegistry(memory);
     ReaderSlot slot = new ReaderSlot();
     registry.register(slot);
@@ -550,7 +549,7 @@ public final class ReaderRegistryTest {
 
   @Test
   public void clearKeepsNativeChunksUntilAnIdempotentClose() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry registry = new ReaderRegistry(memory);
     long allocated = memory.allocated();
     ReaderSlot slot = new ReaderSlot();

@@ -8,7 +8,6 @@ import org.openjdk.jcstress.annotations.Outcome;
 import org.openjdk.jcstress.annotations.State;
 import org.openjdk.jcstress.infra.results.J_Result;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 
 /** Verifies that the combined reader state is observed as one valid long value. */
@@ -19,7 +18,7 @@ import com.red.ohc.storage.NativeMemory;
     desc = "the actor observes either the old quiescent state or the fully published value state")
 @State
 public class ReaderStatePublicationStress {
-  private final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+  private final NativeMemory.Memory memory = new NativeMemory.Memory();
   private final ReaderRegistry registry = new ReaderRegistry(memory);
   private final int slot = registry.register(new ReaderSlot());
 

@@ -18,7 +18,6 @@ import org.openjdk.jol.info.FieldLayout;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.runtime.ThreadContext;
 
 public class WriterArenaTest {
@@ -78,7 +77,7 @@ public class WriterArenaTest {
     }
     Assert.assertNotNull(counter, "small allocation fallback must be observable");
 
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long entry = arena.allocate(112L);
@@ -91,7 +90,7 @@ public class WriterArenaTest {
 
   @Test
   public void smallEntryReuseDoesNotAllocateANativeBlockPerEntry() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -111,7 +110,7 @@ public class WriterArenaTest {
 
   @Test
   public void largeEntryUsesOneDirectNativeBlock() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 32_769L;
@@ -127,7 +126,7 @@ public class WriterArenaTest {
 
   @Test
   public void pageUsageAuditAggregatesRegisteredPagesPerClass() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       int smallClass = SizeClasses.indexForEntry(112L);
@@ -167,7 +166,7 @@ public class WriterArenaTest {
 
   @Test
   public void idleSealPublishesRetainedPagesAndTheOwnerSelfHeals() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 112L;
       int slotsPerPage = SizeClasses.pageBytes(SizeClasses.indexForEntry(bytes))
@@ -224,7 +223,7 @@ public class WriterArenaTest {
 
   @Test
   public void smallEntriesAllocateOnlyThePagesRequiredByTheirSizeClass() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -257,7 +256,7 @@ public class WriterArenaTest {
     int entries = 6_000;
     int slotsPerPage = SizeClasses.pageBytes(SizeClasses.indexForEntry(valueBytes)) / slotBytes;
     long requiredPages = (entries + (long) slotsPerPage - 1L) / slotsPerPage;
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     List<Long> allocations = new ArrayList<>(entries);
     try {
       WriterArena arena = memory.newWriterArena();
@@ -275,7 +274,7 @@ public class WriterArenaTest {
 
   @Test
   public void aCompletelyFreePageCanRebalanceAcrossWriterResources() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 112L;
       int sizeClass = SizeClasses.indexForEntry(bytes);
@@ -309,7 +308,7 @@ public class WriterArenaTest {
 
   @Test
   public void anAvailablePartialPageCanRebalanceWhileItsOldSlotIsStillLive() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 32_700L;
       WriterArena first = memory.newWriterArena();
@@ -340,7 +339,7 @@ public class WriterArenaTest {
 
   @Test
   public void staleLocalReadyEntryCannotReactivateAPageAfterOwnerTransfer() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 32_700L;
       WriterArena first = memory.newWriterArena();
@@ -374,7 +373,7 @@ public class WriterArenaTest {
 
   @Test
   public void readyPagesArePoppedInLifoOrderWithinOneSizeClass() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 112L;
       int sizeClass = SizeClasses.indexForEntry(bytes);
@@ -416,7 +415,7 @@ public class WriterArenaTest {
 
   @Test
   public void trimSkipsPartialStackTopAndReachesEmptyPageBelow() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 112L;
       int sizeClass = SizeClasses.indexForEntry(bytes);
@@ -449,7 +448,7 @@ public class WriterArenaTest {
 
   @Test
   public void trimmedReadyTokenCannotActivateAReusedPageId() {
-    FailingAllocator allocator = new FailingAllocator();
+    FailingPageMapper allocator = new FailingPageMapper();
     NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
     try {
       long bytes = 32_700L;
@@ -469,7 +468,7 @@ public class WriterArenaTest {
         memory.releaseEntry(entry, bytes);
       }
 
-      allocator.failNextAllocations(1);
+      allocator.failNextPageMappings(1);
       long pressureAllocation = target.allocate(112L);
       Assert.assertNotEquals(pressureAllocation, 0L);
       Assert.assertEquals(memory.pageTrimmedCount(), 1L);
@@ -491,7 +490,7 @@ public class WriterArenaTest {
 
   @Test(timeOut = 5_000L)
   public void oneAvailablePageCannotBeActivatedByTwoWriters() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       long bytes = 32_700L;
       WriterArena producer = memory.newWriterArena();
@@ -564,7 +563,7 @@ public class WriterArenaTest {
 
   @Test
   public void idlePagesRemainAllocatedAtTheArenaHighWaterMark() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -711,7 +710,7 @@ public class WriterArenaTest {
 
   @Test
   public void splitPageCountersPreserveLiveCountAcrossLongWraparound() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -738,7 +737,7 @@ public class WriterArenaTest {
 
   @Test
   public void splitPageCountersStillDetectUnderflowAfterLongWraparound() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -789,7 +788,7 @@ public class WriterArenaTest {
 
   @Test
   public void reusingFreeSlotsDoesNotAllocateAnotherNativePage() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -818,7 +817,7 @@ public class WriterArenaTest {
 
   @Test
   public void actorReleaseBatchReusesSlotsFromOnePage() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       ThreadContext context = new ThreadContext(null);
@@ -851,7 +850,7 @@ public class WriterArenaTest {
 
   @Test
   public void actorReleaseBatchRetrySkipsRecordsFreedBeforeAvailabilityFailure() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       ThreadContext context = new ThreadContext(null);
@@ -898,7 +897,7 @@ public class WriterArenaTest {
 
   @Test
   public void actorReleaseBatchHandlesPooledAndDirectEntries() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       ThreadContext context = new ThreadContext(null);
@@ -918,7 +917,7 @@ public class WriterArenaTest {
 
   @Test
   public void actorReleaseBatchGroupsMixedPagesArenasAndDirectEntries() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena first = memory.newWriterArena();
       WriterArena second = memory.newWriterArena();
@@ -984,7 +983,7 @@ public class WriterArenaTest {
 
   @Test(timeOut = 5_000L)
   public void concurrentPageBatchesPublishFreeSlotsWithoutCorruptingHandles() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -1059,7 +1058,7 @@ public class WriterArenaTest {
 
   @Test
   public void eachWriterResourceCanOwnADistinctAllocator() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       List<WriterArena> arenas = new ArrayList<>();
       for (int index = 0; index < NativeMemory.LOGICAL_CPU_COUNT * 2; index++) {
@@ -1072,46 +1071,18 @@ public class WriterArenaTest {
     }
   }
 
-  @Test
-  public void allocationFailureTrimsOnlyAnEmptyAvailablePageAndRetriesOnce() {
-    FailingAllocator allocator = new FailingAllocator();
-    NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
-    try {
-      long idleBytes = 32_700L;
-      long pressureBytes = 112L;
-      WriterArena idleOwner = memory.newWriterArena();
-      long first = idleOwner.allocate(idleBytes);
-      long second = idleOwner.allocate(idleBytes);
-      idleOwner.detach();
-      memory.releaseEntry(first, idleBytes);
-      memory.releaseEntry(second, idleBytes);
-      Assert.assertEquals(memory.pageReadyCount(), 1L);
-
-      allocator.failNextAllocations(1);
-      WriterArena pressureWriter = memory.newWriterArena();
-      long retried = pressureWriter.allocate(pressureBytes);
-
-      Assert.assertNotEquals(retried, 0L);
-      Assert.assertEquals(memory.pageTrimmedCount(), 1L);
-      Assert.assertEquals(memory.pageReadyCount(), 0L);
-      Assert.assertEquals(memory.smallAllocationFallbackCount(), 0L);
-      memory.releaseEntry(retried, pressureBytes);
-    } finally {
-      memory.closeArenas();
-    }
-  }
 
   @Test
   public void repeatedNativeFailurePropagatesAfterTheSingleColdTrimRetry() {
-    FailingAllocator allocator = new FailingAllocator();
+    FailingPageMapper allocator = new FailingPageMapper();
     NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
     try {
-      allocator.failNextAllocations(2);
+      allocator.failNextPageMappings(2);
       try {
         memory.newWriterArena().allocate(112L);
         Assert.fail("the second native allocation failure must propagate");
       } catch (OutOfMemoryError expected) {
-        Assert.assertEquals(expected.getMessage(), "injected native allocation failure");
+        Assert.assertEquals(expected.getMessage(), "injected page mapping failure");
       }
       Assert.assertEquals(memory.pageTrimmedCount(), 0L);
       Assert.assertEquals(memory.smallAllocationFallbackCount(), 0L);
@@ -1122,7 +1093,7 @@ public class WriterArenaTest {
 
   @Test
   public void emptyPartialPageCanBeReclaimedAndReallocatedSafely() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -1138,7 +1109,7 @@ public class WriterArenaTest {
 
   @Test(timeOut = 5_000L)
   public void retirementKeepsTheCurrentPageWhenAllocationRacesAfterEmptyCheck() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       WriterArena arena = memory.newWriterArena();
       long bytes = 112L;
@@ -1190,7 +1161,7 @@ public class WriterArenaTest {
 
   @Test
   public void partiallyFreedPageIsRetainedByItsLiveOwnerWithoutTheSharedStack() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     List<Long> entries = new ArrayList<>();
     long[] firstPageEntries = new long[0];
     try {
@@ -1241,7 +1212,7 @@ public class WriterArenaTest {
 
   @Test
   public void retainedPageOverflowSpillsToTheSharedReadyStack() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     List<Long> entries = new ArrayList<>();
     try {
       long bytes = 112L;
@@ -1290,7 +1261,7 @@ public class WriterArenaTest {
 
   @Test
   public void completelyFreedPageLeavesRetentionAndStaysTrimmable() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     List<Long> entries = new ArrayList<>();
     try {
       long bytes = 112L;
@@ -1324,7 +1295,7 @@ public class WriterArenaTest {
 
   @Test
   public void detachPublishesRetainedAndCurrentPagesToTheSharedStack() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     List<Long> entries = new ArrayList<>();
     try {
       long bytes = 112L;
@@ -1375,30 +1346,10 @@ public class WriterArenaTest {
     }
   }
 
-  private static final class FailingAllocator extends NativeAllocator {
-    private int failures;
-
-    private FailingAllocator() {
-      super(AllocatorType.UNSAFE);
-    }
-
-    private void failNextAllocations(int count) {
-      failures = count;
-    }
-
-    @Override
-    public long allocate(long bytes) {
-      if (failures > 0) {
-        failures--;
-        throw new OutOfMemoryError("injected native allocation failure");
-      }
-      return super.allocate(bytes);
-    }
-  }
 
   @Test
   public void pageMappingBudgetFallsBackToPaddedMallocPages() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       Field counterField = NativeMemory.Memory.class.getDeclaredField("directMappedPageCount");
       counterField.setAccessible(true);
@@ -1453,7 +1404,7 @@ public class WriterArenaTest {
     private int failures;
 
     private FailingPageMapper() {
-      super(AllocatorType.JNA);
+      super();
     }
 
     private void failNextPageMappings(int count) {

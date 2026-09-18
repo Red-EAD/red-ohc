@@ -8,12 +8,11 @@ import java.lang.reflect.Method;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 
 public final class NativeMemoryAtomicTest {
   @Test
   public void alignedAllocationPreservesAlignmentAndAccountingUntilRelease() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long before = memory.allocated();
     long address = memory.allocateAligned(4_096L, 64L);
     try {
@@ -30,7 +29,7 @@ public final class NativeMemoryAtomicTest {
 
   @Test
   public void compareAndSwapLongPublishesNativeMetadataWithoutAJavaField() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long address = memory.allocate(Long.BYTES);
     try {
       Method cas =

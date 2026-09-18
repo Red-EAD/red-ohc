@@ -12,13 +12,12 @@ import java.util.Random;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.storage.NativeMemory;
 
 public final class NativeS3GhostMapTest {
   @Test
   public void usesHalfTableAsTheRehashThreshold() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     Field tableField = NativeS3GhostMap.class.getDeclaredField("table");
     tableField.setAccessible(true);
@@ -38,7 +37,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void supportsZeroAndFullWidthHashes() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     try {
       assertTrue(map.put(0L, 1L));
@@ -55,7 +54,7 @@ public final class NativeS3GhostMapTest {
   @Test
   public void tagCollisionsStillCheckTheFullHash() {
     long[] collision = findTagCollision();
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     try {
       assertTrue(map.put(collision[0], 11L));
@@ -74,7 +73,7 @@ public final class NativeS3GhostMapTest {
     nodeRecordBytes.setAccessible(true);
     assertEquals(nodeRecordBytes.getLong(null), 32L);
 
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
@@ -98,7 +97,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void seedsAndSaturatesTheHitCountCarriedByAFingerprint() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
@@ -120,7 +119,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void refreshMovesAnExistingFingerprintToTheFifoTailAndKeepsItsFrequency() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
@@ -144,7 +143,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void refreshDuringIncrementalRehashPreservesFifoOrderAndTableSize() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
@@ -174,7 +173,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void refusesToResurrectItselfAfterClose() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
@@ -193,7 +192,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void removesTheOldestEntryAndPreservesFifoOrder() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     try {
       assertTrue(map.put(1L, 1L));
@@ -211,7 +210,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void rehashesIncrementallyWhileServingLookupsAndRemovals() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     try {
       for (long hash = 1L; hash <= 8L; hash++) {
@@ -236,7 +235,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void closeReleasesAllNativeGhostStorage() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     try {
       assertTrue(map.put(1L, 1L));
@@ -253,7 +252,7 @@ public final class NativeS3GhostMapTest {
 
   @Test
   public void randomizedOperationsMatchTheFifoReference() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     Map<Long, Long> reference = new LinkedHashMap<>();
     Random random = new Random(7L);

@@ -9,7 +9,6 @@ import org.testng.Assert;
 import org.testng.SkipException;
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.cache.OHCacheBuilder;
@@ -129,7 +128,6 @@ public class SerializedBenchmarkSupportTest {
             .keySerializer(Utils.byteArraySerializer)
             .valueSerializer(Utils.byteArraySerializer)
             .eviction(Eviction.S3_FIFO)
-            .allocator(AllocatorType.UNSAFE)
             .build()) {
       Assert.assertEquals(
           cache.capacity(), SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120));
@@ -145,7 +143,7 @@ public class SerializedBenchmarkSupportTest {
   }
 
   @Test(timeOut = 30_000L)
-  public void ohcCapacityReplacementWithJnaUsesUnboundedNativeAccounting() {
+  public void ohcCapacityReplacementUsesUnboundedNativeAccounting() {
     SerializedBenchmarkSupport.Dataset dataset =
         SerializedBenchmarkSupport.dataset(32, 5120, "UNIFORM");
     OHCache<byte[], byte[]> cache =
@@ -155,7 +153,6 @@ public class SerializedBenchmarkSupportTest {
             .valueSerializer(Utils.byteArraySerializer)
             .eviction(Eviction.S3_FIFO)
             .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
-            .allocator(AllocatorType.JNA)
             .build();
     try {
       for (int index = 0; index < SerializedBenchmarkSupport.CAPACITY_ENTRIES; index++) {

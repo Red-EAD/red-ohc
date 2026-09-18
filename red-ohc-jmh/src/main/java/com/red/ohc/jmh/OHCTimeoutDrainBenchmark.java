@@ -16,7 +16,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.api.Ticker;
@@ -41,8 +40,6 @@ public class OHCTimeoutDrainBenchmark {
   private static final long TTL_MILLIS = 64L;
   private static final long EXPIRED_MILLIS = TTL_MILLIS * 2L;
 
-  @Param({"JNA", "UNSAFE"})
-  public AllocatorType allocator;
 
   @Param({"1000", "10000"})
   public int entries;
@@ -80,7 +77,6 @@ public class OHCTimeoutDrainBenchmark {
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(Eviction.S3_FIFO)
-                .allocator(allocator)
                 .ticker(ticker)
                 .defaultTTLmillis(TTL_MILLIS)
                 .build();

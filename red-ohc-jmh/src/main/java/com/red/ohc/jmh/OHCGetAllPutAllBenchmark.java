@@ -32,7 +32,6 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
@@ -104,8 +103,6 @@ public class OHCGetAllPutAllBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-  @Param({"JNA"})
-  public AllocatorType allocator;
 
   private Integer[] keys;
   private byte[][] values;
@@ -136,7 +133,6 @@ public class OHCGetAllPutAllBenchmark {
               .keySerializer(INT_SERIALIZER)
               .valueSerializer(BYTES_SERIALIZER)
               .eviction(Eviction.S3_FIFO)
-              .allocator(allocator)
               .build();
       for (int index = 0; index < KEY_COUNT; index += BATCH_SIZE) {
         ohc.putAll(batch(index, BATCH_SIZE));

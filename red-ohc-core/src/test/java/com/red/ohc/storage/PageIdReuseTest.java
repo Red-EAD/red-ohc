@@ -17,7 +17,6 @@ import java.util.concurrent.atomic.AtomicLongArray;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 
 public class PageIdReuseTest {
   private static final int CACHE_LINE_LONGS = 8;
@@ -68,7 +67,7 @@ public class PageIdReuseTest {
 
   @Test
   public void pageIdsContinuePastTheLegacy18BitBoundary() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       Field nextPageIdField = NativeMemory.Memory.class.getDeclaredField("nextPageId");
       nextPageIdField.setAccessible(true);
@@ -87,7 +86,7 @@ public class PageIdReuseTest {
 
   @Test
   public void readyPageStackHeadsDoNotShareCacheLinesAcrossSizeClasses() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       Field readyStacksField = NativeMemory.Memory.class.getDeclaredField("readyPageStacks");
       readyStacksField.setAccessible(true);
@@ -103,7 +102,7 @@ public class PageIdReuseTest {
 
   @Test
   public void freeBitmapPublicationReportsOnlyEmptyToNonEmptyTransitions() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena.Page page = memory.tryAcquireEntryPage(0);
     assertNotNull(page);
     try {
@@ -133,7 +132,7 @@ public class PageIdReuseTest {
 
   @Test
   public void pageAcquisitionPreparesReadyLinkStorageBeforePublication() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena.Page page = memory.tryAcquireEntryPage(0);
     assertNotNull(page);
     try {
@@ -164,7 +163,7 @@ public class PageIdReuseTest {
 
   @Test
   public void freePageIdHeadUsesAStampForEveryStackMutation() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
       Field headField = NativeMemory.Memory.class.getDeclaredField("freePageIdHead");
       headField.setAccessible(true);
@@ -191,7 +190,7 @@ public class PageIdReuseTest {
 
   @Test
   public void physicallyFreedPageReusesItsSparseIdWithANewVersionStamp() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena.Page first = memory.tryAcquireEntryPage(0);
     assertNotNull(first);
     try {
@@ -217,7 +216,7 @@ public class PageIdReuseTest {
 
   @Test
   public void physicallyFreedPageAllocatesANewDescriptorForTheNewGeneration() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterArena.Page first = memory.tryAcquireEntryPage(0);
     assertNotNull(first);
     try {

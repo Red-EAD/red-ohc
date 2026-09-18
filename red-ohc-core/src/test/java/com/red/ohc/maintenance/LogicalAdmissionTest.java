@@ -13,7 +13,6 @@ import java.util.function.Consumer;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.index.Entry;
 import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.storage.NativeMemory;
@@ -101,7 +100,7 @@ public final class LogicalAdmissionTest {
 
   @Test
   public void actorAbsentTransitionIsCountedOnce() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     Entry entry = EntryTestSupport.entry(memory, 0, 7, 0x77L, 0L);
     try {
       entry.currentValueAllocation(64L);

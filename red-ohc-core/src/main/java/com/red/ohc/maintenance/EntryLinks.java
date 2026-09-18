@@ -2,7 +2,6 @@ package com.red.ohc.maintenance;
 
 import java.util.Arrays;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.NativeMemory;
 
@@ -56,7 +55,7 @@ public final class EntryLinks implements AutoCloseable {
 
   /** Test-only convenience constructor with an independently owned native budget. */
   EntryLinks() {
-    this(new NativeMemory.Memory(AllocatorType.JNA), true);
+    this(new NativeMemory.Memory(), true);
   }
 
   NativeMemory.Memory memory() {

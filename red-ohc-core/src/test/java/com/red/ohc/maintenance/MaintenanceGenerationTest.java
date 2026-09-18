@@ -8,7 +8,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.index.Entry;
@@ -21,7 +20,7 @@ import com.red.ohc.storage.ValueBlock;
 public class MaintenanceGenerationTest {
   @Test
   public void staleRemovalCannotDeleteAValuePublishedAfterTheMaintenanceSnapshot() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long oldValue = memory.allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(oldValue, 0L, 1, 0L);
     long newValue = memory.allocate(ValueBlock.allocationLength(1));
@@ -58,7 +57,7 @@ public class MaintenanceGenerationTest {
 
   @Test
   public void detachedEntryCannotRemoveAChmMappingWithNoValueAddress() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     Entry entry = EntryTestSupport.entry(memory, 0, 7, 0L);
     ConcurrentHashMap<Entry, Entry> data = index();
     data.putIfAbsent(entry, entry);
@@ -100,7 +99,7 @@ public class MaintenanceGenerationTest {
 
   @Test(timeOut = 500L)
   public void evictionSkipsAnEntryWhoseWriterMutexIsHeld() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     long value = memory.allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, 0L, 1, 0L);
     Entry entry = EntryTestSupport.entry(memory, 0, 9, value);

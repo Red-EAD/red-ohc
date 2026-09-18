@@ -8,7 +8,6 @@ import org.openjdk.jcstress.annotations.Outcome;
 import org.openjdk.jcstress.annotations.State;
 import org.openjdk.jcstress.infra.results.I_Result;
 
-import com.red.ohc.api.AllocatorType;
 
 /** A concurrent free cannot strand a bitmap word while the owner clears its summary bit. */
 @JCStressTest
@@ -18,7 +17,7 @@ import com.red.ohc.api.AllocatorType;
 public class FreeBitmapPublicationStress {
   private static final long ENTRY_BYTES = 112L;
 
-  private final NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.UNSAFE);
+  private final NativeMemory.Memory memory = new NativeMemory.Memory();
   private final WriterArena arena = memory.newWriterArena();
   private final WriterArena.Page page;
   private final long firstBlock;

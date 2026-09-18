@@ -10,7 +10,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.Ticker;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
@@ -19,7 +18,7 @@ import com.red.ohc.storage.NativeMemory;
 public class ReaderGuardTest {
   @Test
   public void enterPublishesAnEpochAndExitQuiescesTheReader() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -50,7 +49,7 @@ public class ReaderGuardTest {
 
   @Test
   public void admittedReaderUsesTheSamePublishedEpochAndQuiescesOnExit() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -81,7 +80,7 @@ public class ReaderGuardTest {
 
   @Test
   public void closeRacingAfterEpochPublicationRejectsTheReaderBeforeItCanDereferenceNativeMemory() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -110,7 +109,7 @@ public class ReaderGuardTest {
 
   @Test
   public void firstReadRacingRegistryCloseReturnsMissInsteadOfLeakingAnInternalException() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -147,7 +146,7 @@ public class ReaderGuardTest {
 
   @Test
   public void nestedReadersReuseOneEpochAndExitOnlyAtTheOuterBoundary() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -177,7 +176,7 @@ public class ReaderGuardTest {
 
   @Test
   public void nestedValueGuardUpgradesAndThenRestoresLookupOnlyProtection() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -214,7 +213,7 @@ public class ReaderGuardTest {
 
   @Test
   public void readerExitSignalsAReclaimBlockedActor() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(

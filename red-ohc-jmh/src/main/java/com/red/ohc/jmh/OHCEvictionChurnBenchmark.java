@@ -19,7 +19,6 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCacheStats;
 import com.red.ohc.cache.OHCacheBuilder;
@@ -44,8 +43,6 @@ public class OHCEvictionChurnBenchmark {
   private static final int WORKING_SET = CAPACITY_ENTRIES * 6 / 5;
   private static final int BATCH_SIZE = 1 << 6;
 
-  @Param({"JNA", "UNSAFE"})
-  public AllocatorType allocator;
 
   @Param({"LRU", "W_TINY_LFU", "S3_FIFO"})
   public Eviction eviction;
@@ -72,7 +69,6 @@ public class OHCEvictionChurnBenchmark {
                 .keySerializer(Utils.byteArraySerializer)
                 .valueSerializer(Utils.byteArraySerializer)
                 .eviction(eviction)
-                .allocator(allocator)
                 .build();
     for (int index = 0; index < WORKING_SET; index++) {
       keys[index] = OHCWriteAdmissionBenchmark.bytes(keyBytes, index);

@@ -10,7 +10,6 @@ import java.lang.reflect.Method;
 
 import org.testng.annotations.Test;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.index.Entry;
 import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.storage.NativeMemory;
@@ -18,7 +17,7 @@ import com.red.ohc.storage.NativeMemory;
 public final class EntryLinksTest {
   @Test
   public void nativeRecordsAreDenseAndRegistryIdsAreReused() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry first = EntryTestSupport.entry(memory, 1, 1, 11L, 0L);
     Entry second = EntryTestSupport.entry(memory, 1, 2, 22L, 0L);
@@ -52,7 +51,7 @@ public final class EntryLinksTest {
 
   @Test
   public void retiredEntryReleasesItsUnlinkedNativeRecord() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry entry = EntryTestSupport.entry(memory, 1, 4, 44L, 0L);
     try {
@@ -72,7 +71,7 @@ public final class EntryLinksTest {
 
   @Test
   public void terminalEntryClearsStaleMutationFlagsBeforeReleasingRecord() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry entry = EntryTestSupport.entry(1, 7, 77L, 0L);
     try {
@@ -93,7 +92,7 @@ public final class EntryLinksTest {
 
   @Test
   public void stalePolicyPresentHintDoesNotKeepATerminalLinkAlive() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry entry = EntryTestSupport.entry(1, 9, 99L, 0L);
     Method setPolicyPresent = Entry.class.getDeclaredMethod("setPolicyPresent", boolean.class);
@@ -120,7 +119,7 @@ public final class EntryLinksTest {
 
   @Test
   public void liveEntryPendingMutationIsNotClearedByLinkReleaseAttempt() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry entry = EntryTestSupport.entry(1, 8, 88L, 0L);
     try {
@@ -138,7 +137,7 @@ public final class EntryLinksTest {
 
   @Test
   public void logicalPageBoundaryKeepsAdjacentRecordsPacked() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry[] entries = new Entry[EntryLinks.RECORDS_PER_LOGICAL_PAGE + 1];
     try {
@@ -162,7 +161,7 @@ public final class EntryLinksTest {
 
   @Test
   public void policyMetadataMirrorSurvivesPackedLinkUpdates() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry first = EntryTestSupport.entry(memory, 1, 21, 0L, 0L);
     Entry second = EntryTestSupport.entry(memory, 1, 22, 0L, 0L);
@@ -217,7 +216,7 @@ public final class EntryLinksTest {
 
   @Test
   public void releasedRecordIsFullyClearedBeforeFreeListReuse() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry first = EntryTestSupport.entry(memory, 1, 31, 0x1234L, 0L);
     Entry replacement = EntryTestSupport.entry(memory, 1, 32, 0x5678L, 0L);
@@ -245,7 +244,7 @@ public final class EntryLinksTest {
 
   @Test
   public void policyMetadataUsesDedicatedPackedWordAndFixedOffsets() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry entry = EntryTestSupport.entry(memory, 1, 41, 0L, 0L);
     Method recordAddress = EntryLinks.class.getDeclaredMethod("recordAddress", int.class);
@@ -282,7 +281,7 @@ public final class EntryLinksTest {
 
   @Test
   public void policyWeightMirrorRejectsValuesOutsideItsIntRepresentation() {
-    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
     Entry entry = EntryTestSupport.entry(memory, 1, 42, 0L, 0L);
     try {

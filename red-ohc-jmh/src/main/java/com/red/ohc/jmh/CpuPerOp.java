@@ -13,7 +13,6 @@ import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.red.ohc.api.AllocatorType;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.DirectValueConsumer;
 import com.red.ohc.api.Eviction;
@@ -125,7 +124,6 @@ public final class CpuPerOp {
                 .keySerializer(BYTES)
                 .valueSerializer(BYTES)
                 .eviction(Eviction.S3_FIFO)
-                .allocator(AllocatorType.UNSAFE)
                 .build();
     for (int i = 0; i < workingSet; i++) {
       cache.put(keys[i], values[i]);

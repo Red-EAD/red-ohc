@@ -1,30 +1,19 @@
 package com.red.ohc.storage;
 
-import java.util.Objects;
-
 import com.sun.jna.Function;
 import com.sun.jna.Native;
 
-import com.red.ohc.api.AllocatorType;
-
-/** Owns the selected native allocation backend without cache-specific accounting. */
+/** Owns the native allocation backend without cache-specific accounting. */
 public class NativeAllocator {
   private static final int PROT_READ_WRITE = 0x3;
   private static final int MAP_PRIVATE_ANONYMOUS = 0x22;
   private static volatile Function mmap;
   private static volatile Function munmap;
 
-  private final AllocatorType type;
-
-  public NativeAllocator(AllocatorType type) {
-    this.type = Objects.requireNonNull(type, "type");
-  }
+  public NativeAllocator() {}
 
   /** Pages bypass libc when mappings are available so frees return to the OS deterministically. */
   public boolean pageMappingsAvailable() {
-    if (type != AllocatorType.JNA) {
-      return false;
-    }
     if (mmap != null && munmap != null) {
       return true;
     }
@@ -77,8 +66,7 @@ public class NativeAllocator {
     if (bytes <= 0L) {
       throw new IllegalArgumentException("bytes must be positive");
     }
-    long address =
-        type == AllocatorType.JNA ? Native.malloc(bytes) : NativeMemory.U.allocateMemory(bytes);
+    long address = Native.malloc(bytes);
     if (address == 0L) {
       throw new OutOfMemoryError("native allocation failed: " + bytes);
     }
@@ -89,10 +77,6 @@ public class NativeAllocator {
     if (address == 0L) {
       return;
     }
-    if (type == AllocatorType.JNA) {
-      Native.free(address);
-    } else {
-      NativeMemory.U.freeMemory(address);
-    }
+    Native.free(address);
   }
 }
