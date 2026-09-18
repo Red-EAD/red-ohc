@@ -1616,7 +1616,32 @@ public final class MaintenanceEventLoop
       requestWork(WORK_CLOCK);
     }
     sampleRetirementRates();
+    trimReadyPagesWhenOverCapacity();
     return work;
+  }
+
+  private static final long READY_TRIM_CHECK_INTERVAL_NANOS = 1_000_000_000L;
+  private static final long READY_TRIM_BACKOFF_NANOS = 10_000_000_000L;
+  private long nextReadyTrimCheckNanos;
+
+  /** Returns fully-empty ready pages to the allocator once native use exceeds the byte capacity. */
+  private void trimReadyPagesWhenOverCapacity() {
+    long now = sampleMonotonicNow();
+    if (now < nextReadyTrimCheckNanos) {
+      return;
+    }
+    LogicalAdmission admission = logicalAdmission;
+    if (admission == null || admission.isCountBounded()) {
+      nextReadyTrimCheckNanos = now + READY_TRIM_BACKOFF_NANOS;
+      return;
+    }
+    if (memory.allocated() <= capacity || memory.pageReadyCount() == 0L) {
+      nextReadyTrimCheckNanos = now + READY_TRIM_CHECK_INTERVAL_NANOS;
+      return;
+    }
+    long trimmedBytes = memory.trimAvailablePages();
+    nextReadyTrimCheckNanos =
+        now + (trimmedBytes > 0L ? READY_TRIM_CHECK_INTERVAL_NANOS : READY_TRIM_BACKOFF_NANOS);
   }
 
   private static final int PAGE_AUDIT_MAX_PER_STEP = 512;
