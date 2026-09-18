@@ -83,6 +83,12 @@ public final class OHCacheStats {
   private final long retirementReclaimBatchCount;
   private final long retirementOldestSafeWaitNanos;
   private final long mailboxHeadUnpublishedCount;
+  private final long[] allocatorReadyPagesByClass;
+  private final long[] allocatorPagesInUseByClass;
+  private final double[] allocatorPageOccupancyByClass;
+  private final long allocatorRetainedPagesCurrent;
+  private final long allocatorPooledPageCount;
+  private final long allocatorTrimmedBytesTotal;
 
   public OHCacheStats(
       long hitCount,
@@ -165,7 +171,13 @@ public final class OHCacheStats {
       long retirementSafeSegmentCount,
       long retirementReclaimBatchCount,
       long retirementOldestSafeWaitNanos,
-      long mailboxHeadUnpublishedCount) {
+      long mailboxHeadUnpublishedCount,
+      long[] allocatorReadyPagesByClass,
+      long[] allocatorPagesInUseByClass,
+      double[] allocatorPageOccupancyByClass,
+      long allocatorRetainedPagesCurrent,
+      long allocatorPooledPageCount,
+      long allocatorTrimmedBytesTotal) {
     this.hitCount = hitCount;
     this.missCount = missCount;
     this.loadSuccessCount = loadSuccessCount;
@@ -247,6 +259,12 @@ public final class OHCacheStats {
     this.retirementReclaimBatchCount = retirementReclaimBatchCount;
     this.retirementOldestSafeWaitNanos = retirementOldestSafeWaitNanos;
     this.mailboxHeadUnpublishedCount = mailboxHeadUnpublishedCount;
+    this.allocatorReadyPagesByClass = allocatorReadyPagesByClass;
+    this.allocatorPagesInUseByClass = allocatorPagesInUseByClass;
+    this.allocatorPageOccupancyByClass = allocatorPageOccupancyByClass;
+    this.allocatorRetainedPagesCurrent = allocatorRetainedPagesCurrent;
+    this.allocatorPooledPageCount = allocatorPooledPageCount;
+    this.allocatorTrimmedBytesTotal = allocatorTrimmedBytesTotal;
   }
 
   public long hitCount() {
@@ -607,6 +625,30 @@ public final class OHCacheStats {
 
   public long mailboxHeadUnpublishedCount() {
     return mailboxHeadUnpublishedCount;
+  }
+
+  public long[] allocatorReadyPagesByClass() {
+    return allocatorReadyPagesByClass.clone();
+  }
+
+  public long[] allocatorPagesInUseByClass() {
+    return allocatorPagesInUseByClass.clone();
+  }
+
+  public double[] allocatorPageOccupancyByClass() {
+    return allocatorPageOccupancyByClass.clone();
+  }
+
+  public long allocatorRetainedPagesCurrent() {
+    return allocatorRetainedPagesCurrent;
+  }
+
+  public long allocatorPooledPageCount() {
+    return allocatorPooledPageCount;
+  }
+
+  public long allocatorTrimmedBytesTotal() {
+    return allocatorTrimmedBytesTotal;
   }
 
   private static long saturatedAdd(long left, long right) {

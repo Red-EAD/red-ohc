@@ -11,6 +11,7 @@ import org.testng.annotations.Test;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.OHCacheStats;
+import com.red.ohc.storage.SizeClasses;
 
 public final class MaintenanceStatsTest {
   private static final CacheSerializer<String> STRING =
@@ -66,6 +67,47 @@ public final class MaintenanceStatsTest {
       assertTrue(stats.asyncMutationQueueDepth() >= 0L);
       assertTrue(stats.nativeDebtBudgetBytes() > 0L);
       assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
+    }
+  }
+
+  @Test(timeOut = 10_000L)
+  public void pagePoolStatsExposePerClassUsageAudit() throws Exception {
+    try (OffHeapCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .buildTyped()) {
+      cache.put("key", "value");
+      cache.flushAsync().join();
+
+      long inUsePages = 0L;
+      long deadline = System.nanoTime() + 5_000_000_000L;
+      OHCacheStats stats = null;
+      int index = 0;
+      do {
+        cache.put("key-" + (index++), "value");
+        stats = cache.stats();
+        inUsePages = 0L;
+        for (long pages : stats.allocatorPagesInUseByClass()) {
+          inUsePages += pages;
+        }
+        if (inUsePages > 0L) {
+          break;
+        }
+        Thread.sleep(10L);
+      } while (System.nanoTime() < deadline);
+
+      assertEquals(stats.allocatorReadyPagesByClass().length, SizeClasses.count());
+      assertEquals(stats.allocatorPagesInUseByClass().length, SizeClasses.count());
+      assertEquals(stats.allocatorPageOccupancyByClass().length, SizeClasses.count());
+      assertTrue(inUsePages > 0L, "the audit sweep must publish in-use pages");
+      assertTrue(stats.allocatorPooledPageCount() > 0L);
+      assertTrue(stats.allocatorRetainedPagesCurrent() >= 0L);
+      assertTrue(stats.allocatorTrimmedBytesTotal() >= 0L);
+      for (double occupancy : stats.allocatorPageOccupancyByClass()) {
+        assertTrue(occupancy >= 0.0d && occupancy <= 1.0d);
+      }
     }
   }
 

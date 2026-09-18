@@ -125,6 +125,46 @@ public class WriterArenaTest {
   }
 
   @Test
+  public void pageUsageAuditAggregatesRegisteredPagesPerClass() {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      WriterArena arena = memory.newWriterArena();
+      int smallClass = SizeClasses.indexForEntry(112L);
+      int largeClass = SizeClasses.indexForEntry(5_000L);
+      Assert.assertTrue(smallClass >= 0);
+      Assert.assertTrue(largeClass >= 0);
+      Assert.assertNotEquals(smallClass, largeClass);
+
+      long firstSmall = arena.allocate(112L);
+      arena.allocate(112L);
+      arena.allocate(112L);
+      arena.allocate(5_000L);
+      arena.allocate(5_000L);
+      memory.releaseEntry(firstSmall, 112L);
+      memory.releaseEntry(arena.allocate(5_000L), 5_000L);
+
+      long[] pages = new long[SizeClasses.count()];
+      long[] allocated = new long[SizeClasses.count()];
+      long[] freed = new long[SizeClasses.count()];
+      long cursor = memory.auditPageUsage(0L, 512, pages, allocated, freed);
+      Assert.assertTrue(cursor >= 0L, "the first step must not wrap a small table");
+      for (int calls = 1; cursor >= 0L && calls < 100; calls++) {
+        cursor = memory.auditPageUsage(cursor, 512, pages, allocated, freed);
+      }
+      Assert.assertEquals(cursor, -1L, "the bounded walk must wrap the table");
+
+      Assert.assertEquals(pages[smallClass], 1L);
+      Assert.assertEquals(pages[largeClass], 1L);
+      Assert.assertEquals(allocated[smallClass], 3L);
+      Assert.assertEquals(allocated[largeClass], 3L);
+      Assert.assertEquals(freed[smallClass], 1L);
+      Assert.assertEquals(freed[largeClass], 1L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void smallEntriesAllocateOnlyThePagesRequiredByTheirSizeClass() {
     NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
     try {
@@ -134,7 +174,6 @@ public class WriterArenaTest {
       int slotBytes = SizeClasses.slotBytes(sizeClass);
       int count = 1_025;
       List<Long> entries = new ArrayList<>(count);
-
       for (int i = 0; i < count; i++) {
         entries.add(arena.allocate(bytes));
       }

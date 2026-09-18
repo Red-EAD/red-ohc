@@ -93,7 +93,13 @@ public final class OHCacheStatsTest {
             82L,
             83L,
             84L,
-            85L);
+            85L,
+            new long[] {86L},
+            new long[] {87L},
+            new double[] {88.0d},
+            89L,
+            90L,
+            91L);
 
     assertEquals(stats.hitCount(), 10L);
     assertEquals(stats.missCount(), 5L);
@@ -182,6 +188,12 @@ public final class OHCacheStatsTest {
     assertEquals(stats.retirementReclaimBatchCount(), 83L);
     assertEquals(stats.retirementOldestSafeWaitNanos(), 84L);
     assertEquals(stats.mailboxHeadUnpublishedCount(), 85L);
+    assertEquals(stats.allocatorReadyPagesByClass(), new long[] {86L});
+    assertEquals(stats.allocatorPagesInUseByClass(), new long[] {87L});
+    assertEquals(stats.allocatorPageOccupancyByClass()[0], 88.0d, 0.0d);
+    assertEquals(stats.allocatorRetainedPagesCurrent(), 89L);
+    assertEquals(stats.allocatorPooledPageCount(), 90L);
+    assertEquals(stats.allocatorTrimmedBytesTotal(), 91L);
   }
 
   @Test
@@ -268,7 +280,13 @@ public final class OHCacheStatsTest {
             0L, // retirementSafeSegmentCount
             0L, // retirementReclaimBatchCount
             0L, // retirementOldestSafeWaitNanos
-            0L); // mailboxHeadUnpublishedCount
+            0L, // mailboxHeadUnpublishedCount
+            new long[0], // allocatorReadyPagesByClass
+            new long[0], // allocatorPagesInUseByClass
+            new double[0], // allocatorPageOccupancyByClass
+            0L, // allocatorRetainedPagesCurrent
+            0L, // allocatorPooledPageCount
+            0L); // allocatorTrimmedBytesTotal
 
     assertEquals(stats.requestCount(), 0L);
     assertEquals(stats.hitRate(), 1.0, 0.0);
@@ -362,7 +380,13 @@ public final class OHCacheStatsTest {
       "retirementSafeSegmentCount",
       "retirementReclaimBatchCount",
       "retirementOldestSafeWaitNanos",
-      "mailboxHeadUnpublishedCount"
+      "mailboxHeadUnpublishedCount",
+      "allocatorReadyPagesByClass",
+      "allocatorPagesInUseByClass",
+      "allocatorPageOccupancyByClass",
+      "allocatorRetainedPagesCurrent",
+      "allocatorPooledPageCount",
+      "allocatorTrimmedBytesTotal"
     };
     assertEquals(OHCacheStats.class.getDeclaredFields().length, expectedFields.length);
     for (String expectedField : expectedFields) {

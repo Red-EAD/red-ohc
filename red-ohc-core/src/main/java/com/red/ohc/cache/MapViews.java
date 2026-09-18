@@ -10,6 +10,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import com.red.ohc.index.Entry;
+
 /** Live heap-snapshot views over the cache's native-backed CHM authority. */
 final class MapViews<K, V> {
   private final OffHeapCache<K, V> cache;
@@ -44,7 +46,7 @@ final class MapViews<K, V> {
   private abstract class SnapshotIterator<T> implements Iterator<T> {
     private final Iterator<
             Map.Entry<
-                com.red.ohc.index.Entry, com.red.ohc.index.Entry>>
+                Entry, Entry>>
         delegate = cache.data.entrySet().iterator();
     private Map.Entry<K, V> next;
     private Map.Entry<K, V> last;

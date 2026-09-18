@@ -786,6 +786,10 @@ public final class WriterArena {
       return (int) STATE.getVolatile(this);
     }
 
+    long auditAllocatedSlots() {
+      return (long) ALLOCATED_SLOTS.getAcquire(this);
+    }
+
     private long freeSummary() {
       return (long) FREE_SUMMARY.getVolatile(this);
     }

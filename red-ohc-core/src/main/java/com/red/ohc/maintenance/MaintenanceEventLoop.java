@@ -17,6 +17,7 @@ import java.util.function.Consumer;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 import org.jctools.util.PaddedAtomicLong;
 
+import com.red.ohc.api.CacheMaintenanceException;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.RemovalCause;
 import com.red.ohc.api.Ticker;
@@ -26,8 +27,10 @@ import com.red.ohc.runtime.AccessRing;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.runtime.ThreadContext;
+import com.red.ohc.runtime.WriterResource;
 import com.red.ohc.runtime.WriterResourceRegistry;
 import com.red.ohc.storage.NativeMemory;
+import com.red.ohc.storage.SizeClasses;
 import com.red.ohc.storage.ValueBlock;
 
 /**
@@ -149,6 +152,13 @@ public final class MaintenanceEventLoop
   private volatile long publishedMaintenanceParkNanosTotal;
   private volatile long publishedMaintenanceImmediateContinuationCount;
   private volatile long accessRingDroppedCount;
+  /** Page usage audit: bounded cursor walk over registered pages, published per completed sweep. */
+  private long pageAuditCursor;
+  private final long[] pageAuditPagesInUse = new long[SizeClasses.count()];
+  private final long[] pageAuditAllocatedSlots = new long[SizeClasses.count()];
+  private final long[] pageAuditFreedSlots = new long[SizeClasses.count()];
+  private volatile long[] publishedPagesInUseByClass = new long[SizeClasses.count()];
+  private volatile double[] publishedPageOccupancyByClass = new double[SizeClasses.count()];
   private final WriterLifecycleLane.Record writerRemovalRecord =
       new WriterLifecycleLane.Record();
   private final EntryLinks links;
@@ -689,7 +699,7 @@ public final class MaintenanceEventLoop
       } else {
         Throwable unavailable = terminalFailure.get();
         if (unavailable != null) {
-          rejection = new com.red.ohc.api.CacheMaintenanceException(unavailable);
+          rejection = new CacheMaintenanceException(unavailable);
         } else {
           // Sequence allocation and the corresponding MPSC offer are one publication
           // linearization point. A producer cannot reserve a sequence and then let a later
@@ -831,7 +841,7 @@ public final class MaintenanceEventLoop
     }
     Throwable failure = terminalFailure.get();
     if (failure != null) {
-      throw new com.red.ohc.api.CacheMaintenanceException(failure);
+      throw new CacheMaintenanceException(failure);
     }
     if (closing) {
       throw new IllegalStateException("cache is closing");
@@ -854,8 +864,8 @@ public final class MaintenanceEventLoop
       unhealthy.set(true);
       request = flushRequest.getAndSet(null);
     }
-    com.red.ohc.api.CacheMaintenanceException unavailable =
-        new com.red.ohc.api.CacheMaintenanceException(failure);
+    CacheMaintenanceException unavailable =
+        new CacheMaintenanceException(failure);
     if (request != null) {
       request.future.completeExceptionally(unavailable);
     }
@@ -1073,7 +1083,7 @@ public final class MaintenanceEventLoop
         if (terminal != null) {
           processed +=
               failPendingMailbox(
-                  new com.red.ohc.api.CacheMaintenanceException(terminal));
+                  new CacheMaintenanceException(terminal));
           break;
         }
         // Decrement the durable depth once for the whole actor-local batch instead of touching a
@@ -1107,10 +1117,10 @@ public final class MaintenanceEventLoop
         terminal = terminalFailure.get();
         if (terminal != null) {
           failMailboxMessage(
-              message, new com.red.ohc.api.CacheMaintenanceException(terminal));
+              message, new CacheMaintenanceException(terminal));
           processed +=
               failPendingMailbox(
-                  new com.red.ohc.api.CacheMaintenanceException(terminal));
+                  new CacheMaintenanceException(terminal));
           break;
         }
         if (message instanceof WriterLifecycleLane.MailboxMessage) {
@@ -1269,7 +1279,7 @@ public final class MaintenanceEventLoop
         if (failure != null) {
           CompletableFuture<Void> failed = new CompletableFuture<>();
           failed.completeExceptionally(
-              new com.red.ohc.api.CacheMaintenanceException(failure));
+              new CacheMaintenanceException(failure));
           return failed;
         }
         FlushRequest existing = flushRequest.get();
@@ -1384,7 +1394,13 @@ public final class MaintenanceEventLoop
         retirements.safeSegmentDebt(),
         safeReclaimBatches,
         oldestSafeWaitNanos,
-        mailboxHeadUnpublishedCount);
+        mailboxHeadUnpublishedCount,
+        readyPagesByClassSnapshot(),
+        publishedPagesInUseByClass,
+        publishedPageOccupancyByClass,
+        memory.retainedPagesInUse(),
+        memory.pooledPageCount(),
+        memory.trimmedBytesTotal());
   }
 
   @Override
@@ -1406,7 +1422,7 @@ public final class MaintenanceEventLoop
       Throwable terminal = terminalFailure.get();
       if (terminal != null) {
         previousBatchCompleted = false;
-        failPendingMailbox(new com.red.ohc.api.CacheMaintenanceException(terminal));
+        failPendingMailbox(new CacheMaintenanceException(terminal));
         parked = true;
         try {
           LockSupport.park(this);
@@ -1437,6 +1453,7 @@ public final class MaintenanceEventLoop
           updateMaintenanceBudget(endNanos);
           maintenancePassWorkNanos = elapsed;
           maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
+          advancePageAudit();
           publishActorSnapshots();
         }
         if (mailboxProcessed > 0) {
@@ -1479,6 +1496,7 @@ public final class MaintenanceEventLoop
         updateMaintenanceBudget(endNanos);
         maintenancePassWorkNanos = elapsed;
         maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
+        advancePageAudit();
         publishActorSnapshots();
       }
       previousBatchCompleted =
@@ -1599,6 +1617,57 @@ public final class MaintenanceEventLoop
     }
     sampleRetirementRates();
     return work;
+  }
+
+  private static final int PAGE_AUDIT_MAX_PER_STEP = 512;
+  private static final long PAGE_AUDIT_STEP_INTERVAL_NANOS = 1_000_000L;
+  private static final long PAGE_AUDIT_SWEEP_INTERVAL_NANOS = 1_000_000_000L;
+  private long nextPageAuditNanos;
+
+  private void advancePageAudit() {
+    long now = sampleMonotonicNow();
+    if (now < nextPageAuditNanos) {
+      return;
+    }
+    long next =
+        memory.auditPageUsage(
+            pageAuditCursor,
+            PAGE_AUDIT_MAX_PER_STEP,
+            pageAuditPagesInUse,
+            pageAuditAllocatedSlots,
+            pageAuditFreedSlots);
+    if (next >= 0L) {
+      pageAuditCursor = next;
+      nextPageAuditNanos = now + PAGE_AUDIT_STEP_INTERVAL_NANOS;
+      return;
+    }
+    long[] pagesInUse = new long[pageAuditPagesInUse.length];
+    double[] occupancy = new double[pagesInUse.length];
+    for (int sizeClass = 0; sizeClass < pagesInUse.length; sizeClass++) {
+      long pages = pageAuditPagesInUse[sizeClass];
+      pagesInUse[sizeClass] = pages;
+      long slots =
+          pages * (long) (SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass));
+      if (slots > 0L) {
+        occupancy[sizeClass] =
+            (double) (pageAuditAllocatedSlots[sizeClass] - pageAuditFreedSlots[sizeClass]) / slots;
+      }
+      pageAuditPagesInUse[sizeClass] = 0L;
+      pageAuditAllocatedSlots[sizeClass] = 0L;
+      pageAuditFreedSlots[sizeClass] = 0L;
+    }
+    publishedPagesInUseByClass = pagesInUse;
+    publishedPageOccupancyByClass = occupancy;
+    pageAuditCursor = 0L;
+    nextPageAuditNanos = now + PAGE_AUDIT_SWEEP_INTERVAL_NANOS;
+  }
+
+  private long[] readyPagesByClassSnapshot() {
+    long[] ready = new long[SizeClasses.count()];
+    for (int sizeClass = 0; sizeClass < ready.length; sizeClass++) {
+      ready[sizeClass] = memory.pageReadyCount(sizeClass);
+    }
+    return ready;
   }
 
   private void prepareMaintenanceQuotas(WorkPlan plan, TurnCuts turn) {
@@ -2652,7 +2721,7 @@ public final class MaintenanceEventLoop
     if (unavailable != null) {
       asyncRejected.incrementAndGet();
       notifyAsyncRejection(
-          task.reject, new com.red.ohc.api.CacheMaintenanceException(unavailable));
+          task.reject, new CacheMaintenanceException(unavailable));
     } else if (closing || isStopping()) {
       asyncRejected.incrementAndGet();
       notifyAsyncRejection(task.reject, new IllegalStateException("cache is closing"));
@@ -3185,7 +3254,7 @@ public final class MaintenanceEventLoop
         continue;
       }
       collectFinalAccess(slots, index, slot);
-      com.red.ohc.runtime.WriterResource resource =
+      WriterResource resource =
           readers.detachTerminated(index);
       if (resource != null && writerResources != null) {
         writerResources.requestRetirement(resource);
@@ -4291,6 +4360,12 @@ public final class MaintenanceEventLoop
     public final long retirementReclaimBatchCount;
     public final long retirementOldestSafeWaitNanos;
     public final long mailboxHeadUnpublishedCount;
+    public final long[] allocatorReadyPagesByClass;
+    public final long[] allocatorPagesInUseByClass;
+    public final double[] allocatorPageOccupancyByClass;
+    public final long allocatorRetainedPagesCurrent;
+    public final long allocatorPooledPageCount;
+    public final long allocatorTrimmedBytesTotal;
 
     Snapshot(
         long hits,
@@ -4368,7 +4443,13 @@ public final class MaintenanceEventLoop
         long retirementSafeSegmentCount,
         long retirementReclaimBatchCount,
         long retirementOldestSafeWaitNanos,
-        long mailboxHeadUnpublishedCount) {
+        long mailboxHeadUnpublishedCount,
+        long[] allocatorReadyPagesByClass,
+        long[] allocatorPagesInUseByClass,
+        double[] allocatorPageOccupancyByClass,
+        long allocatorRetainedPagesCurrent,
+        long allocatorPooledPageCount,
+        long allocatorTrimmedBytesTotal) {
       this.hits = hits;
       this.misses = misses;
       this.evictionCount = evictionCount;
@@ -4445,6 +4526,12 @@ public final class MaintenanceEventLoop
       this.retirementReclaimBatchCount = retirementReclaimBatchCount;
       this.retirementOldestSafeWaitNanos = retirementOldestSafeWaitNanos;
       this.mailboxHeadUnpublishedCount = mailboxHeadUnpublishedCount;
+      this.allocatorReadyPagesByClass = allocatorReadyPagesByClass;
+      this.allocatorPagesInUseByClass = allocatorPagesInUseByClass;
+      this.allocatorPageOccupancyByClass = allocatorPageOccupancyByClass;
+      this.allocatorRetainedPagesCurrent = allocatorRetainedPagesCurrent;
+      this.allocatorPooledPageCount = allocatorPooledPageCount;
+      this.allocatorTrimmedBytesTotal = allocatorTrimmedBytesTotal;
     }
   }
 }

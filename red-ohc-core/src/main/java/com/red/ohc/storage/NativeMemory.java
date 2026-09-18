@@ -63,6 +63,7 @@ public final class NativeMemory {
     private final LongAdder retainedPageConsumedCount = new LongAdder();
     private final LongAdder[] pageReadyCounts = newReadyPageCounts();
     private final AtomicLong pageTrimmedCount = new AtomicLong();
+    private final AtomicLong trimmedBytesTotal = new AtomicLong();
     private final AtomicLong smallAllocationFallbacks = new AtomicLong();
     private final AtomicLong directEntryAllocations = new AtomicLong();
     private final AtomicInteger nextArenaId = new AtomicInteger(1);
@@ -243,8 +244,67 @@ public final class NativeMemory {
       return ready;
     }
 
+    public long pageReadyCount(int sizeClass) {
+      return pageReadyCounts[sizeClass].sum();
+    }
+
+    public int pooledPageCount() {
+      return pooledPageCount.get();
+    }
+
+    public long retainedPagesInUse() {
+      return retainedPageCount.sum() - retainedPageConsumedCount.sum();
+    }
+
+    public long trimmedBytesTotal() {
+      return trimmedBytesTotal.get();
+    }
+
     public long pageTrimmedCount() {
       return pageTrimmedCount.get();
+    }
+
+    /**
+     * Accumulates per-class in-use page usage for up to maxPages registered pages starting at the
+     * given cursor. Returns the next cursor, or -1 once the whole page table has been visited.
+     * Slot-steps are bounded so a sparse table cannot stall one call.
+     */
+    public long auditPageUsage(
+        long cursor, int maxPages, long[] pages, long[] allocated, long[] freed) {
+      long next = cursor;
+      int visited = 0;
+      int maxSteps = maxPages * 4;
+      for (int steps = 0; visited < maxPages && steps < maxSteps; steps++) {
+        int chunkIndex = (int) (next >>> 32);
+        if (chunkIndex >= pageChunks.length) {
+          return -1L;
+        }
+        WriterArena.Page[] chunk =
+            (WriterArena.Page[]) U.getObjectVolatile(pageChunks, objectArrayOffset(chunkIndex));
+        if (chunk == null) {
+          next = ((long) (chunkIndex + 1)) << 32;
+          continue;
+        }
+        int slotIndex = (int) next;
+        if (slotIndex >= PAGE_CHUNK_SIZE) {
+          next = ((long) (chunkIndex + 1)) << 32;
+          continue;
+        }
+        WriterArena.Page page =
+            (WriterArena.Page) U.getObjectVolatile(chunk, objectArrayOffset(slotIndex));
+        if (page == null) {
+          next++;
+          continue;
+        }
+        if (page.sizeClass < pages.length) {
+          pages[page.sizeClass]++;
+          allocated[page.sizeClass] += page.auditAllocatedSlots();
+          freed[page.sizeClass] += page.freedSlots;
+        }
+        visited++;
+        next++;
+      }
+      return next;
     }
 
     public long smallAllocationFallbackCount() {
@@ -1057,6 +1117,7 @@ public final class NativeMemory {
               if (page.beginTrimming() && freeEntryPage(page, false)) {
                 pageTrimmedCount.incrementAndGet();
                 trimmedBytes += page.pageBytes;
+                trimmedBytesTotal.addAndGet(page.pageBytes);
               } else {
                 // Keep a page that cannot be trimmed off the stack until this pass has inspected
                 // the rest of the snapshot; immediately pushing it back would pop the same page
