@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.openjdk.jol.info.ClassLayout;
@@ -580,7 +581,7 @@ public class WriterArenaTest {
 
       Assert.assertEquals(
           memory.allocated(),
-          (long) pages * (SizeClasses.pageBytes(sizeClass) + 128L),
+          (long) pages * SizeClasses.pageBytes(sizeClass),
           "normal frees must retain pages for high-water reuse instead of physically trimming");
     } finally {
       memory.closeArenas();
@@ -1392,6 +1393,80 @@ public class WriterArenaTest {
         throw new OutOfMemoryError("injected native allocation failure");
       }
       return super.allocate(bytes);
+    }
+  }
+
+  @Test
+  public void pageMappingBudgetFallsBackToPaddedMallocPages() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory(AllocatorType.JNA);
+    try {
+      Field counterField = NativeMemory.Memory.class.getDeclaredField("directMappedPageCount");
+      counterField.setAccessible(true);
+      AtomicLong counter = (AtomicLong) counterField.get(memory);
+      Field budgetField = NativeMemory.Memory.class.getDeclaredField("PAGE_MAPPING_BUDGET");
+      budgetField.setAccessible(true);
+      counter.set(budgetField.getInt(null));
+
+      WriterArena arena = memory.newWriterArena();
+      long before = memory.allocated();
+      long entry = arena.allocate(112L);
+
+      Assert.assertEquals(
+          memory.allocated() - before,
+          SizeClasses.pageBytes(SizeClasses.indexForEntry(112L)) + 128L,
+          "pages beyond the mapping budget must fall back to the padded malloc path");
+      memory.releaseEntry(entry, 112L);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void pageMappingFailureTrimsOnlyAnEmptyAvailablePageAndRetriesOnce() {    FailingPageMapper allocator = new FailingPageMapper();
+    NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
+    try {
+      long idleBytes = 32_700L;
+      long pressureBytes = 112L;
+      WriterArena idleOwner = memory.newWriterArena();
+      long first = idleOwner.allocate(idleBytes);
+      long second = idleOwner.allocate(idleBytes);
+      idleOwner.detach();
+      memory.releaseEntry(first, idleBytes);
+      memory.releaseEntry(second, idleBytes);
+      Assert.assertEquals(memory.pageReadyCount(), 1L);
+
+      allocator.failNextPageMappings(1);
+      WriterArena pressureWriter = memory.newWriterArena();
+      long retried = pressureWriter.allocate(pressureBytes);
+
+      Assert.assertNotEquals(retried, 0L);
+      Assert.assertEquals(memory.pageTrimmedCount(), 1L);
+      Assert.assertEquals(memory.pageReadyCount(), 0L);
+      Assert.assertEquals(memory.smallAllocationFallbackCount(), 0L);
+      memory.releaseEntry(retried, pressureBytes);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  private static final class FailingPageMapper extends NativeAllocator {
+    private int failures;
+
+    private FailingPageMapper() {
+      super(AllocatorType.JNA);
+    }
+
+    private void failNextPageMappings(int count) {
+      failures = count;
+    }
+
+    @Override
+    public long mapPage(long bytes) {
+      if (failures > 0) {
+        failures--;
+        throw new OutOfMemoryError("injected page mapping failure");
+      }
+      return super.mapPage(bytes);
     }
   }
 

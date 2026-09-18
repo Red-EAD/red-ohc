@@ -28,7 +28,7 @@ public final class WriterArena {
   static final int RETAINED_PAGE_LIMIT = 4;
 
   /** Sentinel that permanently seals a retained slot after its owner detached. */
-  private static final Page RETENTION_CLOSED_PAGE = new Page(null, 0, 0L, 0L, 0, 1, 1);
+  private static final Page RETENTION_CLOSED_PAGE = new Page(null, 0, 0L, 0L, 0, 1, 1, false);
 
   private final NativeMemory.Memory memory;
   private final int id;
@@ -409,6 +409,7 @@ public final class WriterArena {
     final int sizeClass;
     final int slotBytes;
     final int slotCount;
+    final boolean directMapped;
     Page(
         SizeClassState ownerClass,
         int id,
@@ -416,7 +417,8 @@ public final class WriterArena {
         long address,
         int sizeClass,
         int slotBytes,
-        int pageBytes) {
+        int pageBytes,
+        boolean directMapped) {
       this.ownerClass = ownerClass;
       this.id = id;
       this.pageKey = pageKey;
@@ -425,6 +427,7 @@ public final class WriterArena {
       this.sizeClass = sizeClass;
       this.slotBytes = slotBytes;
       this.slotCount = pageBytes / slotBytes;
+      this.directMapped = directMapped;
       if (slotCount > FREE_BITMAP_WORDS * Long.SIZE) {
         throw new IllegalArgumentException("allocator page has too many slots: " + slotCount);
       }

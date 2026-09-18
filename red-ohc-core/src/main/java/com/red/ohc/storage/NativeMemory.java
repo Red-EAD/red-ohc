@@ -93,6 +93,9 @@ public final class NativeMemory {
     private final IntChunkTable pageVersions = new IntChunkTable();
     private final WriterArena.Page[][] pageChunks = new WriterArena.Page[PAGE_CHUNK_COUNT][];
     private final AtomicInteger pooledPageCount = new AtomicInteger();
+    /** Each directly mapped page is one VMA; stay far below the default vm.max_map_count. */
+    private static final int PAGE_MAPPING_BUDGET = 30_000;
+    private final AtomicLong directMappedPageCount = new AtomicLong();
 
     public Memory(AllocatorType type) {
       this(new NativeAllocator(type));
@@ -315,16 +318,21 @@ public final class NativeMemory {
       return directEntryAllocations.get();
     }
 
-    public long allocateEntryPage() {
-      return allocateEntryPage(SizeClasses.MIN_PAGE_BYTES);
-    }
-
     private long allocateEntryPage(int pageBytes) {
       long rawAddress = allocateRaw(pageBytes + ALIGNMENT_PADDING_BYTES);
       long address = (rawAddress + 64L) & ~63L;
       // The word immediately before the visible page is outside every slot and retains the raw
       // allocator base needed to free the aligned page.
       U.putLong(address - Long.BYTES, rawAddress);
+      entryAllocations.incrementAndGet();
+      pageAllocatedCount.incrementAndGet();
+      return address;
+    }
+
+    private long allocateDirectMappedPage(int pageBytes) {
+      long address = allocator.mapPage(pageBytes);
+      allocated.addAndGet(pageBytes);
+      rawAllocations.incrementAndGet();
       entryAllocations.incrementAndGet();
       pageAllocatedCount.incrementAndGet();
       return address;
@@ -358,6 +366,12 @@ public final class NativeMemory {
     }
 
     private void freeEntryPageAllocation(WriterArena.Page page) {
+      if (page.directMapped) {
+        allocator.unmapPage(page.address, page.pageBytes);
+        directMappedPageCount.decrementAndGet();
+        allocated.addAndGet(-page.pageBytes);
+        return;
+      }
       long rawAddress = U.getLong(page.address - Long.BYTES);
       if (rawAddress == 0L) {
         throw new IllegalStateException("pooled page has no raw base");
@@ -1153,6 +1167,9 @@ public final class NativeMemory {
       long pageKey = 0L;
       long address = 0L;
       int pageBytes = SizeClasses.pageBytes(sizeClass);
+      // Anonymous mappings keep page frees OS-visible; the budget bounds vm.max_map_count use.
+      boolean directMapped =
+          allocator.pageMappingsAvailable() && directMappedPageCount.get() < PAGE_MAPPING_BUDGET;
       try {
         pageKey = nextPageKey();
         if (pageKey == 0) {
@@ -1163,7 +1180,8 @@ public final class NativeMemory {
         // Ready publication happens after the Page leaves its owner. Materialize the sparse link
         // chunk while acquisition can still unwind, so that publication itself cannot allocate.
         readyPageNext.prepare(pageId);
-        address = allocateEntryPage(pageBytes);
+        address =
+            directMapped ? allocateDirectMappedPage(pageBytes) : allocateEntryPage(pageBytes);
         if (address == 0L) {
           recyclePageId(pageId);
           pooledPageCount.decrementAndGet();
@@ -1177,13 +1195,20 @@ public final class NativeMemory {
                 address,
                 sizeClass,
                 SizeClasses.slotBytes(sizeClass),
-                pageBytes);
+                pageBytes,
+                directMapped);
         registerPage(page);
         return page;
       } catch (Throwable failure) {
         if (address != 0L) {
-          long rawAddress = U.getLong(address - Long.BYTES);
-          free(rawAddress, pageBytes + ALIGNMENT_PADDING_BYTES);
+          if (directMapped) {
+            allocator.unmapPage(address, pageBytes);
+            directMappedPageCount.decrementAndGet();
+            allocated.addAndGet(-pageBytes);
+          } else {
+            long rawAddress = U.getLong(address - Long.BYTES);
+            free(rawAddress, pageBytes + ALIGNMENT_PADDING_BYTES);
+          }
         }
         if (pageKey != 0) {
           recyclePageId((int) (pageKey & WriterArena.PAGE_ID_MASK));
