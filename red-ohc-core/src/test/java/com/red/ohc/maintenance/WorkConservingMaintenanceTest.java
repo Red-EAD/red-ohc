@@ -100,6 +100,46 @@ public final class WorkConservingMaintenanceTest {
     }
   }
 
+
+  @Test
+  public void wakeSuppressionRidesTheParkTimerWithoutAddingLatencySources() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ReaderRegistry readers = new ReaderRegistry(memory);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            new ConcurrentHashMap<Entry, Entry>(),
+            memory,
+            Ticker.DEFAULT,
+            1L << 20,
+            Eviction.LRU,
+            readers, Long.MAX_VALUE);
+    try {
+      java.lang.reflect.Field deadline =
+          MaintenanceEventLoop.class.getDeclaredField("parkDeadlineNanos");
+      deadline.setAccessible(true);
+
+      // Outside any park: nothing to suppress; a fresh signal must unpark.
+      deadline.setLong(loop, 0L);
+      assertTrue(!loop.wakeSuppressedByParkTimer(System.nanoTime()));
+
+      // Timer due within the window: the signal batches onto the timer wake.
+      deadline.setLong(loop, System.nanoTime() + 200_000L);
+      assertTrue(loop.wakeSuppressedByParkTimer(System.nanoTime()));
+
+      // Timer far in the future (deep idle): a fresh signal must unpark immediately.
+      deadline.setLong(loop, System.nanoTime() + 9_000_000L);
+      assertTrue(!loop.wakeSuppressedByParkTimer(System.nanoTime()));
+
+      // An expired deadline must not suppress (the actor is already awake or past its timer).
+      deadline.setLong(loop, System.nanoTime() - 1L);
+      assertTrue(!loop.wakeSuppressedByParkTimer(System.nanoTime()));
+    } finally {
+      readers.clear();
+      readers.close();
+      memory.closeArenas();
+    }
+  }
+
   private static void assertMissingField(Class<?> type, String name) {
     try {
       type.getDeclaredField(name);

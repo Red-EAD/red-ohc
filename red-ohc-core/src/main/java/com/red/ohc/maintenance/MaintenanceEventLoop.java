@@ -56,6 +56,13 @@ public final class MaintenanceEventLoop
   private static final int ACCESS_MAX_PER_TURN = 1_024;
   private static final int TTL_MAX_PER_TURN = 1_024;
   private static final int RECLAIM_MAX_SEGMENTS = 128;
+  /**
+   * A signal arriving while the park timer fires within this window skips the unpark: the
+   * timer wake collects the batched work instead, without delaying anything past the
+   * deadline the actor already committed to.
+   */
+  private static final long WAKE_SUPPRESSION_WINDOW_NANOS = 1_000_000L;
+  private volatile long parkDeadlineNanos;
   private static final int ADVISORY_MAX_PER_TURN =
       MaintenanceBudgetController.TOTAL_MAINTENANCE_HARD_CAP;
   private static final long MAX_CAPACITY_RETRY_BACKOFF_NANOS = 10_000_000L;
@@ -2507,10 +2514,12 @@ public final class MaintenanceEventLoop
     }
 
     parked = true;
+    parkDeadlineNanos = System.nanoTime() + delay;
     long parkStart = System.nanoTime();
     try {
       LockSupport.parkNanos(this, delay);
     } finally {
+      parkDeadlineNanos = 0L;
       maintenanceParkNanosTotal =
           saturatingAdd(maintenanceParkNanosTotal, Math.max(0L, System.nanoTime() - parkStart));
       maintenanceWakeCount++;
@@ -3942,8 +3951,17 @@ public final class MaintenanceEventLoop
 
   private void signal() {
     if (wakeGate.signal()) {
+      if (wakeSuppressedByParkTimer(System.nanoTime())) {
+        return;
+      }
       LockSupport.unpark(thread);
     }
+  }
+
+  /** True when the pending park timer wakes the actor within the batching window. */
+  boolean wakeSuppressedByParkTimer(long nowNanos) {
+    long remaining = parkDeadlineNanos - nowNanos;
+    return remaining > 0L && remaining <= WAKE_SUPPRESSION_WINDOW_NANOS;
   }
 
   private boolean isStopping() {
