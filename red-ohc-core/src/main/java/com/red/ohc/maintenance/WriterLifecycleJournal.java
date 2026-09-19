@@ -1,17 +1,25 @@
 package com.red.ohc.maintenance;
 
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+
+import org.jctools.queues.MpscUnboundedArrayQueue;
 
 /** Dynamic set of writer-exclusive lifecycle lanes signalled directly to the actor. */
 public final class WriterLifecycleJournal {
   public static final int SEGMENT_CAPACITY = 256;
+  private static final int READY_QUEUE_CHUNK_SIZE = 16;
 
   private final Object laneCreationLock = new Object();
   private final WriterLifecycleLane.SegmentPool segmentPool =
       new WriterLifecycleLane.SegmentPool(SEGMENT_CAPACITY);
   private final AtomicLong readinessGeneration = new AtomicLong();
+  /** Lanes whose ready marker is set; the actor drains only these instead of scanning every lane. */
+  private final MpscUnboundedArrayQueue<WriterLifecycleLane> readyLanes =
+      new MpscUnboundedArrayQueue<>(READY_QUEUE_CHUNK_SIZE);
+  private final AtomicInteger readyLaneCount = new AtomicInteger();
   private volatile WriterLifecycleLane[] lanes = new WriterLifecycleLane[0];
   private volatile Runnable readySignal;
   private volatile Consumer<Throwable> readySignalFailure;
@@ -32,11 +40,12 @@ public final class WriterLifecycleJournal {
     synchronized (laneCreationLock) {
       WriterLifecycleLane lane =
           new WriterLifecycleLane(SEGMENT_CAPACITY, segmentPool, this::onLaneReadinessChanged);
+      WriterLifecycleLane[] current = lanes;
+      lane.bindJournal(this, current.length);
       Runnable signal = readySignal;
       if (signal != null) {
         lane.bindReadySignal(signal, readySignalFailure);
       }
-      WriterLifecycleLane[] current = lanes;
       WriterLifecycleLane[] expanded = Arrays.copyOf(current, current.length + 1);
       expanded[current.length] = lane;
       lanes = expanded;
@@ -199,6 +208,43 @@ public final class WriterLifecycleJournal {
 
   private void onLaneReadinessChanged() {
     readinessGeneration.incrementAndGet();
+  }
+
+  /** Producer edge: the lane's ready marker flipped to set, so it joins the dirty set. */
+  void readyLaneSignalled(WriterLifecycleLane lane) {
+    readyLaneCount.incrementAndGet();
+    readyLanes.offer(lane);
+  }
+
+  /** Consumer edge: the lane's ready marker flipped to clear, leaving the dirty set. */
+  void readyLaneCleared() {
+    int remaining = readyLaneCount.decrementAndGet();
+    if (remaining < 0) {
+      throw new IllegalStateException("lifecycle ready lane count underflow");
+    }
+  }
+
+  /** Returns the number of lanes whose ready marker is currently set. */
+  int readyLaneCount() {
+    return Math.max(0, readyLaneCount.get());
+  }
+
+  WriterLifecycleLane pollReadyLane() {
+    return readyLanes.poll();
+  }
+
+  /** Requeues a lane that could not be drained this pass without changing its count. */
+  void requeueReadyLane(WriterLifecycleLane lane) {
+    readyLanes.offer(lane);
+  }
+
+  /**
+   * Cheap runnable gate. Queue entries whose marker was cleared elsewhere (mailbox drain,
+   * stale-marker probe) may linger, so emptiness alone must not keep the actor runnable;
+   * a bounded no-work drain consumes them.
+   */
+  public boolean hasPendingReadyLanes() {
+    return readyLaneCount.get() != 0;
   }
 
   private static void checkWatermark(long[] watermark, int availableLanes) {

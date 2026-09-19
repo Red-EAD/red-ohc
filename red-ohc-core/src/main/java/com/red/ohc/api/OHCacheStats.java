@@ -36,7 +36,9 @@ public final class OHCacheStats {
   private final long retirementSealHeadOfLineStops;
   private final long retirementReclaimBlockedCount;
   private final long retirementReclaimBlockedNanos;
-  private final long retirementRetryWakeCount;
+  private final long maintenancePassCount;
+  private final long maintenanceWakeCount;
+  private final long maintenanceCollectedRecordsTotal;
   private final long activeReaderCount;
   private final long accessRingDroppedCount;
   private final long retirementQueueDepth;
@@ -125,7 +127,9 @@ public final class OHCacheStats {
       long retirementSealHeadOfLineStops,
       long retirementReclaimBlockedCount,
       long retirementReclaimBlockedNanos,
-      long retirementRetryWakeCount,
+      long maintenancePassCount,
+      long maintenanceWakeCount,
+      long maintenanceCollectedRecordsTotal,
       long activeReaderCount,
       long accessRingDroppedCount,
       long retirementQueueDepth,
@@ -212,7 +216,9 @@ public final class OHCacheStats {
     this.retirementSealHeadOfLineStops = retirementSealHeadOfLineStops;
     this.retirementReclaimBlockedCount = retirementReclaimBlockedCount;
     this.retirementReclaimBlockedNanos = retirementReclaimBlockedNanos;
-    this.retirementRetryWakeCount = retirementRetryWakeCount;
+    this.maintenancePassCount = maintenancePassCount;
+    this.maintenanceWakeCount = maintenanceWakeCount;
+    this.maintenanceCollectedRecordsTotal = maintenanceCollectedRecordsTotal;
     this.activeReaderCount = activeReaderCount;
     this.accessRingDroppedCount = accessRingDroppedCount;
     this.retirementQueueDepth = retirementQueueDepth;
@@ -435,8 +441,16 @@ public final class OHCacheStats {
     return retirementReclaimBlockedNanos;
   }
 
-  public long retirementRetryWakeCount() {
-    return retirementRetryWakeCount;
+  public long maintenancePassCount() {
+    return maintenancePassCount;
+  }
+
+  public long maintenanceWakeCount() {
+    return maintenanceWakeCount;
+  }
+
+  public long maintenanceCollectedRecordsTotal() {
+    return maintenanceCollectedRecordsTotal;
   }
 
   public long activeReaderCount() {

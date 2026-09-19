@@ -89,8 +89,6 @@ public final class MaintenanceEventLoop
   private final Eviction eviction;
   private volatile WriterLifecycleJournal writerLifecycleJournal;
   /** Actor-local cache of the lifecycle journal's coalesced ready state. */
-  private long writerLifecycleReadinessGeneration = Long.MIN_VALUE;
-  private boolean writerLifecycleReady;
   private volatile WriterResourceRegistry writerResources;
   private volatile EvictionNotifier evictionNotifier;
   private final MpscUnboundedArrayQueue<Object> mailbox;
@@ -135,7 +133,6 @@ public final class MaintenanceEventLoop
   private long safeReclaimBatches;
   private long mailboxHeadUnpublishedCount;
   /** Actor-local round-robin cursor for unmanaged lifecycle records. */
-  private int lifecycleLaneCursor;
   /** True only for the current turn when an MPSC producer reserved but has not published the head. */
   private boolean mailboxHeadUnpublished;
   private long oldestSafeHeadTicket;
@@ -152,6 +149,12 @@ public final class MaintenanceEventLoop
   private volatile long publishedMaintenanceActiveNanosTotal;
   private volatile long publishedMaintenanceParkNanosTotal;
   private volatile long publishedMaintenanceImmediateContinuationCount;
+  private long maintenancePassCount;
+  private long maintenanceWakeCount;
+  private long maintenanceCollectedRecordsTotal;
+  private volatile long publishedMaintenancePassCount;
+  private volatile long publishedMaintenanceWakeCount;
+  private volatile long publishedMaintenanceCollectedRecordsTotal;
   private volatile long accessRingDroppedCount;
   /** Page usage audit: bounded cursor walk over registered pages, published per completed sweep. */
   private long pageAuditCursor;
@@ -271,7 +274,6 @@ public final class MaintenanceEventLoop
   private long retirementReclaimBlockedCount;
   private long retirementReclaimBlockedNanos;
   private long retirementReclaimBlockedSinceNanos = Long.MIN_VALUE;
-  private long retirementRetryWakeCount;
   /** Actor-owned marker: publish the policy weight only after a policy mutation. */
   private boolean policyDirty;
 
@@ -469,8 +471,6 @@ public final class MaintenanceEventLoop
       throw new IllegalStateException("writer lifecycle journal must be bound before maintenance starts");
     }
     writerLifecycleJournal = journal;
-    writerLifecycleReadinessGeneration = Long.MIN_VALUE;
-    writerLifecycleReady = false;
     journal.bindReadySignal(this::requestLifecycleMaintenance, this::recordTerminalFailure);
   }
 
@@ -1347,7 +1347,9 @@ public final class MaintenanceEventLoop
         retirements.sealHeadOfLineStops(),
         retirementReclaimBlockedCount,
         retirementReclaimBlockedNanos,
-        retirementRetryWakeCount,
+        publishedMaintenancePassCount,
+        publishedMaintenanceWakeCount,
+        publishedMaintenanceCollectedRecordsTotal,
         readers.activeReaderCount(),
         accessRingDroppedCount,
         retirementQueueDepth(),
@@ -1458,6 +1460,8 @@ public final class MaintenanceEventLoop
           publishActorSnapshots();
         }
         if (mailboxProcessed > 0) {
+          maintenanceCollectedRecordsTotal =
+              saturatingAdd(maintenanceCollectedRecordsTotal, mailboxProcessed);
           idleBackoff.reset();
         }
         if (terminalFailure.get() != null) {
@@ -1497,6 +1501,8 @@ public final class MaintenanceEventLoop
         updateMaintenanceBudget(endNanos);
         maintenancePassWorkNanos = elapsed;
         maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
+        maintenanceCollectedRecordsTotal =
+            saturatingAdd(maintenanceCollectedRecordsTotal, maintenanceWorkUnits);
         advancePageAudit();
         publishActorSnapshots();
       }
@@ -1520,6 +1526,7 @@ public final class MaintenanceEventLoop
 
   /** Executes one fair turn. Each source is drained only through its captured cut. */
   private int maintenancePass(WorkPlan plan) {
+    maintenancePassCount++;
     refreshClock(plan);
     TurnCuts turn = captureTurnCuts(plan);
     ReaderRegistry.SlotTableSnapshot accessSlots = turn.accessSlots;
@@ -1766,11 +1773,8 @@ public final class MaintenanceEventLoop
     // with the mailbox unserved. Backlog never participates in a shared denominator here;
     // each drain loop self-limits once its source runs empty.
     plan.lifecycleQuota =
-        plan.removals
-            ? Math.min(
-                LIFECYCLE_MAX_PER_TURN,
-                boundedWorkCount(
-                    Math.max(1L, lifecycle == null ? 0L : lifecycle.lagRecords())))
+        plan.removals && lifecycle != null && lifecycle.hasPendingReadyLanes()
+            ? LIFECYCLE_MAX_PER_TURN
             : 0;
     plan.capacityQuota = plan.capacity ? CAPACITY_MAX_PER_TURN : 0;
     boolean retirementPending =
@@ -2091,41 +2095,7 @@ public final class MaintenanceEventLoop
 
   private boolean hasWriterLifecycleWork() {
     WriterLifecycleJournal journal = writerLifecycleJournal;
-    if (journal == null) {
-      writerLifecycleReadinessGeneration = Long.MIN_VALUE;
-      writerLifecycleReady = false;
-      return false;
-    }
-    long observedGeneration = journal.readinessGeneration();
-    if (observedGeneration == writerLifecycleReadinessGeneration) {
-      return writerLifecycleReady;
-    }
-
-    boolean ready = journal.probeUnmanagedReadyRecords();
-    long finalGeneration = journal.readinessGeneration();
-    if (finalGeneration != observedGeneration) {
-      if (ready) {
-        // A ready head was observed while a producer or the probe rearmed a marker. Return runnable
-        // now, but do not cache it: the next actor check must confirm the new stable generation.
-        writerLifecycleReadinessGeneration = Long.MIN_VALUE;
-        writerLifecycleReady = true;
-        return true;
-      }
-      // Clearing a stale reservation-hole marker also advances the generation. Confirm that
-      // transition once before declaring the lane set idle; a producer racing this confirmation
-      // must keep the actor runnable for the next turn.
-      ready = journal.probeUnmanagedReadyRecords();
-      long confirmedGeneration = journal.readinessGeneration();
-      if (confirmedGeneration != finalGeneration) {
-        writerLifecycleReadinessGeneration = Long.MIN_VALUE;
-        writerLifecycleReady = true;
-        return true;
-      }
-      finalGeneration = confirmedGeneration;
-    }
-    writerLifecycleReadinessGeneration = finalGeneration;
-    writerLifecycleReady = ready;
-    return ready;
+    return journal != null && journal.hasPendingReadyLanes();
   }
 
   private boolean readerLifecycleWork(boolean force) {
@@ -2367,6 +2337,9 @@ public final class MaintenanceEventLoop
     publishedMaintenanceActiveNanosTotal = maintenanceActiveNanosTotal;
     publishedMaintenanceParkNanosTotal = maintenanceParkNanosTotal;
     publishedMaintenanceImmediateContinuationCount = maintenanceImmediateContinuationCount;
+    publishedMaintenancePassCount = maintenancePassCount;
+    publishedMaintenanceWakeCount = maintenanceWakeCount;
+    publishedMaintenanceCollectedRecordsTotal = maintenanceCollectedRecordsTotal;
   }
 
   /** Close drains already-published work, but never waits for a future TTL deadline. */
@@ -2540,6 +2513,7 @@ public final class MaintenanceEventLoop
     } finally {
       maintenanceParkNanosTotal =
           saturatingAdd(maintenanceParkNanosTotal, Math.max(0L, System.nanoTime() - parkStart));
+      maintenanceWakeCount++;
       publishActorSnapshots();
       parked = false;
       wakeGate.requireProcessing();
@@ -2906,38 +2880,63 @@ public final class MaintenanceEventLoop
       return 0;
     }
     int work = 0;
-    int laneCount = watermark.length;
-    int startLane = lifecycleLaneCursor >= laneCount ? 0 : lifecycleLaneCursor;
-    int laneIndex = startLane;
-    int lanesVisited = 0;
-    while (lanesVisited < laneCount && work < maximumRecords) {
-      WriterLifecycleLane lane = journal.lane(laneIndex);
-      while (!lane.watermarkComplete(watermark[laneIndex])) {
-        if (!(includeMailboxOwned ? lane.poll(writerRemovalRecord) : lane.pollUnmanaged(writerRemovalRecord))) {
-          break;
-        }
-        try {
-          processWriterLifecycleRecord(lane);
-        } finally {
-          lane.release(writerRemovalRecord);
-          writerRemovalRecord.clear();
-        }
-        work++;
-        if (work >= maximumRecords) {
-          break;
-        }
+    if (includeMailboxOwned) {
+      // Flush and close must also observe mailbox-owned heads, so they sweep every lane.
+      for (int laneIndex = 0; laneIndex < watermark.length && work < maximumRecords; laneIndex++) {
+        work +=
+            drainLifecycleLane(
+                journal.lane(laneIndex), laneIndex, watermark, maximumRecords - work, true);
       }
-      lane.finishReadyDrain();
-      lanesVisited++;
-      laneIndex++;
-      if (laneIndex == laneCount) {
-        laneIndex = 0;
+    } else {
+      // Pass drains visit only lanes whose ready marker is set; the marker is rearmed by
+      // finishReadyDrain whenever unconsumed head records remain.
+      int budget = journal.readyLaneCount();
+      for (int index = 0; index < budget && work < maximumRecords; index++) {
+        WriterLifecycleLane lane = journal.pollReadyLane();
+        if (lane == null) {
+          break;
+        }
+        int laneIndex = lane.laneIndex();
+        if (laneIndex >= watermark.length) {
+          // The lane was created after this cut captured its watermark; retry next pass.
+          journal.requeueReadyLane(lane);
+          continue;
+        }
+        work +=
+            drainLifecycleLane(lane, laneIndex, watermark, maximumRecords - work, false);
       }
     }
-    lifecycleLaneCursor = laneIndex;
     if (work != 0) {
       requestWriterResourceScan();
     }
+    return work;
+  }
+
+  private int drainLifecycleLane(
+      WriterLifecycleLane lane,
+      int laneIndex,
+      long[] watermark,
+      int maximumRecords,
+      boolean includeMailboxOwned) {
+    int work = 0;
+    while (!lane.watermarkComplete(watermark[laneIndex])) {
+      if (!(includeMailboxOwned
+          ? lane.poll(writerRemovalRecord)
+          : lane.pollUnmanaged(writerRemovalRecord))) {
+        break;
+      }
+      try {
+        processWriterLifecycleRecord(lane);
+      } finally {
+        lane.release(writerRemovalRecord);
+        writerRemovalRecord.clear();
+      }
+      work++;
+      if (work >= maximumRecords) {
+        break;
+      }
+    }
+    lane.finishReadyDrain();
     return work;
   }
 
@@ -4055,7 +4054,7 @@ public final class MaintenanceEventLoop
   private TurnCuts captureTurnCuts(WorkPlan plan) {
     WriterLifecycleJournal lifecycle = writerLifecycleJournal;
     turnCuts.ensureLifecycleLanes(lifecycle == null ? 0 : lifecycle.laneCount());
-    if (lifecycle != null) {
+    if (lifecycle != null && (plan.removals || plan.flush)) {
       lifecycle.captureWatermark(turnCuts.lifecycleWatermark);
     }
     if (plan.access || plan.flush) {
@@ -4066,11 +4065,14 @@ public final class MaintenanceEventLoop
       turnCuts.accessRecords = 0;
     }
     turnCuts.ensureRetirementLanes(retirements.laneCount() + 1);
+    boolean retirementWork =
+        plan.seal || plan.flush || plan.safe
+            || retirements.hasSealedSegments() || retirements.hasSafeSegments();
     if (isStopping()) {
       retirements.captureAndCutWatermark(turnCuts.retirementWatermark);
     } else if (plan.seal) {
       retirements.captureAndCutReadyWatermark(turnCuts.retirementWatermark);
-    } else {
+    } else if (retirementWork) {
       retirements.captureTurnWatermark(turnCuts.retirementWatermark);
     }
     WriterResourceRegistry resources = writerResources;
@@ -4397,7 +4399,9 @@ public final class MaintenanceEventLoop
     public final long retirementSealHeadOfLineStops;
     public final long retirementReclaimBlockedCount;
     public final long retirementReclaimBlockedNanos;
-    public final long retirementRetryWakeCount;
+    public final long maintenancePassCount;
+    public final long maintenanceWakeCount;
+    public final long maintenanceCollectedRecordsTotal;
     public final long activeReaderCount;
     public final long accessRingDroppedCount;
     public final long retirementQueueDepth;
@@ -4481,7 +4485,9 @@ public final class MaintenanceEventLoop
         long retirementSealHeadOfLineStops,
         long retirementReclaimBlockedCount,
         long retirementReclaimBlockedNanos,
-        long retirementRetryWakeCount,
+        long maintenancePassCount,
+        long maintenanceWakeCount,
+        long maintenanceCollectedRecordsTotal,
         long activeReaderCount,
         long accessRingDroppedCount,
         long retirementQueueDepth,
@@ -4563,7 +4569,9 @@ public final class MaintenanceEventLoop
       this.retirementSealHeadOfLineStops = retirementSealHeadOfLineStops;
       this.retirementReclaimBlockedCount = retirementReclaimBlockedCount;
       this.retirementReclaimBlockedNanos = retirementReclaimBlockedNanos;
-      this.retirementRetryWakeCount = retirementRetryWakeCount;
+      this.maintenancePassCount = maintenancePassCount;
+      this.maintenanceWakeCount = maintenanceWakeCount;
+      this.maintenanceCollectedRecordsTotal = maintenanceCollectedRecordsTotal;
       this.activeReaderCount = activeReaderCount;
       this.accessRingDroppedCount = accessRingDroppedCount;
       this.retirementQueueDepth = retirementQueueDepth;

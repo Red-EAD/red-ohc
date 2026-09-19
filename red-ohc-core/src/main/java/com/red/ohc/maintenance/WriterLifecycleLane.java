@@ -32,6 +32,9 @@ public final class WriterLifecycleLane {
   private final long segmentMask;
   private final SegmentPool segmentPool;
   private final AtomicBoolean readySignalled = new AtomicBoolean();
+  /** Bound by the owning journal before the lane becomes visible to producers. */
+  private WriterLifecycleJournal journal;
+  private int laneIndex;
 
   private volatile long producerSequence;
   private volatile long publishedRecordsTotal;
@@ -329,6 +332,9 @@ public final class WriterLifecycleLane {
 
   public void finishReadyDrain() {
     if (readySignalled.compareAndSet(true, false)) {
+      if (journal != null) {
+        journal.readyLaneCleared();
+      }
       notifyReadinessChanged();
     }
     if (hasUnmanagedHead()) {
@@ -347,6 +353,9 @@ public final class WriterLifecycleLane {
       return true;
     }
     if (readySignalled.compareAndSet(true, false)) {
+      if (journal != null) {
+        journal.readyLaneCleared();
+      }
       notifyReadinessChanged();
     }
     if (!hasUnmanagedHead()) {
@@ -354,6 +363,15 @@ public final class WriterLifecycleLane {
     }
     signalReady();
     return true;
+  }
+
+  void bindJournal(WriterLifecycleJournal owner, int index) {
+    this.journal = owner;
+    this.laneIndex = index;
+  }
+
+  int laneIndex() {
+    return laneIndex;
   }
 
   void bindReadySignal(Runnable signal) {
@@ -423,6 +441,9 @@ public final class WriterLifecycleLane {
   private void signalReady() {
     if (!readySignalled.compareAndSet(false, true)) {
       return;
+    }
+    if (journal != null) {
+      journal.readyLaneSignalled(this);
     }
     notifyReadinessChanged();
     Runnable signal = readySignal;

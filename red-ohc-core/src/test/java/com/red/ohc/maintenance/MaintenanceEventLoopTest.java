@@ -4172,7 +4172,6 @@ public class MaintenanceEventLoopTest {
       invokeMaintenancePass(loop);
       nowNanos.set(1_000_000L);
       invokeMaintenancePass(loop);
-      long retryWakeCount = getLongField(loop, "retirementRetryWakeCount");
       requestedWork.set(0);
 
       for (int index = 0; index < 64; index++) {
@@ -4189,11 +4188,6 @@ public class MaintenanceEventLoopTest {
           requestedWork.get(),
           0,
           "newer reader exits must not bypass the blocked reclaim retry backoff");
-      assertEquals(
-          getLongField(loop, "retirementRetryWakeCount"),
-          retryWakeCount,
-          "newer reader exits must not trigger reclaim passes");
-
       guard.exit(pinned);
       assertTrue(
           requestedWork.get() != 0,

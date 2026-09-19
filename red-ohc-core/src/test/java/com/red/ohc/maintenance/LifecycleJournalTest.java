@@ -216,6 +216,82 @@ public final class LifecycleJournalTest {
     assertEquals(lane.reservedRecords(), 0L);
   }
 
+
+  @Test
+  public void readyLaneCountTracksOneQueuedMarkerPerReadyCycle() {
+    WriterLifecycleJournal journal = new WriterLifecycleJournal(2);
+    WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
+    assertFalse(journal.hasPendingReadyLanes());
+
+    WriterLifecycleLane first = journal.lane(0);
+    long sequence = first.reserve();
+    first.writeRemoval(sequence, null, 1L, 1L, 0L, null);
+    first.commit(sequence);
+    assertTrue(journal.hasPendingReadyLanes());
+    assertEquals(journal.readyLaneCount(), 1);
+
+    WriterLifecycleLane second = journal.lane(1);
+    sequence = second.reserve();
+    second.writeRemoval(sequence, null, 2L, 1L, 0L, null);
+    second.commit(sequence);
+    assertEquals(journal.readyLaneCount(), 2);
+
+    assertTrue(first.pollUnmanaged(record));
+    first.release(record);
+    first.finishReadyDrain();
+    assertEquals(journal.readyLaneCount(), 1);
+
+    assertTrue(second.pollUnmanaged(record));
+    second.release(record);
+    second.finishReadyDrain();
+    assertFalse(journal.hasPendingReadyLanes());
+  }
+
+  @Test
+  public void dirtyDrainVisitsOnlySignalledLanesInThePassPath() {
+    WriterLifecycleJournal journal = new WriterLifecycleJournal(2);
+    WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
+
+    WriterLifecycleLane idle = journal.lane(0);
+    WriterLifecycleLane busy = journal.lane(1);
+    long sequence = busy.reserve();
+    busy.writeRemoval(sequence, null, 5L, 1L, 0L, null);
+    busy.commit(sequence);
+
+    assertEquals(journal.readyLaneCount(), 1);
+    WriterLifecycleLane polled = journal.pollReadyLane();
+    assertTrue(polled == busy, "only the signalled lane joins the dirty set");
+    assertTrue(polled.laneIndex() == 1);
+    assertTrue(polled.pollUnmanaged(record));
+    polled.release(record);
+    polled.finishReadyDrain();
+    assertFalse(journal.hasPendingReadyLanes());
+    assertTrue(idle.pollUnmanaged(record) == false);
+    assertEquals(idle.completedRecordsTotal(), 0L);
+  }
+
+  @Test
+  public void reservationHoleLeavesTheDirtySetWithoutSpinningTheActor() {
+    WriterLifecycleJournal journal = new WriterLifecycleJournal(1);
+    WriterLifecycleLane lane = journal.lane(0);
+
+    long first = lane.reserve();
+    long second = lane.reserve();
+    lane.writeRemoval(second, null, 2L, 1L, 0L, null);
+    lane.commit(second);
+
+    assertTrue(journal.hasPendingReadyLanes());
+    WriterLifecycleLane polled = journal.pollReadyLane();
+    assertTrue(polled == lane);
+    polled.finishReadyDrain();
+    assertFalse(
+        journal.hasPendingReadyLanes(), "a reservation hole must not keep the lane dirty");
+
+    lane.writeRemoval(first, null, 1L, 1L, 0L, null);
+    lane.commit(first);
+    assertTrue(journal.hasPendingReadyLanes(), "the hole filling must re-dirty the lane");
+  }
+
   private static void appendCommittedRemovals(WriterLifecycleLane lane, int count) {
     for (int index = 0; index < count; index++) {
       long sequence = lane.reserve();

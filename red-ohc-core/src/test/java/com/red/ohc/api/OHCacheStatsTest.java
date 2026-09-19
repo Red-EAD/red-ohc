@@ -48,9 +48,11 @@ public final class OHCacheStatsTest {
             36L,
             39L,
             40L,
+            41L,
             42L,
             43L,
             44L,
+            45L,
             59L,
             60L,
             61L,
@@ -141,10 +143,12 @@ public final class OHCacheStatsTest {
     assertEquals(stats.retirementSealHeadOfLineStops(), 35L);
     assertEquals(stats.retirementReclaimBlockedCount(), 36L);
     assertEquals(stats.retirementReclaimBlockedNanos(), 39L);
-    assertEquals(stats.retirementRetryWakeCount(), 40L);
-    assertEquals(stats.activeReaderCount(), 42L);
-    assertEquals(stats.accessRingDroppedCount(), 43L);
-    assertEquals(stats.retirementQueueDepth(), 44L);
+    assertEquals(stats.maintenancePassCount(), 40L);
+    assertEquals(stats.maintenanceWakeCount(), 41L);
+    assertEquals(stats.maintenanceCollectedRecordsTotal(), 42L);
+    assertEquals(stats.activeReaderCount(), 43L);
+    assertEquals(stats.accessRingDroppedCount(), 44L);
+    assertEquals(stats.retirementQueueDepth(), 45L);
     assertEquals(stats.retirementPublishedRecordsTotal(), 59L);
     assertEquals(stats.retirementCompletedRecordsTotal(), 60L);
     assertEquals(stats.retirementLagRecords(), 61L);
@@ -234,7 +238,9 @@ public final class OHCacheStatsTest {
             0L, // retirementSealHeadOfLineStops
             0L, // retirementReclaimBlockedCount
             0L, // retirementReclaimBlockedNanos
-            0L, // retirementRetryWakeCount
+            0L, // maintenancePassCount
+            0L, // maintenanceWakeCount
+            0L, // maintenanceCollectedRecordsTotal
             0L, // activeReaderCount
             0L, // accessRingDroppedCount
             0L, // retirementQueueDepth
@@ -334,7 +340,9 @@ public final class OHCacheStatsTest {
       "retirementSealHeadOfLineStops",
       "retirementReclaimBlockedCount",
       "retirementReclaimBlockedNanos",
-      "retirementRetryWakeCount",
+      "maintenancePassCount",
+      "maintenanceWakeCount",
+      "maintenanceCollectedRecordsTotal",
       "activeReaderCount",
       "accessRingDroppedCount",
       "retirementQueueDepth",

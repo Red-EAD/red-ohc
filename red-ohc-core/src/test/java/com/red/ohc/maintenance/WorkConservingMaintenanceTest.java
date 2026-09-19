@@ -43,9 +43,11 @@ public final class WorkConservingMaintenanceTest {
   }
 
   @Test
-  public void lifecycleReadySignalUsesExclusiveResourceLanesWithoutAnUnconsumedQueue()
+  public void lifecycleReadyLanesFormADirtySetTheActorDrainsWithoutLaneScans()
       throws Exception {
-    assertMissingField(WriterLifecycleJournal.class, "readyLanes");
+    // The dirty set replaces per-pass full-lane probes: a uniform signal stream degraded the
+    // generation memo into an O(laneCount) scan per work decision (production 40:1 scan:record).
+    assertTrue(WriterLifecycleJournal.class.getDeclaredField("readyLanes") != null);
     assertMissingField(WriterLifecycleJournal.class, "currentLane");
     assertMissingField(WriterLifecycleJournal.class, "laneMask");
   }
@@ -85,7 +87,12 @@ public final class WorkConservingMaintenanceTest {
 
       Method method = MaintenanceEventLoop.class.getDeclaredMethod("hasRunnableWork");
       method.setAccessible(true);
+      // The dirty set is conservative for one bounded visit: a signalled lane whose head is a
+      // hole stays runnable until the drain's finishReadyDrain clears the marker.
+      assertTrue((Boolean) method.invoke(loop), "the commit edge must mark the lane runnable");
+      lane.finishReadyDrain();
       assertTrue(!(Boolean) method.invoke(loop), "a reservation hole must not cause actor spin");
+      assertTrue(!(Boolean) method.invoke(loop), "the settled hole must stay non-runnable");
     } finally {
       readers.clear();
       readers.close();
