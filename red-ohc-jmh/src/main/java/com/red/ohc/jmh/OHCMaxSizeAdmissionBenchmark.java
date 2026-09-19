@@ -140,7 +140,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     results.retirementSealHeadOfLineStops = stats.retirementSealHeadOfLineStops();
     results.retirementReclaimBlockedCount = stats.retirementReclaimBlockedCount();
     results.retirementReclaimBlockedNanos = stats.retirementReclaimBlockedNanos();
-    results.retirementRetryWakeCount = stats.retirementRetryWakeCount();
     results.activeReaderCount = stats.activeReaderCount();
     results.accessRingDroppedCount = stats.accessRingDroppedCount();
     results.retirementPublishedRecordsTotal = stats.retirementPublishedRecordsTotal();
@@ -338,7 +337,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     public long retirementSealHeadOfLineStops;
     public long retirementReclaimBlockedCount;
     public long retirementReclaimBlockedNanos;
-    public long retirementRetryWakeCount;
     public long activeReaderCount;
     public long accessRingDroppedCount;
     public long retirementPublishedRecordsTotal;
@@ -406,7 +404,6 @@ public class OHCMaxSizeAdmissionBenchmark {
       retirementSealHeadOfLineStops = 0L;
       retirementReclaimBlockedCount = 0L;
       retirementReclaimBlockedNanos = 0L;
-      retirementRetryWakeCount = 0L;
       activeReaderCount = 0L;
       accessRingDroppedCount = 0L;
       retirementPublishedRecordsTotal = 0L;
