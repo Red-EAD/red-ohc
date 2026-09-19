@@ -533,14 +533,15 @@ public final class RetirementJournalWakeTest {
       long[] watermark = journal.captureAndCutWatermark();
 
       assertEquals(journal.sealSnapshotSegments(1L, watermark), 1);
-      assertEquals(journal.lastSealScannedLanes(), 3);
+      // Dirty seal scans visit the actor lane plus the ready-marked lanes, not every lane.
+      assertEquals(journal.lastSealScannedLanes(), 2);
       assertEquals(journal.lastSealSealedLanes(), 1);
-      assertEquals(journal.sealScannedLanesTotal(), 3L);
+      assertEquals(journal.sealScannedLanesTotal(), 2L);
 
       assertEquals(journal.sealSnapshotSegments(2L, watermark), 0);
-      assertEquals(journal.lastSealScannedLanes(), 3);
+      assertEquals(journal.lastSealScannedLanes(), 2);
       assertEquals(journal.lastSealSealedLanes(), 0);
-      assertEquals(journal.sealScannedLanesTotal(), 6L);
+      assertEquals(journal.sealScannedLanesTotal(), 4L);
     } finally {
       journal.close();
       memory.closeArenas();

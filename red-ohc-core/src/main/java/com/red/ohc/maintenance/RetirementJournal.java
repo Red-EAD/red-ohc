@@ -474,14 +474,25 @@ public final class RetirementJournal {
     int actorRecords = sealLane(actorLane, epoch, watermark[0]);
     int sealed = actorRecords;
     int sealedLanes = actorRecords == 0 ? 0 : 1;
-    Lane[] snapshot = writerLanes;
-    for (int index = 1; index < watermark.length; index++) {
-      int laneRecords =
-          sealLane(snapshot[index - ACTOR_LANE_OFFSET], epoch, watermark[index]);
+    int visited = ACTOR_LANE_OFFSET;
+    int budget = Math.max(0, readyLaneCount.get());
+    for (int index = 0; index < budget; index++) {
+      Lane lane = readyLanes.poll();
+      if (lane == null) {
+        break;
+      }
+      readyLanes.offer(lane);
+      visited++;
+      // Lane.index is already watermark-offset (actor lane occupies slot 0).
+      int laneWatermarkIndex = lane.index();
+      if (laneWatermarkIndex >= watermark.length) {
+        continue;
+      }
+      int laneRecords = sealLane(lane, epoch, watermark[laneWatermarkIndex]);
       sealed += laneRecords;
       sealedLanes += laneRecords == 0 ? 0 : 1;
     }
-    recordSealScan(watermark.length, sealedLanes, sealed);
+    recordSealScan(visited, sealedLanes, sealed);
     if (sealed != 0) {
       readyHint.set(true);
     }
@@ -494,9 +505,17 @@ public final class RetirementJournal {
     if (actorLane.hasSealableThrough(watermark[0])) {
       return true;
     }
-    Lane[] snapshot = writerLanes;
-    for (int index = 1; index < watermark.length; index++) {
-      if (snapshot[index - ACTOR_LANE_OFFSET].hasSealableThrough(watermark[index])) {
+    int budget = Math.max(0, readyLaneCount.get());
+    for (int index = 0; index < budget; index++) {
+      Lane lane = readyLanes.poll();
+      if (lane == null) {
+        break;
+      }
+      readyLanes.offer(lane);
+      // Lane.index is already watermark-offset (actor lane occupies slot 0).
+      int laneWatermarkIndex = lane.index();
+      if (laneWatermarkIndex < watermark.length
+          && lane.hasSealableThrough(watermark[laneWatermarkIndex])) {
         return true;
       }
     }
@@ -1175,6 +1194,10 @@ public final class RetirementJournal {
       completionCursor = new AtomicReference<>(initial);
     }
 
+    int index() {
+      return index;
+    }
+
     private void append(long address, long allocation) {
       if (!reserve(actorReservation)) {
         throw new IllegalStateException("retirement journal is closed");
@@ -1371,7 +1394,14 @@ public final class RetirementJournal {
       return ready.get()
           || hasClosedCompleteProducer()
           || hasWakeableOpenProducer()
-          || hasRunnableCompletion();
+          || hasRunnableCompletion()
+          || hasSealableCursor();
+    }
+
+    /** A closed complete segment at the seal cursor keeps the lane dirty until it is sealed. */
+    private boolean hasSealableCursor() {
+      RetirementSegment segment = sealCursor;
+      return segment != null && segment.isClosed() && segment.isComplete();
     }
 
     private boolean hasWakeableOpenProducer() {
