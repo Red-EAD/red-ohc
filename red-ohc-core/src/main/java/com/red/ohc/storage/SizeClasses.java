@@ -31,16 +31,18 @@ public final class SizeClasses {
     return pageBytesForSlot(SLOT_BYTES[index]);
   }
 
+  /**
+   * Continuous page sizing between the 64KB floor and the 2MB cap; every page holds 256 slots
+   * (512 for the floor classes), so finer pages cut fan-out and partial-page slack without
+   * any size cliff. Direct mappings tolerate non-power-of-two lengths.
+   */
   public static int pageBytesForSlot(int slotBytes) {
     long alignedSlotBytes = (slotBytes + 63L) & ~63L;
     if (alignedSlotBytes <= 0L || alignedSlotBytes > Integer.MAX_VALUE) {
       throw new IllegalArgumentException("slot size is out of range: " + slotBytes);
     }
-    if (alignedSlotBytes < 4 * 1024) {
-      long required = Math.max((long) MIN_PAGE_BYTES, 256L * alignedSlotBytes);
-      return nextPowerOfTwo((int) required);
-    }
-    return 2 * 1024 * 1024;
+    long required = Math.max((long) MIN_PAGE_BYTES, 256L * alignedSlotBytes);
+    return (int) Math.min(2L * 1024 * 1024, required);
   }
 
   public static long directBytes(long entryBytes) {
@@ -48,13 +50,6 @@ public final class SizeClasses {
     // Native malloc implementations are not required to return 64-byte aligned addresses. Keep
     // enough slack for Memory to align the visible block while retaining the raw base at +56.
     return blockBytes + 128L;
-  }
-
-  private static int nextPowerOfTwo(int value) {
-    if (value <= 0 || value > (1 << 30)) {
-      throw new IllegalArgumentException("page size is out of range: " + value);
-    }
-    return 1 << (32 - Integer.numberOfLeadingZeros(value - 1));
   }
 
   private static int[] createSlots() {

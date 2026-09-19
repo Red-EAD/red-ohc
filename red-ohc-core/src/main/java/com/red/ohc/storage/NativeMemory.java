@@ -93,7 +93,7 @@ public final class NativeMemory {
     private final WriterArena.Page[][] pageChunks = new WriterArena.Page[PAGE_CHUNK_COUNT][];
     private final AtomicInteger pooledPageCount = new AtomicInteger();
     /** Each directly mapped page is one VMA; stay far below the default vm.max_map_count. */
-    private static final int PAGE_MAPPING_BUDGET = 30_000;
+    private static final int PAGE_MAPPING_BUDGET = 45_000;
     private final AtomicLong directMappedPageCount = new AtomicLong();
 
     public Memory() {

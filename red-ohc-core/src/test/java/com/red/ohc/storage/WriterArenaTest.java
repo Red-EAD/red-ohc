@@ -43,7 +43,7 @@ public class WriterArenaTest {
   }
 
   @Test
-  public void slotClassesAre64ByteAlignedAndUseBoundedPageSizing() {
+  public void slotClassesAre64ByteAlignedAndUseContinuousPageSizing() {
     for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
       int slotBytes = SizeClasses.slotBytes(sizeClass);
       Assert.assertEquals(
@@ -51,17 +51,12 @@ public class WriterArenaTest {
           0,
           "slot bytes must be rounded up to the native header alignment");
 
-      int expectedPageBytes;
-      if (slotBytes < 4 * 1024) {
-        long required = Math.max(64L * 1024L, 256L * slotBytes);
-        expectedPageBytes = 64 * 1024;
-        while (expectedPageBytes < required) {
-          expectedPageBytes <<= 1;
-        }
-      } else {
-        expectedPageBytes = 2 * 1024 * 1024;
-      }
-      Assert.assertEquals(SizeClasses.pageBytes(sizeClass), expectedPageBytes);
+      long expectedPageBytes =
+          Math.min(2L * 1024 * 1024, Math.max(64L * 1024L, 256L * slotBytes));
+      Assert.assertEquals(SizeClasses.pageBytes(sizeClass), (int) expectedPageBytes);
+      Assert.assertTrue(
+          SizeClasses.pageBytes(sizeClass) / slotBytes >= 64,
+          "every page must hold at least 64 slots");
     }
   }
 
@@ -605,9 +600,9 @@ public class WriterArenaTest {
     long valueAllocation = ValueBlock.allocationLength(5_120);
     int sizeClass = SizeClasses.indexForEntry(valueAllocation);
     Assert.assertEquals(SizeClasses.slotBytes(sizeClass), 5_632);
-    Assert.assertEquals(SizeClasses.pageBytes(sizeClass), 2 * 1024 * 1024);
+    Assert.assertEquals(SizeClasses.pageBytes(sizeClass), 1_441_792);
     Assert.assertEquals(
-        SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass), 372);
+        SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass), 256);
   }
 
   @Test
