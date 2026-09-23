@@ -29,7 +29,7 @@ public final class FrequencySketch {
     this.sampleSize = Math.min(Long.MAX_VALUE / 10L, Math.max(1L, indexSlots)) * 10L;
   }
 
-  public void increment(long hash) {
+  public void increment(int hash) {
     long mixed = mix64(hash);
     for (int depth = 0; depth < SEEDS.length; depth++) {
       int index = (int) (mix64(mixed + SEEDS[depth]) & tableMask);

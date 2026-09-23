@@ -137,11 +137,11 @@ public final class MaintenancePolicy implements AutoCloseable {
     long valueAddress = Entry.rawValueAddress(entry.valueAddress);
     long valueAllocation =
         valueAddress == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(valueAddress));
-    add(entry, valueAllocation, entry.keyHash64());
+    add(entry, valueAllocation, entry.keyHash());
   }
 
   /** Applies an actor-captured value allocation and immutable hash seed. */
-  void add(Entry entry, long valueAllocation, long keyHash64) {
+  void add(Entry entry, long valueAllocation, int keyHash) {
     int linkId = entry.policyLinkId();
     int state = linkId == 0 ? Entry.POLICY_NONE : links.policyState(linkId);
     if (state != Entry.POLICY_NONE) {
@@ -152,17 +152,17 @@ public final class MaintenancePolicy implements AutoCloseable {
         CacheMath.logicalEntryBytes(entry.keyAllocationLength(), valueAllocation));
     long weight = countBounded ? 1L : bytes;
     linkId = links.ensure(entry);
-    links.keyHash64(linkId, keyHash64);
+    links.keyHash(linkId, keyHash);
     setPolicyByteWeight(entry, bytes);
     setPolicyAccessCount(entry, 0);
     weightedSize += weight;
     liveBytes += bytes;
     switch (eviction) {
       case S3_FIFO:
-        if (ghost.observe(keyHash64, ghostRecord)) {
+        if (ghost.observe(keyHash, ghostRecord)) {
           long ghostEntryWeight =
               ghostRecord.frequency >= S3_GHOST_TO_MAIN_HITS
-                  ? ghost.remove(keyHash64)
+                  ? ghost.remove(keyHash)
                   : Long.MIN_VALUE;
           if (ghostEntryWeight != Long.MIN_VALUE) {
             ghostWeight -= ghostEntryWeight;
@@ -179,7 +179,7 @@ public final class MaintenancePolicy implements AutoCloseable {
       case W_TINY_LFU:
         link(window, entry, Entry.POLICY_TINY_WINDOW);
         windowWeight += weight;
-        sketch.increment(keyHash64);
+        sketch.increment(keyHash);
         recordWriteMiss();
         drainWindow();
         break;
@@ -249,8 +249,7 @@ public final class MaintenancePolicy implements AutoCloseable {
     }
     int state = links.policyState(linkId);
     long removedLogicalBytes = links.policyByteWeight(linkId);
-    int removedAccessCount = links.policyAccessCount(linkId);
-    long keyHash64 = links.keyHash64(linkId);
+    int keyHash = links.keyHash(linkId);
     if (state == Entry.POLICY_NONE) {
       clearPolicyMetadata(entry);
       links.maybeRelease(entry);
@@ -266,9 +265,9 @@ public final class MaintenancePolicy implements AutoCloseable {
         removeSmallWeight(entry, removedWeight);
         unlink(small, entry);
         if (eviction) {
-          addGhost(keyHash64, removedWeight, removedAccessCount);
+          addGhost(keyHash, removedWeight);
         } else {
-          clearGhostEvidence(keyHash64);
+          clearGhostEvidence(keyHash);
         }
         break;
       case Entry.POLICY_S3_MAIN:
@@ -619,9 +618,9 @@ public final class MaintenancePolicy implements AutoCloseable {
     }
   }
 
-  private void addGhost(long fingerprint, long weight, int smallHits) {
-    boolean inserted = ghost.refresh(fingerprint, weight, smallHits, ghostRecord);
-    int frequency = ghostRecord.found ? Math.max(ghostRecord.frequency, smallHits) : smallHits;
+  private void addGhost(int fingerprint, long weight) {
+    boolean inserted = ghost.refresh(fingerprint, weight, 0, ghostRecord);
+    int frequency = ghostRecord.found ? ghostRecord.frequency : 0;
     if (ghostRecord.found) {
       ghostWeight -= ghostRecord.weight;
     }
@@ -710,7 +709,7 @@ public final class MaintenancePolicy implements AutoCloseable {
     mainWeight += weight;
   }
 
-  private void clearGhostEvidence(long fingerprint) {
+  private void clearGhostEvidence(int fingerprint) {
     if (ghost == null) {
       return;
     }
@@ -771,8 +770,8 @@ public final class MaintenancePolicy implements AutoCloseable {
     return links.policyAccessCount(requireLinkId(entry));
   }
 
-  private long keyHashOf(Entry entry) {
-    return links.keyHash64(requireLinkId(entry));
+  private int keyHashOf(Entry entry) {
+    return links.keyHash(requireLinkId(entry));
   }
 
   private long byteWeightOf(Entry entry) {

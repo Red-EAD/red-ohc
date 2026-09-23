@@ -69,7 +69,7 @@ public final class WriterLifecycleLaneTest {
 
     long sequence = lane.reserve();
     lane.writeMutation(
-        sequence, entry, 0L, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+        sequence, entry, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
     lane.commit(sequence, false);
 
     assertEquals(signals.get(), 0);
@@ -85,7 +85,7 @@ public final class WriterLifecycleLaneTest {
     WriterLifecycleLane lane = new WriterLifecycleLane(4);
     WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
     Entry entry = new Entry(0L, 0, 1L);
-    long hash = 0x1122_3344_5566_7788L;
+    int hash = 0x5566_7788;
     long allocation = 2_048L;
     long version = 17L;
 
@@ -113,7 +113,7 @@ public final class WriterLifecycleLaneTest {
     lane.writeMutation(
         sequence,
         new Entry(0L, 0, 1L),
-        0L,
+        0,
         0L,
         WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
     lane.commit(sequence);
@@ -162,7 +162,7 @@ public final class WriterLifecycleLaneTest {
     for (int index = 0; index < 5; index++) {
       long sequence = lane.reserve();
       lane.writeMutation(
-          sequence, entry, 0L, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+          sequence, entry, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
       WriterLifecycleLane.MailboxMessage message = lane.commitForMailbox(sequence);
       if (index == 0) {
         first = message;
@@ -184,7 +184,7 @@ public final class WriterLifecycleLaneTest {
     long sequence = lane.reserve();
     WriterLifecycleLane.MailboxMessage message =
         lane.commitMutationForMailbox(
-            sequence, entry, 0L, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+            sequence, entry, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
 
     assertSame(message, lane.mailboxMessage(sequence));
     assertEquals(message.sequence(), sequence);

@@ -8,6 +8,7 @@ import static org.testng.Assert.assertTrue;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 import org.testng.annotations.Test;
 
@@ -17,23 +18,21 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.runtime.ThreadContext;
 import com.red.ohc.storage.NativeMemory;
 
-public final class HashingTest {
+public final class KeyHashTest {
   @Test
-  public void lookupAndPreencodedKeyKeepTheSameFoldedFarmHashUo() {
+  public void lookupAndPreencodedKeyKeepTheSamePolynomialHash() {
     byte[] bytes = "hello".getBytes(StandardCharsets.US_ASCII);
     LookupKey lookup = new LookupKey();
 
     lookup.set(bytes, bytes.length);
 
-    assertEquals(lookup.hash(), (int) 0x85b3e941L);
-    assertEquals(lookup.hash64(), 0xb48be5a931380ce8L);
+    assertEquals(lookup.hash(), 0x079df171);
 
     // Re-reading the cached value must not execute the hash again.
-    assertEquals(lookup.hash(), (int) 0x85b3e941L);
+    assertEquals(lookup.hash(), 0x079df171);
 
     EncodedKey encoded = EncodedKey.copyOf(bytes);
     assertEquals(encoded.hash(), lookup.hash());
-    assertEquals(encoded.hash64(), lookup.hash64());
   }
 
   @Test
@@ -47,7 +46,6 @@ public final class HashingTest {
 
     assertEquals(lookup.length(), bytes.length);
     assertEquals(lookup.hash(), encoded.hash());
-    assertEquals(lookup.hash64(), encoded.hash64());
     assertEquals(target, bytes);
   }
 
@@ -63,7 +61,7 @@ public final class HashingTest {
 
     assertSame(lookup.bytes(), bytes);
     assertTrue(lookup.hash() != firstHash, "the hash must still be refreshed for the new bytes");
-    assertEquals(lookup.hash64(), Hashing.farmHashUo(bytes, 0, bytes.length));
+    assertEquals(lookup.hash(), Arrays.hashCode(bytes));
   }
 
   @Test
@@ -101,9 +99,7 @@ public final class HashingTest {
 
     assertEquals(length, bytes.length);
     assertEquals(context.lookupKey.length(), bytes.length);
-    long expectedHash64 = 0x2c9eed22957a7483L;
-    assertEquals(context.lookupKey.hash64(), expectedHash64);
-    assertEquals(context.lookupKey.hash(), (int) (expectedHash64 ^ (expectedHash64 >>> 32)));
+    assertEquals(context.lookupKey.hash(), 0x0812b1ed);
   }
 
   @Test
@@ -114,13 +110,12 @@ public final class HashingTest {
     long allocation = Entry.keyAllocationLengthForKeyLength(storedBytes.length);
     long address = memory.allocate(allocation);
     try {
-      NativeMemory.putLong(address, 0x12345678L);
+      NativeMemory.putLong(address, Entry.keyIndexWord(0x12345678, storedBytes.length));
       NativeMemory.copy(storedBytes, 0, address + Long.BYTES, storedBytes.length);
       LookupKey lookup = new LookupKey();
       lookup.set(lookupBytes, lookupBytes.length);
-      NativeMemory.putLong(address, lookup.hash64());
+      NativeMemory.putLong(address, Entry.keyIndexWord(lookup.hash(), storedBytes.length));
       Entry entry = new Entry(address, storedBytes.length, 0L);
-      entry.initializeNativeMetadata();
 
       assertFalse(lookup.equals(entry));
     } finally {
@@ -142,13 +137,11 @@ public final class HashingTest {
         long allocation = Entry.keyAllocationLengthForKeyLength(length);
         long address = memory.allocate(allocation);
         try {
-          long hash64 = Hashing.farmHashUo(bytes, 0, length);
-          NativeMemory.putLong(address, hash64);
+          NativeMemory.putLong(address, Entry.keyIndexWord(Arrays.hashCode(bytes), length));
           NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
           lookup.set(bytes, length);
           Entry entry = new Entry(address, length, 0L);
-          entry.initializeNativeMetadata();
-
+    
           assertTrue(lookup.equals(entry), "length=" + length);
           if (length != 0) {
             NativeMemory.putByte(
@@ -178,13 +171,11 @@ public final class HashingTest {
         long allocation = Entry.keyAllocationLengthForKeyLength(length);
         long address = memory.allocate(allocation);
         try {
-          long hash64 = Hashing.farmHashUo(bytes, 0, length);
-          NativeMemory.putLong(address, hash64);
+          NativeMemory.putLong(address, Entry.keyIndexWord(Arrays.hashCode(bytes), length));
           NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
           lookup.set(bytes, length);
           Entry entry = new Entry(address, length, 0L);
-          entry.initializeNativeMetadata();
-
+    
           for (int mismatch :
               new int[] {
                 0,

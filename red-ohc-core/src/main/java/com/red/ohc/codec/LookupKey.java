@@ -9,16 +9,13 @@ public final class LookupKey {
   private byte[] bytes;
   private int length;
   private int hash;
-  private long hash64;
 
   public void set(byte[] bytes, int length) {
     if (this.bytes != bytes) {
       this.bytes = bytes;
     }
     this.length = length;
-    long hash64 = Hashing.farmHashUo(bytes, 0, length);
-    this.hash64 = hash64;
-    this.hash = (int) (hash64 ^ (hash64 >>> 32));
+    this.hash = hash(bytes, 0, length);
   }
 
   /** Binds an immutable encoded key without hashing its bytes a second time. */
@@ -26,7 +23,6 @@ public final class LookupKey {
     key.copyTo(target, 0);
     this.bytes = target;
     this.length = key.length();
-    this.hash64 = key.hash64();
     this.hash = key.hash();
   }
 
@@ -42,8 +38,13 @@ public final class LookupKey {
     return hash;
   }
 
-  public long hash64() {
-    return hash64;
+  // Arrays.hashCode over [offset, offset+length); JDK has no offset variant.
+  private static int hash(byte[] bytes, int offset, int length) {
+    int result = 1;
+    for (int index = offset; index < offset + length; index++) {
+      result = 31 * result + bytes[index];
+    }
+    return result;
   }
 
   @Override

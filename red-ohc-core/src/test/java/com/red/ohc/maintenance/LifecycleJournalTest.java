@@ -141,7 +141,7 @@ public final class LifecycleJournalTest {
 
     long mailboxSequence = lane.reserve();
     lane.writeMutation(
-        mailboxSequence, null, 0L, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+        mailboxSequence, null, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
     lane.commitForMailbox(mailboxSequence);
     long unmanagedSequence = lane.reserve();
     lane.writeRemoval(unmanagedSequence, null, 2L, 1L, 0L, null);

@@ -2894,7 +2894,7 @@ public class MaintenanceEventLoopTest {
       assertTrue(loop.prepareMutation(entry, Entry.PENDING_ADD));
       long version = entry.mutationVersion();
       entry.finishWriter();
-      loop.enqueueWriterMutationHint(lane, entry, entry.keyHash64(), firstAllocation, version, false);
+      loop.enqueueWriterMutationHint(lane, entry, entry.keyHash(), firstAllocation, version, false);
 
       assertTrue(entry.claimWriter());
       entry.currentValueAllocation(latestAllocation);
@@ -4333,7 +4333,7 @@ public class MaintenanceEventLoopTest {
       loop.enqueueWriterMutationHint(
           lifecycle.lane(0),
           lifecycleEntry,
-          0L,
+          0,
           0L,
           WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
           false);

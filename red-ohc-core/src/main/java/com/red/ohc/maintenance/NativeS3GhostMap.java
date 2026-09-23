@@ -70,12 +70,12 @@ final class NativeS3GhostMap implements AutoCloseable {
   }
 
   /** Removes a fingerprint and returns its weight, or {@link #MISSING}. */
-  long remove(long hash) {
+  long remove(int hash) {
     return remove(hash, null);
   }
 
   /** Removes a fingerprint and optionally reports the hit evidence it carried. */
-  long remove(long hash, Record result) {
+  long remove(int hash, Record result) {
     if (result != null) {
       result.reset();
     }
@@ -111,7 +111,7 @@ final class NativeS3GhostMap implements AutoCloseable {
   }
 
   /** Reports the hit count carried before this reappearance and records the new hit. */
-  boolean observe(long hash, Record result) {
+  boolean observe(int hash, Record result) {
     result.reset();
     if (closed) {
       return false;
@@ -225,7 +225,7 @@ final class NativeS3GhostMap implements AutoCloseable {
     if (closed || firstNode == 0) {
       return MISSING;
     }
-    return remove(nodeHash(firstNode));
+    return remove((int) nodeHash(firstNode));
   }
 
   long weight() {

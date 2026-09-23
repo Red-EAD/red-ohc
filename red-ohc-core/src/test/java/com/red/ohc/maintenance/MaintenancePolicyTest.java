@@ -487,8 +487,8 @@ public class MaintenancePolicyTest {
     Entry entry = EntryTestSupport.entry(1, 17, 0x1717L, 0L);
     long oversizedValueAllocation = Integer.MAX_VALUE;
     try {
-      policy.add(entry, 0L, 0x1717L);
-      policy.add(entry, oversizedValueAllocation, 0x1717L);
+      policy.add(entry, 0L, 0x1717);
+      policy.add(entry, oversizedValueAllocation, 0x1717);
 
       assertEquals(entry.policyByteWeight(), (long) Integer.MAX_VALUE);
       assertEquals(policy.usedBytes(), (long) Integer.MAX_VALUE);
@@ -590,7 +590,7 @@ public class MaintenancePolicyTest {
     try {
       policy.add(entry);
       int linkId = entry.policyLinkId();
-      assertEquals(links.keyHash64(linkId), 0x8181L);
+      assertEquals(links.keyHash(linkId), 0x8181);
       assertEquals(links.policyByteWeight(linkId), entry.policyByteWeight());
       assertEquals(links.policyState(linkId), entry.policyState());
       assertEquals(links.policyAccessCount(linkId), entry.policyAccessCount());
@@ -611,7 +611,7 @@ public class MaintenancePolicyTest {
       assertEquals(links.policyState(linkId), Entry.POLICY_NONE);
       assertEquals(links.policyAccessCount(linkId), 0);
       assertEquals(links.policyByteWeight(linkId), 0L);
-      assertEquals(links.keyHash64(linkId), 0x8181L);
+      assertEquals(links.keyHash(linkId), 0x8181);
 
       entry.timerScheduled(false);
       links.maybeRelease(entry);

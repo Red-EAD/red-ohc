@@ -85,14 +85,14 @@ public final class Entry {
     this.valueAddress = valueAddress;
   }
 
-  public long keyHash64() {
-    return nativeKeyAddress == 0L ? 0L : NativeMemory.getLong(nativeKeyAddress);
+  /** Low 4 bytes of the native key header: the 32-bit key hash. */
+  public int keyHash() {
+    return nativeKeyAddress == 0L ? 0 : NativeMemory.getInt(nativeKeyAddress);
   }
 
-  /** CHM's structural operations read the native hash; get uses LookupKey.hashCode directly. */
-  public int keyHash() {
-    long hash64 = keyHash64();
-    return (int) (hash64 ^ (hash64 >>> 32));
+  /** Packed payload header word: key hash in the low 32 bits, key length mirror in the high. */
+  public static long keyIndexWord(int keyHash, int keyLength) {
+    return Integer.toUnsignedLong(keyHash) | ((long) keyLength << 32);
   }
 
   public int keyLength() {
@@ -232,7 +232,7 @@ public final class Entry {
     Entry entry = (Entry) other;
     // Entry-to-Entry equality is also used by CHM.remove(key, value). Keep that value contract
     // distinct from LookupKey.equals: a zero-length key must not make every candidate value equal.
-    if (keyHash64() != entry.keyHash64() || keyLength != entry.keyLength) {
+    if (keyHash() != entry.keyHash() || keyLength != entry.keyLength) {
       return false;
     }
     return keyLength == 0

@@ -330,7 +330,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     private boolean published;
     private boolean allocationUpdated;
     private boolean mutationPrepared;
-    private long mutationKeyHash64;
+    private int mutationKeyHash;
     private long mutationValueAllocation;
     private long mutationVersion = WriterLifecycleLane.UNSEEDED_MUTATION_VERSION;
     private long lifecycleSequence;
@@ -659,7 +659,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     try {
       int keyLength = KeyEncoder.encode(keySerializer, key, context);
-      long computeKeyHash64 = context.lookupKey.hash64();
+      int computeKeyHash = context.lookupKey.hash();
       Entry probe =
           allocateKeyProbe(context, context.lookupKey, context.keyBytes, keyLength);
       boolean probeOwned = true;
@@ -669,7 +669,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           ComputeAttempt<V> attempt = new ComputeAttempt<>();
           // The callback may perform nested reads, which reuse and mutate lookupKey. Capture the
           // outer key's immutable hash before entering user code and carry it through this attempt.
-          attempt.mutationKeyHash64 = computeKeyHash64;
+          attempt.mutationKeyHash = computeKeyHash;
           try {
             runComputePass(context, key, probe, kind, action, attempt, false);
             if (attempt.retry) {
@@ -805,7 +805,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     publishInsertedCandidateSafely(
         context,
         probe,
-        attempt.mutationKeyHash64,
+        attempt.mutationKeyHash,
         attempt.mutationValueAllocation,
         attempt.mutationVersion,
         attempt.mutationPrepared,
@@ -824,7 +824,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalStateException("native allocation failed while preparing compute key");
     }
     try {
-      NativeMemory.putLong(address, lookup.hash64());
+      NativeMemory.putLong(address, Entry.keyIndexWord(lookup.hash(), keyLength));
       NativeMemory.copy(keyBytes, 0, address + Long.BYTES, keyLength);
       Entry probe =
           new Entry(address, keyLength, 0L);
@@ -1188,7 +1188,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           enqueueWriterMutationHint(
               context,
               entry,
-              attempt.mutationKeyHash64,
+              attempt.mutationKeyHash,
               attempt.mutationPrepared ? attempt.mutationValueAllocation : 0L,
               attempt.mutationPrepared
                   ? attempt.mutationVersion
@@ -1439,13 +1439,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     long valueAllocation;
     long deadlineNanos;
     long charge;
-    long hash64;
+    int hash;
     valueLength = serializedSize(valueSerializer, value);
     keyAllocation = keyAllocationLength(keyLength);
     valueAllocation = ValueBlock.allocationLength(valueLength);
     deadlineNanos = resolveDeadline(context, requestedExpiry);
     charge = logicalCharge(logicalKeyAllocationLength(keyLength), valueAllocation);
-    hash64 = lookup.hash64();
+    hash = lookup.hash();
     for (;;) {
       worker.throwIfUnavailable();
       if (isClosing()) {
@@ -1484,7 +1484,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       // replacement transaction.
       if (insertNewEntry(
           context,
-          hash64,
+          hash,
           keyBytes,
           keyLength,
           value,
@@ -1529,7 +1529,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private boolean insertNewEntry(
       ThreadContext context,
-      long hash64,
+      int hash,
       byte[] keyBytes,
       int keyLength,
       Object value,
@@ -1543,7 +1543,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     Entry candidate =
         allocateEntry(
             context,
-            hash64,
+            hash,
             keyBytes,
             keyLength,
             value,
@@ -1558,7 +1558,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return insertFirstCandidate(
         context,
         candidate,
-        hash64,
+        hash,
         value,
         valueBytes,
         valueLength,
@@ -1572,7 +1572,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private boolean insertFirstCandidate(
       ThreadContext context,
       Entry candidate,
-      long keyHash64,
+      int keyHash,
       Object value,
       byte[] valueBytes,
       int valueLength,
@@ -1583,7 +1583,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return insertFirstCandidateTransaction(
         context,
         candidate,
-        keyHash64,
+        keyHash,
         value,
         valueBytes,
         valueLength,
@@ -1597,7 +1597,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private boolean insertFirstCandidateTransaction(
       ThreadContext context,
       Entry candidate,
-      long keyHash64,
+      int keyHash,
       Object value,
       byte[] valueBytes,
       int valueLength,
@@ -1638,7 +1638,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         publishNewCandidateFast(
             context,
             candidate,
-            keyHash64,
+            keyHash,
             valueAllocation,
             mutationVersion,
             mutationPrepared,
@@ -1706,7 +1706,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void publishNewCandidateFast(
       ThreadContext context,
       Entry candidate,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion,
       boolean mutationPrepared,
@@ -1714,7 +1714,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     publishInsertedCandidateSafely(
         context,
         candidate,
-        keyHash64,
+        keyHash,
         valueAllocation,
         mutationVersion,
         mutationPrepared,
@@ -1940,7 +1940,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void publishInsertedCandidateSafely(
       ThreadContext context,
       Entry candidate,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion,
       boolean mutationPrepared,
@@ -1949,7 +1949,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       publishInsertedCandidate(
           context,
           candidate,
-          keyHash64,
+          keyHash,
           valueAllocation,
           mutationVersion,
           mutationPrepared,
@@ -1963,7 +1963,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void publishInsertedCandidate(
       ThreadContext context,
       Entry candidate,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion,
       boolean mutationPrepared,
@@ -1972,7 +1972,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       enqueueWriterMutationHint(
           context,
           candidate,
-          keyHash64,
+          keyHash,
           valueAllocation,
           mutationVersion,
           !deferMaintenanceWake);
@@ -1985,12 +1985,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void enqueueWriterMutationHint(
       ThreadContext context,
       Entry entry,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion,
       boolean wake) {
     worker.enqueueWriterMutationHint(
-        context.lifecycleLane(), entry, keyHash64, valueAllocation, mutationVersion, wake);
+        context.lifecycleLane(), entry, keyHash, valueAllocation, mutationVersion, wake);
   }
 
   private int replaceExisting(
@@ -2331,7 +2331,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     boolean writerHeld = true;
     boolean residenceSampled = false;
     long residenceCreatedAtMillis = 0L;
-    long mutationKeyHash64 = 0L;
+    int mutationKeyHash = 0;
     long mutationValueAllocation = 0L;
     long mutationVersion = WriterLifecycleLane.UNSEEDED_MUTATION_VERSION;
     Throwable operationFailure = null;
@@ -2362,7 +2362,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         mutationPrepared =
             worker.prepareMutation(entry, Entry.PENDING_UPDATE);
         if (mutationPrepared) {
-          mutationKeyHash64 = context.lookupKey.hash64();
+          mutationKeyHash = context.lookupKey.hash();
           mutationValueAllocation = newAllocation;
           mutationVersion = entry.mutationVersion();
         }
@@ -2407,7 +2407,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           published,
           allocationUpdated,
           mutationPrepared,
-          mutationKeyHash64,
+          mutationKeyHash,
           mutationValueAllocation,
           mutationVersion,
           publicationChanged,
@@ -2432,7 +2432,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean published,
       boolean allocationUpdated,
       boolean mutationPrepared,
-      long mutationKeyHash64,
+      int mutationKeyHash,
       long mutationValueAllocation,
       long mutationVersion,
       boolean publicationChanged,
@@ -2476,7 +2476,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         enqueueWriterMutationHint(
             context,
             entry,
-            mutationPrepared ? mutationKeyHash64 : context.lookupKey.hash64(),
+            mutationPrepared ? mutationKeyHash : context.lookupKey.hash(),
             mutationPrepared ? mutationValueAllocation : 0L,
             mutationPrepared ? mutationVersion : WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
             !deferMaintenanceWake);
@@ -2604,7 +2604,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           enqueueWriterMutationHint(
               context,
               entry,
-              context.lookupKey.hash64(),
+              context.lookupKey.hash(),
               0L,
               WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
               !deferMaintenanceWake);
@@ -2670,7 +2670,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private Entry allocateEntry(
       ThreadContext context,
-      long hash64,
+      int hash,
       byte[] keyBytes,
       int keyLength,
       Object value,
@@ -2682,7 +2682,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     worker.throwIfUnavailable();
     return allocateEntryAfterReserve(
         context,
-        hash64,
+        hash,
         keyBytes,
         keyLength,
         value,
@@ -2695,7 +2695,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private Entry allocateEntryAfterReserve(
       ThreadContext context,
-      long hash64,
+      int hash,
       byte[] keyBytes,
       int keyLength,
       Object value,
@@ -2712,7 +2712,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         nativeAllocationRejected();
         return null;
       }
-      NativeMemory.putLong(keyAddress, hash64);
+      NativeMemory.putLong(keyAddress, Entry.keyIndexWord(hash, keyLength));
       NativeMemory.copy(keyBytes, 0, keyAddress + Long.BYTES, keyLength);
       valueAddress = allocateNative(context, valueAllocation);
       if (valueAddress == 0L) {
@@ -4490,7 +4490,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     long keyAllocation = keyAllocationLength(keyLength);
     long valueAllocation = ValueBlock.allocationLength(valueLength);
-    long keyHash64 = lookup.hash64();
+    int keyHash = lookup.hash();
     long charge = logicalCharge(logicalKeyAllocationLength(keyLength), valueAllocation);
     Entry candidate = null;
     boolean chargeReserved = false;
@@ -4502,7 +4502,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         candidate =
             allocateEntry(
                 context,
-                lookup.hash64(),
+                lookup.hash(),
                 keyBytes,
                 keyLength,
                 value,
@@ -4545,7 +4545,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           publishInsertedCandidateSafely(
               context,
               candidate,
-              keyHash64,
+              keyHash,
               valueAllocation,
               mutationVersion,
               mutationPrepared,

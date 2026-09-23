@@ -15,29 +15,24 @@ public final class EntryTestSupport {
 
   private EntryTestSupport() {}
 
-  public static Entry entry(int keyLength, int chmHash, long keyHash64, long valueAddress) {
-    long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
-    long address = MEMORY.newWriterArena().allocate(allocation);
-    NativeMemory.putLong(address, keyHash64);
-    Entry entry = new Entry(address, keyLength, valueAddress);
-    entry.initializeNativeMetadata();
-    return entry;
-  }
-
   public static Entry entry(int keyLength, int chmHash, long valueAddress) {
     return entry(keyLength, chmHash, chmHash & 0xffff_ffffL, valueAddress);
   }
 
-  public static Entry entry(
-      NativeMemory.Memory memory, int keyLength, int chmHash, long keyHash64, long valueAddress) {
-    return entry(memory.newWriterArena(), keyLength, chmHash, keyHash64, valueAddress);
+  public static Entry entry(int keyLength, int chmHash, long keyHash, long valueAddress) {
+    return entry(MEMORY.newWriterArena(), keyLength, chmHash, keyHash, valueAddress);
   }
 
   public static Entry entry(
-      WriterArena arena, int keyLength, int chmHash, long keyHash64, long valueAddress) {
+      NativeMemory.Memory memory, int keyLength, int chmHash, long keyHash, long valueAddress) {
+    return entry(memory.newWriterArena(), keyLength, chmHash, keyHash, valueAddress);
+  }
+
+  public static Entry entry(
+      WriterArena arena, int keyLength, int chmHash, long keyHash, long valueAddress) {
     long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
     long address = arena.allocate(allocation);
-    NativeMemory.putLong(address, keyHash64);
+    NativeMemory.putLong(address, Entry.keyIndexWord((int) keyHash, keyLength));
     Entry entry = new Entry(address, keyLength, valueAddress);
     entry.initializeNativeMetadata();
     return entry;

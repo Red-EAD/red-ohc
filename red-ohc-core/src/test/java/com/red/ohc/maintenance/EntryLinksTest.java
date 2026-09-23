@@ -170,7 +170,7 @@ public final class EntryLinksTest {
       int secondId = links.ensure(second);
       links.policyState(firstId, Entry.POLICY_S4_SKIP);
       links.policyAccessCount(firstId, 3);
-      links.keyHash64(firstId, 0L);
+      links.keyHash(firstId, 0);
       links.policyByteWeight(firstId, 777);
       links.policyState(secondId, Entry.POLICY_TINY_PROTECTED);
       links.policyAccessCount(secondId, 2);
@@ -191,7 +191,7 @@ public final class EntryLinksTest {
       assertEquals(links.timerNext(firstId), secondId);
       assertEquals(links.policyState(firstId), Entry.POLICY_S4_SKIP);
       assertEquals(links.policyAccessCount(firstId), 3);
-      assertEquals(links.keyHash64(firstId), 0L, "zero is a valid mirrored hash");
+      assertEquals(links.keyHash(firstId), 0, "zero is a valid mirrored hash");
       assertEquals(links.policyByteWeight(firstId), 777L);
       assertEquals(links.policyState(secondId), Entry.POLICY_TINY_PROTECTED);
       assertEquals(links.policyAccessCount(secondId), 2);
@@ -222,7 +222,7 @@ public final class EntryLinksTest {
     Entry replacement = EntryTestSupport.entry(memory, 1, 32, 0x5678L, 0L);
     try {
       int firstId = links.ensure(first);
-      links.keyHash64(firstId, 0x7fff_ffff_ffff_ffffL);
+      links.keyHash(firstId, -1);
       links.policyByteWeight(firstId, 909);
       links.policyState(firstId, Entry.POLICY_TINY_PROTECTED);
       links.policyAccessCount(firstId, 3);
@@ -234,7 +234,7 @@ public final class EntryLinksTest {
       assertEquals(replacementId, firstId);
       assertEquals(links.policyState(replacementId), Entry.POLICY_NONE);
       assertEquals(links.policyAccessCount(replacementId), 0);
-      assertEquals(links.keyHash64(replacementId), 0L);
+      assertEquals(links.keyHash(replacementId), 0);
       assertEquals(links.policyByteWeight(replacementId), 0L);
     } finally {
       links.close();
@@ -254,7 +254,7 @@ public final class EntryLinksTest {
       links.policyState(id, Entry.POLICY_S4_SKIP);
       links.policyAccessCount(id, 3);
       links.policyByteWeight(id, 777);
-      links.keyHash64(id, 0x1122_3344_5566_7788L);
+      links.keyHash(id, 0x5566_7788);
 
       long address = (Long) recordAddress.invoke(links, id);
       assertEquals(NativeMemory.getInt(address), 0, "link word must not contain policy metadata");
@@ -263,11 +263,11 @@ public final class EntryLinksTest {
           Entry.POLICY_S4_SKIP | (3 << 3),
           "state/access must use the dedicated metadata word");
       assertEquals(NativeMemory.getInt(address + 20L), 777);
-      assertEquals(NativeMemory.getLong(address + 24L), 0x1122_3344_5566_7788L);
+      assertEquals(NativeMemory.getInt(address + 24L), 0x5566_7788);
       assertEquals(links.policyState(id), Entry.POLICY_S4_SKIP);
       assertEquals(links.policyAccessCount(id), 3);
       assertEquals(links.policyByteWeight(id), 777);
-      assertEquals(links.keyHash64(id), 0x1122_3344_5566_7788L);
+      assertEquals(links.keyHash(id), 0x5566_7788);
 
       links.policyState(id, Entry.POLICY_LRU);
       assertEquals(links.policyAccessCount(id), 3);

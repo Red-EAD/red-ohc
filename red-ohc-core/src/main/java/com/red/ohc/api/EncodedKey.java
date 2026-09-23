@@ -3,18 +3,14 @@ package com.red.ohc.api;
 import java.util.Arrays;
 import java.util.Objects;
 
-import com.red.ohc.codec.Hashing;
-
-/** Immutable, pre-serialized key with one FarmHashUo result and its folded CHM hash cached. */
+/** Immutable, pre-serialized key with the 32-bit CHM hash cached. */
 public final class EncodedKey {
   private final byte[] bytes;
   final int hash;
-  final long hash64;
 
-  private EncodedKey(byte[] bytes, long hash64) {
+  private EncodedKey(byte[] bytes, int hash) {
     this.bytes = bytes;
-    this.hash64 = hash64;
-    this.hash = (int) (hash64 ^ (hash64 >>> 32));
+    this.hash = hash;
   }
 
   public static EncodedKey copyOf(byte[] bytes, int length) {
@@ -23,7 +19,7 @@ public final class EncodedKey {
       throw new IllegalArgumentException("invalid encoded key length");
     }
     byte[] copy = Arrays.copyOf(bytes, length);
-    return new EncodedKey(copy, Hashing.farmHashUo(copy, 0, copy.length));
+    return new EncodedKey(copy, Arrays.hashCode(copy));
   }
 
   public static EncodedKey copyOf(byte[] bytes) {
@@ -52,10 +48,6 @@ public final class EncodedKey {
     return hash;
   }
 
-  public long hash64() {
-    return hash64;
-  }
-
   @Override
   public int hashCode() {
     return hash;
@@ -70,6 +62,6 @@ public final class EncodedKey {
       return false;
     }
     EncodedKey key = (EncodedKey) other;
-    return hash64 == key.hash64 && Arrays.equals(bytes, key.bytes);
+    return hash == key.hash && Arrays.equals(bytes, key.bytes);
   }
 }

@@ -172,13 +172,13 @@ public final class EntryLinks implements AutoCloseable {
   }
 
   /** Actor-only immutable key hash mirror. */
-  long keyHash64(int linkId) {
-    return linkId == 0 ? 0L : NativeMemory.getLong(recordAddress(linkId) + KEY_HASH_OFFSET);
+  int keyHash(int linkId) {
+    return linkId == 0 ? 0 : NativeMemory.getInt(recordAddress(linkId) + KEY_HASH_OFFSET);
   }
 
   /** Actor-only immutable key hash mirror initializer. */
-  void keyHash64(int linkId, long hash64) {
-    NativeMemory.putLong(writableRecordAddress(linkId) + KEY_HASH_OFFSET, hash64);
+  void keyHash(int linkId, int keyHash) {
+    NativeMemory.putInt(writableRecordAddress(linkId) + KEY_HASH_OFFSET, keyHash);
   }
 
   /** Actor-only policy byte-weight mirror. */

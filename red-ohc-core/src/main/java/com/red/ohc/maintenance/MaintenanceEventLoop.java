@@ -972,7 +972,7 @@ public final class MaintenanceEventLoop
   public void enqueueWriterMutationHint(
       WriterLifecycleLane lane,
       Entry entry,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion,
       boolean wake) {
@@ -989,7 +989,7 @@ public final class MaintenanceEventLoop
       reserved = true;
       WriterLifecycleLane.MailboxMessage mailboxMessage =
           lane.commitMutationForMailbox(
-              sequence, entry, keyHash64, valueAllocation, mutationVersion);
+              sequence, entry, keyHash, valueAllocation, mutationVersion);
       reserved = false;
       enqueueWriterLifecycleMessage(mailboxMessage, wake);
     } catch (Throwable error) {
@@ -2983,7 +2983,7 @@ public final class MaintenanceEventLoop
         && writerRemovalRecord.entry != null) {
       processEntry(
           writerRemovalRecord.entry,
-          writerRemovalRecord.valueAddress,
+          (int) writerRemovalRecord.valueAddress,
           writerRemovalRecord.allocation,
           writerRemovalRecord.generation);
     }
@@ -2995,11 +2995,11 @@ public final class MaintenanceEventLoop
 
   /** Applies a reliable mutation record carrying the actor's primitive publication seed. */
   private void processEntry(
-      Entry entry, long seededKeyHash64, long seededValueAllocation, long seededMutationVersion) {
+      Entry entry, int seededKeyHash, long seededValueAllocation, long seededMutationVersion) {
     processEntry(
         entry,
         false,
-        seededKeyHash64,
+        seededKeyHash,
         seededValueAllocation,
         seededMutationVersion,
         true);
@@ -3009,7 +3009,7 @@ public final class MaintenanceEventLoop
     processEntry(
         entry,
         allowRetired,
-        0L,
+        0,
         0L,
         WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
         false);
@@ -3018,7 +3018,7 @@ public final class MaintenanceEventLoop
   private void processEntry(
       Entry entry,
       boolean allowRetired,
-      long seededKeyHash64,
+      int seededKeyHash,
       long seededValueAllocation,
       long seededMutationVersion,
       boolean hasSeed) {
@@ -3061,7 +3061,7 @@ public final class MaintenanceEventLoop
     processEntry(
         entry,
         flags,
-        seededKeyHash64,
+        seededKeyHash,
         seededValueAllocation,
         seededMutationVersion,
         hasSeed);
@@ -3071,7 +3071,7 @@ public final class MaintenanceEventLoop
     processEntry(
         entry,
         flags,
-        0L,
+        0,
         0L,
         WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
         false);
@@ -3080,7 +3080,7 @@ public final class MaintenanceEventLoop
   private void processEntry(
       Entry entry,
       int flags,
-      long seededKeyHash64,
+      int seededKeyHash,
       long seededValueAllocation,
       long seededMutationVersion,
       boolean hasSeed) {
@@ -3101,7 +3101,7 @@ public final class MaintenanceEventLoop
           entry,
           version,
           flags,
-          seededKeyHash64,
+          seededKeyHash,
           seededValueAllocation,
           seededMutationVersion,
           hasSeed);
@@ -3114,7 +3114,7 @@ public final class MaintenanceEventLoop
         entry,
         version,
         flags,
-        0L,
+        0,
         0L,
         WriterLifecycleLane.UNSEEDED_MUTATION_VERSION,
         false);
@@ -3124,7 +3124,7 @@ public final class MaintenanceEventLoop
       Entry entry,
       long version,
       int flags,
-      long seededKeyHash64,
+      int seededKeyHash,
       long seededValueAllocation,
       long seededMutationVersion,
       boolean hasSeed) {
@@ -3164,8 +3164,8 @@ public final class MaintenanceEventLoop
       // allocation on a version mismatch.
       valueAllocation = ValueBlock.allocationLength(ValueBlock.length(address));
     }
-    long keyHash64 = reliableSeed ? seededKeyHash64 : entry.keyHash64();
-    policy.add(entry, valueAllocation, keyHash64);
+    int keyHash = reliableSeed ? seededKeyHash : entry.keyHash();
+    policy.add(entry, valueAllocation, keyHash);
     int linkId = entry.policyLinkId();
     policyDirty = true;
     if (deadlineNanos != NO_DEADLINE) {
@@ -3554,7 +3554,7 @@ public final class MaintenanceEventLoop
         physicallyRemoved =
             policyLinkId != 0
                 && links.policyState(policyLinkId) != Entry.POLICY_NONE
-                && data.remove(evictionKey.reset(entry, links.keyHash64(policyLinkId))) == entry;
+                && data.remove(evictionKey.reset(entry, links.keyHash(policyLinkId))) == entry;
       } else {
         // Expiry can encounter a timer-only record before its policy mutation is applied.  Keep
         // the existing identity helper for that cold path; it is not the capacity eviction hot
@@ -3648,11 +3648,11 @@ public final class MaintenanceEventLoop
     }
     try {
       int linkId = target.policyLinkId();
-      long keyHash64 =
+      int keyHash =
           linkId != 0 && links.policyState(linkId) != Entry.POLICY_NONE
-              ? links.keyHash64(linkId)
-              : target.keyHash64();
-      return data.get(evictionKey.reset(target, keyHash64)) == target;
+              ? links.keyHash(linkId)
+              : target.keyHash();
+      return data.get(evictionKey.reset(target, keyHash)) == target;
     } catch (Throwable ignored) {
       // A failure during exceptional cleanup must not free a possibly still-mapped native entry.
       return true;
@@ -4168,9 +4168,9 @@ public final class MaintenanceEventLoop
     private Entry victim;
     private int hash;
 
-    private EvictionKey reset(Entry victim, long keyHash64) {
+    private EvictionKey reset(Entry victim, int keyHash) {
       this.victim = victim;
-      this.hash = (int) (keyHash64 ^ (keyHash64 >>> 32));
+      this.hash = keyHash;
       return this;
     }
 

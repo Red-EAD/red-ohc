@@ -12,10 +12,10 @@ public class FrequencySketchTest {
   public void countersAreFourBitAndSaturateAtFifteen() {
     FrequencySketch sketch = new FrequencySketch();
     for (int i = 0; i < 32; i++) {
-      sketch.increment(0x123456789abcdef0L);
+      sketch.increment(0x9abcdef0);
     }
 
-    assertEquals(sketch.frequency(0x123456789abcdef0L), 15);
+    assertEquals(sketch.frequency(0x9abcdef0), 15);
     assertEquals(sketch.bytes(), 131_072L);
   }
 

@@ -102,7 +102,7 @@ public final class WriterLifecycleLane {
   public void writeMutation(
       long sequence,
       Entry entry,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion) {
     Segment segment = producerSegmentFor(sequence);
@@ -111,7 +111,7 @@ public final class WriterLifecycleLane {
     // MUTATION reuses the existing primitive columns: valueAddresses carries the immutable key
     // hash, allocations carries the value allocation seed, and generations carries the captured
     // mutation version. REMOVE keeps its original column meanings.
-    segment.valueAddresses[index] = keyHash64;
+    segment.valueAddresses[index] = keyHash;
     segment.allocations[index] = valueAllocation;
     segment.generations[index] = mutationVersion;
     segment.operations[index] = MUTATION;
@@ -130,13 +130,13 @@ public final class WriterLifecycleLane {
   MailboxMessage commitMutationForMailbox(
       long sequence,
       Entry entry,
-      long keyHash64,
+      int keyHash,
       long valueAllocation,
       long mutationVersion) {
     Segment segment = producerSegmentFor(sequence);
     int index = (int) (sequence & segmentMask);
     segment.entries[index] = entry;
-    segment.valueAddresses[index] = keyHash64;
+    segment.valueAddresses[index] = keyHash;
     segment.allocations[index] = valueAllocation;
     segment.generations[index] = mutationVersion;
     segment.operations[index] = MUTATION;

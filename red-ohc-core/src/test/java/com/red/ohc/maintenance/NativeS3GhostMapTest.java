@@ -41,9 +41,9 @@ public final class NativeS3GhostMapTest {
     NativeS3GhostMap map = new NativeS3GhostMap(memory);
     try {
       assertTrue(map.put(0L, 1L));
-      assertTrue(map.put(0x7fff_ffff_0000_0001L, 3L));
-      assertEquals(map.remove(0L), 1L);
-      assertEquals(map.remove(0x7fff_ffff_0000_0001L), 3L);
+      assertTrue(map.put(0x7fffffff, 3L));
+      assertEquals(map.remove(0), 1L);
+      assertEquals(map.remove(0x7fffffff), 3L);
       assertTrue(map.isEmpty());
     } finally {
       map.close();
@@ -59,8 +59,8 @@ public final class NativeS3GhostMapTest {
     try {
       assertTrue(map.put(collision[0], 11L));
       assertTrue(map.put(collision[1], 22L));
-      assertEquals(map.remove(collision[0]), 11L);
-      assertEquals(map.remove(collision[1]), 22L);
+      assertEquals(map.remove((int) collision[0]), 11L);
+      assertEquals(map.remove((int) collision[1]), 22L);
     } finally {
       map.close();
       memory.closeArenas();
@@ -78,15 +78,15 @@ public final class NativeS3GhostMapTest {
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
       assertTrue(map.put(9L, 17L));
-      assertTrue(map.observe(9L, record));
+      assertTrue(map.observe(9, record));
       assertEquals(record.frequency, 0, "observe reports the count before this reappearance");
       assertEquals(record.weight, 17L);
 
       assertTrue(map.put(9L, 23L));
-      assertTrue(map.observe(9L, record));
+      assertTrue(map.observe(9, record));
       assertEquals(record.frequency, 1);
       assertEquals(record.weight, 23L);
-      assertEquals(map.remove(9L, record), 23L);
+      assertEquals(map.remove(9, record), 23L);
       assertEquals(record.frequency, 2);
       assertTrue(map.isEmpty());
     } finally {
@@ -102,14 +102,14 @@ public final class NativeS3GhostMapTest {
     NativeS3GhostMap.Record record = new NativeS3GhostMap.Record();
     try {
       assertTrue(map.put(4L, 8L, 2));
-      assertTrue(map.observe(4L, record));
+      assertTrue(map.observe(4, record));
       assertEquals(record.frequency, 2);
 
       assertTrue(map.put(4L, 8L, 0));
-      assertTrue(map.observe(4L, record));
+      assertTrue(map.observe(4, record));
       assertEquals(record.frequency, 3, "refreshing a fingerprint must not erase earned hits");
 
-      assertTrue(map.observe(4L, record));
+      assertTrue(map.observe(4, record));
       assertEquals(record.frequency, NativeS3GhostMap.MAX_FREQUENCY);
     } finally {
       map.close();
@@ -125,7 +125,7 @@ public final class NativeS3GhostMapTest {
     try {
       assertTrue(map.put(1L, 10L, 1));
       assertTrue(map.put(2L, 20L));
-      assertTrue(map.observe(1L, record));
+      assertTrue(map.observe(1, record));
       assertEquals(record.frequency, 1);
 
       assertTrue(map.refresh(1L, 30L, 0, record));
@@ -181,8 +181,8 @@ public final class NativeS3GhostMapTest {
       map.close();
 
       assertFalse(map.put(2L, 2L));
-      assertFalse(map.observe(1L, record));
-      assertEquals(map.remove(1L), NativeS3GhostMap.MISSING);
+      assertFalse(map.observe(1, record));
+      assertEquals(map.remove(1), NativeS3GhostMap.MISSING);
       assertEquals(map.removeFirst(), NativeS3GhostMap.MISSING);
       assertEquals(map.nativeBytes(), 0L);
     } finally {
@@ -218,15 +218,15 @@ public final class NativeS3GhostMapTest {
       }
       assertTrue(map.put(9L, 19L));
       assertTrue(map.rehashPending(), "the threshold crossing must start a rehash");
-      assertEquals(map.remove(1L), 11L);
-      assertEquals(map.remove(9L), 19L);
+      assertEquals(map.remove(1), 11L);
+      assertEquals(map.remove(9), 19L);
 
       while (map.rehashPending()) {
         map.advanceRehash(1);
       }
       assertFalse(map.rehashPending());
       assertEquals(map.size(), 7);
-      assertEquals(map.remove(8L), 18L);
+      assertEquals(map.remove(8), 18L);
     } finally {
       map.close();
       memory.closeArenas();
@@ -261,11 +261,11 @@ public final class NativeS3GhostMapTest {
         long hash = random.nextInt(96) - 16L;
         if (operation % 3 == 0) {
           long entryWeight = random.nextInt(32) + 1L;
-          assertEquals(map.remove(hash), valueOrMissing(reference.remove(hash)));
+          assertEquals(map.remove((int) hash), valueOrMissing(reference.remove(hash)));
           assertTrue(map.put(hash, entryWeight));
           reference.put(hash, entryWeight);
         } else if (operation % 3 == 1) {
-          assertEquals(map.remove(hash), valueOrMissing(reference.remove(hash)));
+          assertEquals(map.remove((int) hash), valueOrMissing(reference.remove(hash)));
         } else {
           Map.Entry<Long, Long> oldest = reference.entrySet().stream().findFirst().orElse(null);
           long expected = oldest == null ? NativeS3GhostMap.MISSING : oldest.getValue();

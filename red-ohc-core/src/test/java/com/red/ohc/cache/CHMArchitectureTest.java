@@ -105,7 +105,7 @@ public final class CHMArchitectureTest {
       probe.set(keyBytes, keyBytes.length);
       Entry entry =
           EntryTestSupport.entry(
-              memory, keyBytes.length, probe.hashCode(), probe.hash64(), 0x1_000L);
+              memory, keyBytes.length, probe.hashCode(), probe.hash(), 0x1_000L);
       NativeMemory.copy(keyBytes, 0, entry.nativeKeyBytesAddress(), keyBytes.length);
 
       assertEquals(probe.hashCode(), entry.hashCode(), "probe and entry must hash alike");
