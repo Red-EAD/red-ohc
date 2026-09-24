@@ -1018,9 +1018,9 @@ public final class RetirementJournal {
     return wave;
   }
 
-  /** Per-thread claim bookkeeping for one merged release wave (fixed 128-segment cap). */
+  /** Per-thread claim bookkeeping for one merged release wave (fixed 256-segment cap). */
   private static final class TurnReleaseWave {
-    static final int MAX_SEGMENTS = 128;
+    static final int MAX_SEGMENTS = 256;
 
     final RetirementSegment[] segments = new RetirementSegment[MAX_SEGMENTS];
     final int[] tails = new int[MAX_SEGMENTS];

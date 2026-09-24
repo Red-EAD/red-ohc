@@ -50,7 +50,7 @@ public final class MaintenanceEventLoop
   private static final int CAPACITY_MAX_PER_TURN = 1_024;
   private static final int ACCESS_MAX_PER_TURN = 1_024;
   private static final int TTL_MAX_PER_TURN = 1_024;
-  private static final int RECLAIM_MAX_SEGMENTS = 128;
+  private static final int RECLAIM_MAX_SEGMENTS = 256;
   /**
    * A signal arriving while the park timer fires within this window skips the unpark: the
    * timer wake collects the batched work instead, without delaying anything past the
