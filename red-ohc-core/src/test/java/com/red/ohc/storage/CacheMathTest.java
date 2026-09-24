@@ -12,6 +12,6 @@ public class CacheMathTest {
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(32);
     long valueAllocation = ValueBlock.allocationLength(5 * 1024);
 
-    assertEquals(CacheMath.logicalEntryBytes(keyAllocation, valueAllocation), 5_240L);
+    assertEquals(CacheMath.logicalEntryBytes(keyAllocation, valueAllocation), 5_232L);
   }
 }

@@ -53,7 +53,7 @@ public class CapacityAccountingTest {
     long physicalWeight =
         WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
 
-    assertEquals(logicalEntryBytes, 5_240L);
+    assertEquals(logicalEntryBytes, 5_232L);
     assertEquals(physicalWeight, 5_824L);
 
     OffHeapCache<byte[], byte[]> cache =

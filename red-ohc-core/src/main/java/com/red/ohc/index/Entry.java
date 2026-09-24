@@ -71,32 +71,29 @@ public final class Entry {
   private static final long VALUE_ALLOCATION_MASK = Long.MAX_VALUE;
 
   public final long nativeKeyAddress;
-  public final int keyLength;
+  /** Packed key identity: 24-bit hash above the low 8 length bits. */
+  public final int keyIndex;
 
   /** Eight-byte aligned native value address; low bits carry TTL/lifecycle tags. */
   public volatile long valueAddress;
 
-  public Entry(long nativeKeyAddress, int keyLength, long valueAddress) {
+  public Entry(long nativeKeyAddress, int keyIndex, long valueAddress) {
     this.nativeKeyAddress = nativeKeyAddress;
-    if (keyLength < 0) {
-      throw new IllegalArgumentException("keyLength must be non-negative");
-    }
-    this.keyLength = keyLength;
+    this.keyIndex = keyIndex;
     this.valueAddress = valueAddress;
   }
 
-  /** Low 4 bytes of the native key header: the 32-bit key hash. */
-  public int keyHash() {
-    return nativeKeyAddress == 0L ? 0 : NativeMemory.getInt(nativeKeyAddress);
+  /** Packed key identity: 24-bit hash in the high bits, key length in the low 8. */
+  public int keyIndex() {
+    return keyIndex;
   }
 
-  /** Packed payload header word: key hash in the low 32 bits, key length mirror in the high. */
-  public static long keyIndexWord(int keyHash, int keyLength) {
-    return Integer.toUnsignedLong(keyHash) | ((long) keyLength << 32);
+  public int keyHash() {
+    return keyIndex >>> 8;
   }
 
   public int keyLength() {
-    return keyLength;
+    return keyIndex & 0xff;
   }
 
   public long nativeKeyAddress() {
@@ -104,14 +101,14 @@ public final class Entry {
   }
 
   public long nativeKeyBytesAddress() {
-    return nativeKeyAddress + Long.BYTES;
+    return nativeKeyAddress;
   }
 
   public static long keyDataAllocationLength(int keyLength) {
-    if (keyLength < 0) {
-      throw new IllegalArgumentException("keyLength must be non-negative");
+    if (keyLength < 0 || keyLength > 0xff) {
+      throw new IllegalArgumentException("keyLength must be in [0, 255]");
     }
-    return Math.max(8L, CacheMath.roundUpTo8((long) keyLength + Long.BYTES));
+    return Math.max(8L, CacheMath.roundUpTo8((long) keyLength));
   }
 
   public static long keyAllocationLengthForKeyLength(int keyLength) {
@@ -232,10 +229,10 @@ public final class Entry {
     Entry entry = (Entry) other;
     // Entry-to-Entry equality is also used by CHM.remove(key, value). Keep that value contract
     // distinct from LookupKey.equals: a zero-length key must not make every candidate value equal.
-    if (keyHash() != entry.keyHash() || keyLength != entry.keyLength) {
+    if (keyIndex != entry.keyIndex) {
       return false;
     }
-    return keyLength == 0
+    return keyLength() == 0
         || NativeMemory.equals(nativeKeyBytesAddress(), entry.nativeKeyBytesAddress(), keyLength());
   }
 

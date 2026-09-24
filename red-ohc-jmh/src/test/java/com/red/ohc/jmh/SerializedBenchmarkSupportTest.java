@@ -121,7 +121,7 @@ public class SerializedBenchmarkSupportTest {
         SerializedBenchmarkSupport.dataset(32, 5120, "UNIFORM");
     Assert.assertEquals(
         SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120),
-        5_240L * SerializedBenchmarkSupport.CAPACITY_ENTRIES);
+        5_232L * SerializedBenchmarkSupport.CAPACITY_ENTRIES);
     try (OHCache<byte[], byte[]> cache =
         OHCacheBuilder.<byte[], byte[]>newBuilder()
             .capacity(SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120))

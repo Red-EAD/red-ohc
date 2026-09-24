@@ -1,6 +1,7 @@
 package com.red.ohc.index;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.util.Arrays;
@@ -12,44 +13,38 @@ import com.red.ohc.codec.KeyHash;
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.storage.NativeMemory;
 
+/** The native key block is headerless: bytes start at the block address, identity is packed. */
 public final class KeyIndexHeaderTest {
   @Test
-  public void headerPacksHashLowAndKeyLengthHigh() {
+  public void keyBytesStartAtTheBlockAddress() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
+    byte[] bytes = fill(16);
+    long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(16);
+    long address = memory.allocate(allocation);
     try {
-      assertPackedWord(memory, hashOf("hello".getBytes()), 5);
-      assertPackedWord(memory, hashOf(fill(16)), 16);
-      assertPackedWord(memory, hashOf(new byte[0]), 0);
+      NativeMemory.copy(bytes, 0, address, 16);
+      Entry entry = new Entry(address, packed(bytes), 0L);
+      assertEquals(address, entry.nativeKeyBytesAddress());
+      assertTrue(NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, 16));
     } finally {
+      memory.free(address, allocation);
       memory.closeArenas();
     }
   }
 
-  private static void assertPackedWord(NativeMemory.Memory memory, int hash, int keyLength) {
-    long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
-    long address = memory.allocate(allocation);
-    try {
-      NativeMemory.putLong(address, Entry.keyIndexWord(hash, keyLength));
-      assertEquals(NativeMemory.getInt(address), hash);
-      assertEquals(NativeMemory.getInt(address + Integer.BYTES), keyLength);
-      assertEquals(NativeMemory.getLong(address), Entry.keyIndexWord(hash, keyLength));
-      assertEquals((address + Long.BYTES) % 8, 0L);
-    } finally {
-      memory.free(address, allocation);
-    }
-  }
-
   @Test
-  public void keyHashAccessorsExtractFromThePackedWord() {
+  public void packedKeyIndexCarriesHashAndLength() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
+    byte[] bytes = fill(16);
     long allocation = Entry.keyAllocationLengthForKeyLength(16);
     long address = memory.allocate(allocation);
     try {
-      NativeMemory.putLong(address, Entry.keyIndexWord(0x9b7f4601, 16));
-      Entry entry = new Entry(address, 16, 0L);
-
-      assertEquals(entry.keyHash(), 0x9b7f4601);
-      assertEquals(entry.hashCode(), 0x9b7f4601);
+      Entry entry = new Entry(address, packed(bytes), 0L);
+      assertEquals(entry.keyLength(), 16);
+      assertEquals(entry.keyHash(), KeyHash.hash(bytes, 0, 16));
+      assertEquals(entry.hashCode(), entry.keyHash());
+      assertTrue(entry.keyHash() >= 0);
+      assertTrue(entry.keyHash() <= 0xff_ffff);
     } finally {
       memory.free(address, allocation);
       memory.closeArenas();
@@ -57,23 +52,29 @@ public final class KeyIndexHeaderTest {
   }
 
   @Test
-  public void entryAndLookupAgreeForNegativeHash() {
+  public void entryAndLookupAgreeOnThePackedIdentity() {
     byte[] bytes = fill(16);
-    while (hashOf(bytes) >= 0) {
+    while (KeyHash.hash(bytes, 0, 16) < 0x80_0000) {
       bytes[0]++;
     }
     NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(16);
     long address = memory.allocate(allocation);
     try {
-      NativeMemory.putLong(address, Entry.keyIndexWord(hashOf(bytes), 16));
-      NativeMemory.copy(bytes, 0, address + Long.BYTES, 16);
-      Entry entry = new Entry(address, 16, 0L);
+      NativeMemory.copy(bytes, 0, address, 16);
+      Entry entry = new Entry(address, packed(bytes), 0L);
       LookupKey lookup = new LookupKey();
       lookup.set(bytes, 16);
 
       assertEquals(lookup.hashCode(), entry.hashCode());
+      assertEquals(lookup.keyIndex(), entry.keyIndex());
       assertTrue(lookup.equals(entry));
+
+      byte[] mutated = bytes.clone();
+      mutated[15]++;
+      LookupKey other = new LookupKey();
+      other.set(mutated, 16);
+      assertFalse(other.equals(entry));
     } finally {
       memory.free(address, allocation);
       memory.closeArenas();
@@ -84,7 +85,7 @@ public final class KeyIndexHeaderTest {
   public void hashDistributesAcrossPowerOfTwoMasks() {
     Random random = new Random(42);
     LookupKey lookup = new LookupKey();
-    for (int bits = 17; bits <= 21; bits++) {
+    for (int bits = 13; bits <= 21; bits++) {
       int buckets = 1 << bits;
       int[] counts = new int[buckets];
       int samples = 4 * buckets;
@@ -94,16 +95,18 @@ public final class KeyIndexHeaderTest {
         lookup.set(key, 16);
         counts[lookup.hash() & (buckets - 1)]++;
       }
-      int maxCount = 0;
+      double chi2 = 0;
+      double mean = (double) samples / buckets;
       for (int count : counts) {
-        maxCount = Math.max(maxCount, count);
+        chi2 += (count - mean) * (count - mean) / mean;
       }
-      assertTrue(maxCount < 6 * (samples / buckets), "bits=" + bits + ", max=" + maxCount);
+      double z = (chi2 - (buckets - 1)) / Math.sqrt(2.0 * (buckets - 1));
+      assertTrue(Math.abs(z) < 5, "bits=" + bits + ", chi2/df=" + (chi2 / (buckets - 1)));
     }
   }
 
-  private static int hashOf(byte[] bytes) {
-    return KeyHash.hash(bytes, 0, bytes.length);
+  private static int packed(byte[] bytes) {
+    return (KeyHash.hash(bytes, 0, bytes.length) << 8) | bytes.length;
   }
 
   private static byte[] fill(int length) {

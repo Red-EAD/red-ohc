@@ -815,10 +815,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalStateException("native allocation failed while preparing compute key");
     }
     try {
-      NativeMemory.putLong(address, Entry.keyIndexWord(lookup.hash(), keyLength));
-      NativeMemory.copy(keyBytes, 0, address + Long.BYTES, keyLength);
+      NativeMemory.copy(keyBytes, 0, address, keyLength);
       Entry probe =
-          new Entry(address, keyLength, 0L);
+          new Entry(address, lookup.keyIndex(), 0L);
       probe.initializeNativeMetadata();
       probe.currentValueAllocation(0L);
       return probe;
@@ -2704,8 +2703,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         nativeAllocationRejected();
         return null;
       }
-      NativeMemory.putLong(keyAddress, Entry.keyIndexWord(hash, keyLength));
-      NativeMemory.copy(keyBytes, 0, keyAddress + Long.BYTES, keyLength);
+      NativeMemory.copy(keyBytes, 0, keyAddress, keyLength);
       valueAddress = allocateNative(context, valueAllocation);
       if (valueAddress == 0L) {
         nativeAllocationRejected();
@@ -2718,7 +2716,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry entry =
           new Entry(
               keyAddress,
-              keyLength,
+              (hash << 8) | keyLength,
               Entry.tagValueAddress(
                   valueAddress, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE));
       entry.initializeNativeMetadata();

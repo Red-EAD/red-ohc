@@ -4,11 +4,12 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.fail;
 
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Random;
 
 import org.testng.annotations.Test;
 
@@ -36,6 +37,7 @@ public final class KeyHashTest {
 
     EncodedKey encoded = EncodedKey.copyOf(bytes);
     assertEquals(encoded.hash(), lookup.hash());
+    assertEquals(encoded.keyIndex(), lookup.keyIndex());
   }
 
   @Test
@@ -70,15 +72,6 @@ public final class KeyHashTest {
   }
 
   @Test
-  public void lookupDoesNotCarryLazyHashState() {
-    for (Field field : LookupKey.class.getDeclaredFields()) {
-      if (field.getName().equals("hashed") || field.getName().equals("hashComputations")) {
-        throw new AssertionError("LookupKey still carries lazy hash state: " + field.getName());
-      }
-    }
-  }
-
-  @Test
   public void keyEncoderBindsTheSerializedLookupKey() {
     CacheSerializer<byte[]> serializer =
         new CacheSerializer<byte[]>() {
@@ -110,19 +103,58 @@ public final class KeyHashTest {
   }
 
   @Test
-  public void equalHashesStillRequireAnExactNativeKeyMatch() {
+  public void keysBeyondThePackedLengthCapAreRejected() {
+    byte[] tooLong = new byte[EncodedKey.MAX_KEY_LENGTH + 1];
+    try {
+      EncodedKey.copyOf(tooLong);
+      fail("encoded keys beyond the cap must be rejected");
+    } catch (IllegalArgumentException expected) {
+      // expected
+    }
+    try {
+      Entry.keyDataAllocationLength(EncodedKey.MAX_KEY_LENGTH + 1);
+      fail("allocation lengths beyond the cap must be rejected");
+    } catch (IllegalArgumentException expected) {
+      // expected
+    }
+    CacheSerializer<byte[]> serializer =
+        new CacheSerializer<byte[]>() {
+          @Override
+          public void serialize(byte[] value, ByteBuffer buffer) {
+            buffer.put(value);
+          }
+
+          @Override
+          public byte[] deserialize(ByteBuffer buffer) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public int serializedSize(byte[] value) {
+            return value.length;
+          }
+        };
+    try {
+      KeyEncoder.encode(serializer, tooLong, new ThreadContext(null));
+      fail("encoded keys beyond the cap must be rejected at the encoder boundary");
+    } catch (IllegalArgumentException expected) {
+      // expected
+    }
+  }
+
+  @Test
+  public void equalIdentitiesStillRequireAnExactNativeKeyMatch() {
     byte[] lookupBytes = "hello".getBytes(StandardCharsets.US_ASCII);
     byte[] storedBytes = "world".getBytes(StandardCharsets.US_ASCII);
     NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(storedBytes.length);
     long address = memory.allocate(allocation);
     try {
-      NativeMemory.putLong(address, Entry.keyIndexWord(0x12345678, storedBytes.length));
-      NativeMemory.copy(storedBytes, 0, address + Long.BYTES, storedBytes.length);
+      NativeMemory.copy(storedBytes, 0, address, storedBytes.length);
       LookupKey lookup = new LookupKey();
       lookup.set(lookupBytes, lookupBytes.length);
-      NativeMemory.putLong(address, Entry.keyIndexWord(lookup.hash(), storedBytes.length));
-      Entry entry = new Entry(address, storedBytes.length, 0L);
+      // Deliberately hand the entry the lookup's identity so only the bytes can differ.
+      Entry entry = new Entry(address, lookup.keyIndex(), 0L);
 
       assertFalse(lookup.equals(entry));
     } finally {
@@ -136,7 +168,7 @@ public final class KeyHashTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
     try {
-      for (int length : new int[] {0, 7, 8, 63, 64, 127, 128, 129, 257}) {
+      for (int length : new int[] {0, 1, 7, 8, 9, 16, 17, 63, 64, 127, 128, 129, 255}) {
         byte[] bytes = new byte[length];
         for (int index = 0; index < length; index++) {
           bytes[index] = (byte) (index * 31 + length);
@@ -144,16 +176,14 @@ public final class KeyHashTest {
         long allocation = Entry.keyAllocationLengthForKeyLength(length);
         long address = memory.allocate(allocation);
         try {
-          NativeMemory.putLong(address, Entry.keyIndexWord(Arrays.hashCode(bytes), length));
-          NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
+          NativeMemory.copy(bytes, 0, address, length);
           lookup.set(bytes, length);
-          Entry entry = new Entry(address, length, 0L);
-    
+          Entry entry = new Entry(address, lookup.keyIndex(), 0L);
+
           assertTrue(lookup.equals(entry), "length=" + length);
           if (length != 0) {
-            NativeMemory.putByte(
-                address + Long.BYTES + length - 1,
-                (byte) (NativeMemory.getByte(address + Long.BYTES + length - 1) ^ 1));
+            long lastByte = address + length - 1;
+            NativeMemory.putByte(lastByte, (byte) (NativeMemory.getByte(lastByte) ^ 1));
             assertFalse(lookup.equals(entry), "mismatch length=" + length);
           }
         } finally {
@@ -166,11 +196,11 @@ public final class KeyHashTest {
   }
 
   @Test
-  public void lookupKeyRejectsFirstWordAndComparisonBoundaryMismatches() {
+  public void lookupKeyRejectsHeadTailAndMiddleMismatches() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
     try {
-      for (int length : new int[] {1, 7, 8, 63, 64, 127, 128, 129, 257}) {
+      for (int length : new int[] {1, 9, 16, 24, 64, 255}) {
         byte[] bytes = new byte[length];
         for (int index = 0; index < length; index++) {
           bytes[index] = (byte) (index * 17 + length);
@@ -178,27 +208,25 @@ public final class KeyHashTest {
         long allocation = Entry.keyAllocationLengthForKeyLength(length);
         long address = memory.allocate(allocation);
         try {
-          NativeMemory.putLong(address, Entry.keyIndexWord(Arrays.hashCode(bytes), length));
-          NativeMemory.copy(bytes, 0, address + Long.BYTES, length);
+          NativeMemory.copy(bytes, 0, address, length);
           lookup.set(bytes, length);
-          Entry entry = new Entry(address, length, 0L);
-    
+          Entry entry = new Entry(address, lookup.keyIndex(), 0L);
+
           for (int mismatch :
               new int[] {
                 0,
                 Math.min(7, length - 1),
-                Math.min(63, length - 1),
-                Math.min(64, length - 1),
-                Math.min(127, length - 1),
+                Math.min(15, length - 1),
+                Math.min(16, length - 1),
+                Math.min(length / 2, length - 1),
+                length - 8 < 0 ? 0 : Math.min(length - 8, length - 1),
                 length - 1
               }) {
-            long mismatchAddress = address + Long.BYTES + mismatch;
+            long mismatchAddress = address + mismatch;
             byte original = NativeMemory.getByte(mismatchAddress);
             try {
               NativeMemory.putByte(mismatchAddress, (byte) (original ^ 1));
-              assertFalse(
-                  lookup.equals(entry),
-                  "mismatch=" + mismatch + ", length=" + length);
+              assertFalse(lookup.equals(entry), "mismatch=" + mismatch + ", length=" + length);
             } finally {
               NativeMemory.putByte(mismatchAddress, original);
             }
@@ -209,6 +237,86 @@ public final class KeyHashTest {
       }
     } finally {
       memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void everyByteOfEveryShortKeyAffectsTheHash() {
+    Random random = new Random(0x5eed);
+    for (int length = 1; length <= 64; length++) {
+      byte[] base = new byte[length];
+      random.nextBytes(base);
+      java.util.HashSet<Integer> seen = new java.util.HashSet<>();
+      assertTrue(seen.add(KeyHash.hash(base, 0, length)));
+      for (int index = 0; index < length; index++) {
+        byte original = base[index];
+        for (int value = 1; value <= 3; value++) {
+          base[index] = (byte) (original + value * 37);
+          assertTrue(seen.add(KeyHash.hash(base, 0, length)),
+              "length=" + length + ", index=" + index + ", value=" + value);
+        }
+        base[index] = original;
+      }
+      assertEquals(seen.size(), 1 + length * 3, "length=" + length);
+    }
+  }
+
+  @Test
+  public void singleBitFlipsAvalancheAcrossThe24OutputBits() {
+    Random random = new Random(0xa17a1L);
+    for (int length : new int[] {8, 16, 32, 255}) {
+      long flips = 0;
+      long observations = 0;
+      for (int trial = 0; trial < 64; trial++) {
+        byte[] base = new byte[length];
+        random.nextBytes(base);
+        int baseline = KeyHash.hash(base, 0, length);
+        for (int bit = 0; bit < length * 8; bit++) {
+          base[bit >> 3] ^= (byte) (1 << (bit & 7));
+          int flipped = KeyHash.hash(base, 0, length);
+          base[bit >> 3] ^= (byte) (1 << (bit & 7));
+          flips += Integer.bitCount(baseline ^ flipped);
+          observations += 24;
+        }
+      }
+      double rate = (double) flips / observations;
+      assertTrue(rate > 0.48 && rate < 0.52, "length=" + length + ", rate=" + rate);
+    }
+  }
+
+  @Test
+  public void randomKeyCollisionsStayAtTheBirthdayFloor() {
+    Random random = new Random(0x1234);
+    int count = 1 << 19;
+    int[] hashes = new int[count];
+    byte[] key = new byte[16];
+    for (int index = 0; index < count; index++) {
+      random.nextBytes(key);
+      hashes[index] = KeyHash.hash(key, 0, 16);
+    }
+    Arrays.sort(hashes);
+    long pairs = 0;
+    for (int index = 1; index < count; index++) {
+      if (hashes[index] == hashes[index - 1]) {
+        pairs++;
+      }
+    }
+    double birthdayBound = (double) count * (count - 1) / (1L << 25);
+    assertTrue(pairs <= birthdayBound * 2, "pairs=" + pairs + ", bound=" + birthdayBound);
+  }
+
+  @Test
+  public void hashIsStableAcrossOffsetsIntoASharedBuffer() {
+    Random random = new Random(0x0ff);
+    byte[] buffer = new byte[97];
+    random.nextBytes(buffer);
+    for (int length = 1; length <= 64; length++) {
+      for (int offset = 0; offset + length <= buffer.length; offset += 7) {
+        assertEquals(
+            KeyHash.hash(buffer, offset, length),
+            KeyHash.hash(Arrays.copyOfRange(buffer, offset, offset + length), 0, length),
+            "length=" + length + ", offset=" + offset);
+      }
     }
   }
 }

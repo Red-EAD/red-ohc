@@ -3056,8 +3056,8 @@ public class MaintenanceEventLoopTest {
     ValueBlock.initialize(valueTwo, 0L, 1, 0L);
     NativeMemory.putLong(keyOne, 141L);
     NativeMemory.putLong(keyTwo, 142L);
-    Entry one = new Entry(keyOne, 0, valueOne);
-    Entry two = new Entry(keyTwo, 0, valueTwo);
+    Entry one = new Entry(keyOne, 141 << 8, valueOne);
+    Entry two = new Entry(keyTwo, 142 << 8, valueTwo);
     one.initializeNativeMetadata();
     two.initializeNativeMetadata();
     one.currentValueAllocation(valueAllocation);
@@ -3124,8 +3124,8 @@ public class MaintenanceEventLoopTest {
     NativeMemory.putLong(keyTwo, 132L);
     ValueBlock.initialize(valueOne, 0L, 1, 0L);
     ValueBlock.initialize(valueTwo, 0L, 1, 0L);
-    Entry one = new Entry(keyOne, 0, valueOne);
-    Entry two = new Entry(keyTwo, 0, valueTwo);
+    Entry one = new Entry(keyOne, 141 << 8, valueOne);
+    Entry two = new Entry(keyTwo, 142 << 8, valueTwo);
     one.initializeNativeMetadata();
     two.initializeNativeMetadata();
     one.currentValueAllocation(allocation);
