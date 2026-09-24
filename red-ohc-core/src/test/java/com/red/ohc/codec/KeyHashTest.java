@@ -20,16 +20,19 @@ import com.red.ohc.storage.NativeMemory;
 
 public final class KeyHashTest {
   @Test
-  public void lookupAndPreencodedKeyKeepTheSamePolynomialHash() {
+  public void lookupAndPreencodedKeyKeepTheSameHash() {
     byte[] bytes = "hello".getBytes(StandardCharsets.US_ASCII);
     LookupKey lookup = new LookupKey();
 
     lookup.set(bytes, bytes.length);
-
-    assertEquals(lookup.hash(), 0x079df171);
+    int firstHash = lookup.hash();
 
     // Re-reading the cached value must not execute the hash again.
-    assertEquals(lookup.hash(), 0x079df171);
+    assertEquals(lookup.hash(), firstHash);
+
+    LookupKey fresh = new LookupKey();
+    fresh.set(bytes.clone(), bytes.length);
+    assertEquals(fresh.hash(), firstHash, "the same bytes must always hash identically");
 
     EncodedKey encoded = EncodedKey.copyOf(bytes);
     assertEquals(encoded.hash(), lookup.hash());
@@ -61,7 +64,9 @@ public final class KeyHashTest {
 
     assertSame(lookup.bytes(), bytes);
     assertTrue(lookup.hash() != firstHash, "the hash must still be refreshed for the new bytes");
-    assertEquals(lookup.hash(), Arrays.hashCode(bytes));
+    LookupKey refreshed = new LookupKey();
+    refreshed.set(bytes.clone(), bytes.length);
+    assertEquals(lookup.hash(), refreshed.hash());
   }
 
   @Test
@@ -99,7 +104,9 @@ public final class KeyHashTest {
 
     assertEquals(length, bytes.length);
     assertEquals(context.lookupKey.length(), bytes.length);
-    assertEquals(context.lookupKey.hash(), 0x0812b1ed);
+    LookupKey expected = new LookupKey();
+    expected.set(bytes, bytes.length);
+    assertEquals(context.lookupKey.hash(), expected.hash());
   }
 
   @Test

@@ -3,6 +3,8 @@ package com.red.ohc.api;
 import java.util.Arrays;
 import java.util.Objects;
 
+import com.red.ohc.codec.KeyHash;
+
 /** Immutable, pre-serialized key with the 32-bit CHM hash cached. */
 public final class EncodedKey {
   private final byte[] bytes;
@@ -19,7 +21,7 @@ public final class EncodedKey {
       throw new IllegalArgumentException("invalid encoded key length");
     }
     byte[] copy = Arrays.copyOf(bytes, length);
-    return new EncodedKey(copy, Arrays.hashCode(copy));
+    return new EncodedKey(copy, KeyHash.hash(copy, 0, copy.length));
   }
 
   public static EncodedKey copyOf(byte[] bytes) {

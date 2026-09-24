@@ -1480,25 +1480,12 @@ public final class NativeMemory {
   }
 
   public static boolean equals(long address, byte[] bytes, int offset, int length) {
+    // The bulk block path lives in its own method so this hot entry stays inlinable.
     int i = 0;
     if (length >= BULK_EQUALS_THRESHOLD) {
-      int blockBytes = BULK_EQUALS_LONGS * Long.BYTES;
-      for (; i + blockBytes <= length; i += blockBytes) {
-        // Aggregate all word differences in the block before branching. This is a
-        // portable SWAR-style optimization: it reduces branch frequency without
-        // requiring the JVM to generate platform-specific SIMD instructions.
-        long diff = 0L;
-        diff |= U.getLong(address + i) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i);
-        diff |= U.getLong(address + i + 8) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 8);
-        diff |= U.getLong(address + i + 16) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 16);
-        diff |= U.getLong(address + i + 24) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 24);
-        diff |= U.getLong(address + i + 32) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 32);
-        diff |= U.getLong(address + i + 40) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 40);
-        diff |= U.getLong(address + i + 48) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 48);
-        diff |= U.getLong(address + i + 56) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 56);
-        if (diff != 0L) {
-          return false;
-        }
+      i = equalsBulkBlocks(address, bytes, offset, length);
+      if (i < 0) {
+        return false;
       }
     }
     for (; i + 8 <= length; i += 8) {
@@ -1514,25 +1501,36 @@ public final class NativeMemory {
     return true;
   }
 
+  /** Compares whole 64-byte blocks; returns the advanced index or -1 on the first mismatch. */
+  private static int equalsBulkBlocks(long address, byte[] bytes, int offset, int length) {
+    int blockBytes = BULK_EQUALS_LONGS * Long.BYTES;
+    for (int i = 0; i + blockBytes <= length; i += blockBytes) {
+      // Aggregate all word differences in the block before branching. This is a
+      // portable SWAR-style optimization: it reduces branch frequency without
+      // requiring the JVM to generate platform-specific SIMD instructions.
+      long diff = 0L;
+      diff |= U.getLong(address + i) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i);
+      diff |= U.getLong(address + i + 8) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 8);
+      diff |= U.getLong(address + i + 16) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 16);
+      diff |= U.getLong(address + i + 24) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 24);
+      diff |= U.getLong(address + i + 32) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 32);
+      diff |= U.getLong(address + i + 40) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 40);
+      diff |= U.getLong(address + i + 48) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 48);
+      diff |= U.getLong(address + i + 56) ^ U.getLong(bytes, BYTE_ARRAY_BASE + offset + i + 56);
+      if (diff != 0L) {
+        return -1;
+      }
+    }
+    return blockBytes * (length / blockBytes);
+  }
+
   public static boolean equals(long left, long right, int length) {
+    // Same split as the heap-array overload: the bulk path stays out of the hot entry.
     int i = 0;
     if (length >= BULK_EQUALS_THRESHOLD) {
-      int blockBytes = BULK_EQUALS_LONGS * Long.BYTES;
-      for (; i + blockBytes <= length; i += blockBytes) {
-        // Keep the same block shape as the heap-array overload so both hot paths
-        // have identical early-exit semantics and are easy to benchmark together.
-        long diff = 0L;
-        diff |= U.getLong(left + i) ^ U.getLong(right + i);
-        diff |= U.getLong(left + i + 8) ^ U.getLong(right + i + 8);
-        diff |= U.getLong(left + i + 16) ^ U.getLong(right + i + 16);
-        diff |= U.getLong(left + i + 24) ^ U.getLong(right + i + 24);
-        diff |= U.getLong(left + i + 32) ^ U.getLong(right + i + 32);
-        diff |= U.getLong(left + i + 40) ^ U.getLong(right + i + 40);
-        diff |= U.getLong(left + i + 48) ^ U.getLong(right + i + 48);
-        diff |= U.getLong(left + i + 56) ^ U.getLong(right + i + 56);
-        if (diff != 0L) {
-          return false;
-        }
+      i = equalsBulkBlocks(left, right, length);
+      if (i < 0) {
+        return false;
       }
     }
     for (; i + 8 <= length; i += 8) {
@@ -1546,5 +1544,27 @@ public final class NativeMemory {
       }
     }
     return true;
+  }
+
+  /** Compares whole 64-byte blocks; returns the advanced index or -1 on the first mismatch. */
+  private static int equalsBulkBlocks(long left, long right, int length) {
+    int blockBytes = BULK_EQUALS_LONGS * Long.BYTES;
+    for (int i = 0; i + blockBytes <= length; i += blockBytes) {
+      // Keep the same block shape as the heap-array overload so both hot paths
+      // have identical early-exit semantics and are easy to benchmark together.
+      long diff = 0L;
+      diff |= U.getLong(left + i) ^ U.getLong(right + i);
+      diff |= U.getLong(left + i + 8) ^ U.getLong(right + i + 8);
+      diff |= U.getLong(left + i + 16) ^ U.getLong(right + i + 16);
+      diff |= U.getLong(left + i + 24) ^ U.getLong(right + i + 24);
+      diff |= U.getLong(left + i + 32) ^ U.getLong(right + i + 32);
+      diff |= U.getLong(left + i + 40) ^ U.getLong(right + i + 40);
+      diff |= U.getLong(left + i + 48) ^ U.getLong(right + i + 48);
+      diff |= U.getLong(left + i + 56) ^ U.getLong(right + i + 56);
+      if (diff != 0L) {
+        return -1;
+      }
+    }
+    return blockBytes * (length / blockBytes);
   }
 }

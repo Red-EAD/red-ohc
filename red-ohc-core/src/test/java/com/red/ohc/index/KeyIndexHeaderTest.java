@@ -8,6 +8,7 @@ import java.util.Random;
 
 import org.testng.annotations.Test;
 
+import com.red.ohc.codec.KeyHash;
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.storage.NativeMemory;
 
@@ -58,7 +59,9 @@ public final class KeyIndexHeaderTest {
   @Test
   public void entryAndLookupAgreeForNegativeHash() {
     byte[] bytes = fill(16);
-    assertEquals(hashOf(bytes), 0x9b7f4601);
+    while (hashOf(bytes) >= 0) {
+      bytes[0]++;
+    }
     NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(16);
     long address = memory.allocate(allocation);
@@ -100,7 +103,7 @@ public final class KeyIndexHeaderTest {
   }
 
   private static int hashOf(byte[] bytes) {
-    return Arrays.hashCode(bytes);
+    return KeyHash.hash(bytes, 0, bytes.length);
   }
 
   private static byte[] fill(int length) {

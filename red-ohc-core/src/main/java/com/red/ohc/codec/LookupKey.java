@@ -38,13 +38,8 @@ public final class LookupKey {
     return hash;
   }
 
-  // Arrays.hashCode over [offset, offset+length); JDK has no offset variant.
   private static int hash(byte[] bytes, int offset, int length) {
-    int result = 1;
-    for (int index = offset; index < offset + length; index++) {
-      result = 31 * result + bytes[index];
-    }
-    return result;
+    return KeyHash.hash(bytes, offset, length);
   }
 
   @Override
