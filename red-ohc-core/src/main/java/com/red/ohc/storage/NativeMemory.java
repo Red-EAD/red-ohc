@@ -704,7 +704,7 @@ public final class NativeMemory {
             // Address is the sole liveness marker. The other columns are dead once it is cleared
             // and will be overwritten before this segment slot is reused.
             NativeMemory.putLong(entryAddressesAddress + (long) index * 8L, 0L);
-            context.recordReleaseBatchProgress(1, WriterArena.allocationWeight(allocation));
+            context.recordReleaseBatchProgress(1, WriterArena.directAllocationBytes(allocation));
             continue;
           }
           if (handle == 0L) {
@@ -915,7 +915,10 @@ public final class NativeMemory {
                 NativeMemory.getLong(handlesColumn + (long) index * Long.BYTES);
             int expectedClass = SizeClasses.indexForEntry(allocation);
             int sizeClass = expectedClass < 0 ? WriterArena.DIRECT_CLASS : expectedClass;
-            long weight = WriterArena.allocationWeight(allocation);
+            long weight =
+                expectedClass < 0
+                    ? WriterArena.directAllocationBytes(allocation)
+                    : SizeClasses.slotBytes(expectedClass);
             entrySegments[record] = segment;
             entryWeights[record] = weight;
             if (sizeClass == WriterArena.DIRECT_CLASS) {
