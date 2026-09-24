@@ -314,8 +314,9 @@ public final class WriterArena {
     long ownerPadding2;
     long ownerPadding3;
     long ownerPadding4;
-    long ownerPadding5;
-    long ownerPadding6;
+    /** Owner-private remainder of the last whole freeBits word grab; grabWord is its word index. */
+    long grabMask;
+    long grabWord;
   }
 
   /** Reclaimer-shared bitmap, counter, state, and owner handoff fields. */
@@ -578,6 +579,7 @@ public final class WriterArena {
       FREE_BITS_7.set(this, 0L);
       FREE_SUMMARY.set(this, 0L);
       nextSlot = 0;
+      grabMask = 0L;
     }
 
     private void buildFreeMaskInto(int[] slots, int[] indexes, int offset, int count, long[] mask) {
@@ -591,9 +593,20 @@ public final class WriterArena {
     }
 
     void ownerExhausted() {
+      releaseGrabbedWord();
       if (STATE.compareAndSet(this, ACTIVE, FULL)) {
         publishAvailableIfFull();
       }
+    }
+
+    private void releaseGrabbedWord() {
+      long mask = grabMask;
+      if (mask == 0L) {
+        return;
+      }
+      grabMask = 0L;
+      orFreeBits((int) grabWord, mask);
+      FREE_SUMMARY.getAndBitwiseOr(this, 1L << grabWord);
     }
 
     void detachOwner() {
@@ -691,6 +704,12 @@ public final class WriterArena {
     }
 
     private int popFreeSlot() {
+      long mask = grabMask;
+      if (mask != 0L) {
+        int bit = Long.numberOfTrailingZeros(mask);
+        grabMask = mask & ~(1L << bit);
+        return ((int) grabWord << 6) + bit;
+      }
       for (;;) {
         long summary = freeSummary();
         if (summary == 0L) {
@@ -703,11 +722,9 @@ public final class WriterArena {
           continue;
         }
         int bit = Long.numberOfTrailingZeros(bits);
-        long updated = bits & ~(1L << bit);
-        if (compareAndSetFreeBits(word, bits, updated)) {
-          if (updated == 0L) {
-            clearFreeSummaryBit(word);
-          }
+        if (compareAndSetFreeBits(word, bits, 0L)) {
+          grabWord = word;
+          grabMask = bits & ~(1L << bit);
           return (word << 6) + bit;
         }
       }

@@ -782,6 +782,40 @@ public class WriterArenaTest {
   }
 
   @Test
+  public void detachedOwnerReturnsItsUnconsumedGrabbedWord() {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    try {
+      WriterArena source = memory.newWriterArena();
+      long bytes = 112L;
+      int sizeClass = SizeClasses.indexForEntry(bytes);
+      int count = (256 << 10) / SizeClasses.slotBytes(sizeClass);
+      List<Long> entries = new ArrayList<>(count);
+      for (int i = 0; i < count; i++) {
+        entries.add(source.allocate(bytes));
+      }
+      for (long entry : entries) {
+        memory.releaseEntry(entry, bytes);
+      }
+      // Consume part of the first grabbed freeBits word, then abandon the page mid-word.
+      for (int i = 0; i < 10; i++) {
+        source.allocate(bytes);
+      }
+      source.detach();
+
+      WriterArena other = memory.newWriterArena();
+      long pagesBefore = memory.rawAllocationCount();
+      for (int i = 10; i < count; i++) {
+        Assert.assertNotEquals(other.allocate(bytes), 0L, "reclaimed slot " + i);
+      }
+      Assert.assertEquals(
+          memory.rawAllocationCount(),
+          pagesBefore,
+          "the unconsumed grabbed word must be returned to the shared bitmap on detach");
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
   public void reusingFreeSlotsDoesNotAllocateAnotherNativePage() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     try {
