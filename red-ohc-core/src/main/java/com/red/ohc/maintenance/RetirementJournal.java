@@ -1170,7 +1170,9 @@ public final class RetirementJournal {
     private final AtomicReference<RetirementSegment> producer;
     private final ArrayDeque<RetirementSegment> sealedSegments =
         new ArrayDeque<>(SEGMENT_CAPACITY);
-    private volatile long reserved;
+    // Lane-owned counters: one live owner at a time; committed stays volatile because the actor
+    // reads it cross-thread for queue depth, which also publishes the earlier reserved writes.
+    private long reserved;
     private volatile long committed;
     private final AtomicBoolean ready = new AtomicBoolean();
     private final AtomicBoolean progressOwner = new AtomicBoolean();

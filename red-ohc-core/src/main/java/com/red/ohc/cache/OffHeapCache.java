@@ -2127,7 +2127,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long newTaggedValue =
           Entry.tagValueAddress(
               replacement, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE);
-      if (!awaitWriter(entry)) {
+      long claimedStateWord = awaitWriter(entry);
+      if (claimedStateWord == 0L) {
         if (isClosing()) {
           throw new IllegalStateException("cache is closing");
         }
@@ -2140,13 +2141,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       // claim is held; no second ReaderGuard is needed here.
       long finalTaggedValue = entry.valueAddress;
       long finalAddress = Entry.rawValueAddress(finalTaggedValue);
-      long finalGeneration = entry.generation();
-      long finalAllocation = currentValueAllocation(entry);
+      long finalGeneration = Entry.generationOfStateWord(claimedStateWord);
+      long metadataWord = entry.currentValueAllocationAndAbsent();
+      long finalAllocation = Entry.allocationOfMetadataWord(metadataWord);
       if (finalAddress != 0L && finalAllocation == 0L) {
         finalAllocation = ValueBlock.allocationLength(ValueBlock.length(finalAddress));
       }
-      boolean logicallyAbsent = entry.isLogicallyAbsent();
-      if (!entry.isAlive()
+      boolean logicallyAbsent = Entry.absentOfMetadataWord(metadataWord);
+      if (!Entry.isAliveTagged(finalTaggedValue)
           || (versioned
               && (finalTaggedValue != expectedTaggedValue
                   || (expectedGeneration >= 0L && finalGeneration != expectedGeneration)))) {
@@ -2159,8 +2161,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (expectedTaggedValue != 0L && valueIfLiveWhileWriterHeld(entry) == 0L) {
         return 0;
       }
-      long oldTagged = entry.valueAddress;
-      long old = Entry.rawValueAddress(oldTagged);
+      long oldTagged = finalTaggedValue;
+      long old = finalAddress;
       oldAllocation = finalAllocation;
       if (previous != null) {
         previous.value = snapshotValueWhileWriterHeld(context, entry, oldTagged);
@@ -2846,7 +2848,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       exit(context);
     }
 
-    if (!awaitWriter(entry)) {
+    if (awaitWriter(entry) == 0L) {
       if (isClosing()) {
         throw new IllegalStateException("cache is closing");
       }
@@ -5302,14 +5304,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   /**
    * Acquires an Entry writer with an event-driven slow path. The native writer bit remains the
    * ownership and generation authority; the Java monitor only closes the failed-claim to wake-up
-   * race without adding a field to Entry.
+   * race without adding a field to Entry. Returns the post-claim state word, or 0 on failure.
    */
-  private boolean awaitWriter(Entry entry) {
+  private long awaitWriter(Entry entry) {
     if (entry == null || closing || !entry.isAlive()) {
-      return false;
+      return 0L;
     }
-    if (entry.claimWriter()) {
-      return true;
+    long claimed = entry.claimWriterStateWord();
+    if (claimed != 0L) {
+      return claimed;
     }
     boolean interrupted = false;
     synchronized (entry) {
@@ -5317,11 +5320,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         if (closing || !entry.isAlive()) {
           break;
         }
-        if (entry.claimWriter()) {
+        claimed = entry.claimWriterStateWord();
+        if (claimed != 0L) {
           if (interrupted) {
             Thread.currentThread().interrupt();
           }
-          return true;
+          return claimed;
         }
         if (!entry.markWriterWaiter()) {
           continue;
@@ -5336,7 +5340,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (interrupted) {
       Thread.currentThread().interrupt();
     }
-    return false;
+    return 0L;
   }
 
   /** Waits only for the current native writer owner to leave; it never claims or mutates Entry. */
@@ -5467,8 +5471,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (closeState.get() != OPEN) {
       return null;
     }
-    // A terminal maintenance failure disables every new writer path, including compute methods
-    // whose first CHM callback may otherwise return an existing value before reaching allocation.
     worker.throwIfUnavailable();
     ThreadContext context = contexts.get();
     if (!context.isRegistered()) {
@@ -5479,38 +5481,22 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (context.isWriterEntered()) {
       return null;
     }
-    worker.setWriterActive(context, true);
-    boolean activated = false;
-    boolean admitted = false;
-    try {
-      if (!context.hasWriterResources()) {
-        WriterResource resource = writerResources.acquire();
-        context.bindWriterResource(resource);
-        readers.attachWriterResource(context.slot, resource);
-      }
-      if (!context.tryEnterWriter()) {
-        return null;
-      }
-      activated = true;
-      if (closeState.get() == OPEN) {
-        admitted = true;
-        return context;
-      }
-      return null;
-    } finally {
-      if (!admitted) {
-        if (activated) {
-          context.exitWriter();
-        }
-        if (!context.isWriterEntered()) {
-          worker.setWriterActive(context, false);
-        }
-      }
+    if (!context.hasWriterResources()) {
+      WriterResource resource = writerResources.acquire();
+      context.bindWriterResource(resource);
+      readers.attachWriterResource(context.slot, resource);
     }
+    if (!context.tryEnterWriter()) {
+      return null;
+    }
+    if (closeState.get() == OPEN) {
+      return context;
+    }
+    context.exitWriter();
+    return null;
   }
 
   private void exitWriter(ThreadContext context) {
-    worker.setWriterActive(context, false);
     context.exitWriter();
   }
 
@@ -5555,9 +5541,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private long valueIfLive(Entry entry, long taggedValue, long nowNanos) {
     if (entry == null
-        || entry.isLogicallyAbsent()
+        || taggedValue == 0L
         || !isAliveTaggedValue(taggedValue)
-        || taggedValue == 0L) {
+        || entry.isLogicallyAbsent()) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);
@@ -5574,7 +5560,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   /** Returns the live value while the caller owns the Entry writer claim. */
   private long valueIfLiveWhileWriterHeld(Entry entry) {
     long taggedValue = entry.valueAddress;
-    if (entry.isLogicallyAbsent() || !isAliveTaggedValue(taggedValue) || taggedValue == 0L) {
+    if (taggedValue == 0L || !isAliveTaggedValue(taggedValue) || entry.isLogicallyAbsent()) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);

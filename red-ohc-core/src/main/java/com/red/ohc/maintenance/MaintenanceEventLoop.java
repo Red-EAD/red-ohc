@@ -788,10 +788,6 @@ public final class MaintenanceEventLoop
     return cleared;
   }
 
-  public void setWriterActive(ThreadContext context, boolean active) {
-    readers.setWriterAdmission(context.slot, active);
-  }
-
   private void requestAccessWork() {
     // AccessRing is an advisory side queue. Publishing its coalesced bit is enough to make the
     // actor rescan it; putting a marker into the MPSC mailbox would let a read thread allocate a

@@ -240,13 +240,21 @@ public final class Entry {
   }
 
   public boolean claimWriter() {
+    return claimWriterStateWord() != 0L;
+  }
+
+  /** Claims the writer bit and reports the post-claim state word; 0 means the claim failed. */
+  public long claimWriterStateWord() {
     if (!isAlive()) {
-      return false;
+      return 0L;
     }
     long address = stateWordAddress();
     long current = NativeMemory.getLongVolatile(address);
-    return (current & WRITER_LOCK) == 0L
-        && NativeMemory.compareAndSwapLong(address, current, current | WRITER_LOCK);
+    if ((current & WRITER_LOCK) == 0L
+        && NativeMemory.compareAndSwapLong(address, current, current | WRITER_LOCK)) {
+      return current | WRITER_LOCK;
+    }
+    return 0L;
   }
 
   public boolean markWriterWaiter() {
@@ -328,6 +336,19 @@ public final class Entry {
   public boolean isLogicallyAbsent() {
     long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
     return (NativeMemory.getLongVolatile(address) & LOGICAL_ABSENT) != 0L;
+  }
+
+  /** Single volatile read yielding allocation + absent from the metadata word. */
+  public long currentValueAllocationAndAbsent() {
+    return NativeMemory.getLongVolatile(nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET);
+  }
+
+  public static long allocationOfMetadataWord(long metadataWord) {
+    return metadataWord & VALUE_ALLOCATION_MASK;
+  }
+
+  public static boolean absentOfMetadataWord(long metadataWord) {
+    return (metadataWord & LOGICAL_ABSENT) != 0L;
   }
 
   /** Marks this entry as logically absent and reports whether the counter needs a decrement. */

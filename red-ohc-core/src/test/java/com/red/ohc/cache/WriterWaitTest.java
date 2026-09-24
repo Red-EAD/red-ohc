@@ -70,7 +70,7 @@ public final class WriterWaitTest {
             () -> {
               started.countDown();
               try {
-                acquired.set((Boolean) awaitWriter.invoke(cache, entry));
+                acquired.set((Long) awaitWriter.invoke(cache, entry) != 0L);
                 if (acquired.get()) {
                   releaseWriter.invoke(cache, entry);
                 }
