@@ -52,7 +52,7 @@ public final class LogicalAdmission {
     return actorOverTarget;
   }
 
-  /** Writer-side hint only; it does not participate in admission or capacity correctness. */
+  /** Actor-side occupancy recheck; writer release paths read only {@link #isOverTarget()}. */
   public boolean needsCapacityWake() {
     // Over-target is exactly when the actor most needs the wake: it may be parked in the
     // capacity-retry backoff window after a locked victim, and a writer's unblock (or mere

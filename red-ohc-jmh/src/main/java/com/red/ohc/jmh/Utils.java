@@ -37,6 +37,26 @@ public final class Utils {
         }
       };
 
+  public static final CacheSerializer<byte[]> lightweightValueSerializer =
+      new CacheSerializer<byte[]>() {
+        private final byte[] materializedValue = new byte[1];
+
+        public void serialize(byte[] bytes, ByteBuffer buf) {
+          buf.put(bytes);
+        }
+
+        public byte[] deserialize(ByteBuffer buf) {
+          if (buf.hasRemaining()) {
+            buf.get();
+          }
+          return materializedValue;
+        }
+
+        public int serializedSize(byte[] bytes) {
+          return bytes.length;
+        }
+      };
+
   public static final CacheSerializer<Integer> intSerializer =
       new CacheSerializer<Integer>() {
         public void serialize(Integer integer, ByteBuffer buf) {

@@ -39,12 +39,13 @@ public final class EntryLinksTest {
       try {
         assertEquals(links.ensure(replacement), firstId);
       } finally {
-        memory.releaseEntry(replacement.nativeKeyAddress, replacement.keyAllocationLength());
+        memory.releaseEntry(
+            replacement.nativeKeyAddress, replacement.nativeKeyAllocationLength());
       }
     } finally {
       links.close();
-      memory.releaseEntry(first.nativeKeyAddress, first.keyAllocationLength());
-      memory.releaseEntry(second.nativeKeyAddress, second.keyAllocationLength());
+      memory.releaseEntry(first.nativeKeyAddress, first.nativeKeyAllocationLength());
+      memory.releaseEntry(second.nativeKeyAddress, second.nativeKeyAllocationLength());
       memory.closeArenas();
     }
   }

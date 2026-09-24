@@ -346,14 +346,11 @@ public final class NativeMemory {
     }
 
     /** Returns the stable pooled-slot handle, or zero for direct allocations. */
-    public static long entryAllocatorHandle(long entryAddress) {
-      if (entryAddress == 0L) {
+    public static long entryAllocatorHandle(long entryAddress, long entryBytes) {
+      if (entryAddress == 0L || SizeClasses.indexForEntry(entryBytes) < 0) {
         return 0L;
       }
-      long block = entryAddress - WriterArena.PREFIX_BYTES;
-      long metadata = U.getLong(block + 48L);
-      int sizeClass = (int) ((metadata >>> 32) & 0xffffL);
-      return sizeClass == WriterArena.DIRECT_CLASS ? 0L : U.getLong(block + 56L);
+      return U.getLong(entryAddress - WriterArena.PREFIX_BYTES + 56L);
     }
 
     private void freeDirectEntry(long block, long bytes) {
@@ -383,7 +380,7 @@ public final class NativeMemory {
       if (arenaId <= 0) {
         throw new IllegalStateException("writer arena id exhausted");
       }
-      return new WriterArena(this, arenaId);
+      return new WriterArena(this);
     }
 
     WriterArena.Page tryStealAvailablePage(
@@ -515,9 +512,8 @@ public final class NativeMemory {
         return;
       }
       long block = entryAddress - WriterArena.PREFIX_BYTES;
-      long metadata = U.getLong(block + 48L);
-      int sizeClass = (int) ((metadata >>> 32) & 0xffffL);
-      if (sizeClass == WriterArena.DIRECT_CLASS) {
+      int sizeClass = SizeClasses.indexForEntry(entryBytes);
+      if (sizeClass < 0) {
         freeDirectEntry(block, WriterArena.directAllocationBytes(entryBytes));
         return;
       }
@@ -577,20 +573,6 @@ public final class NativeMemory {
             index++;
             continue;
           }
-          long metadata = U.getLong(block + 48L);
-          int recordedClass = (int) ((metadata >>> 32) & 0xffffL);
-          if (recordedClass == WriterArena.DIRECT_CLASS) {
-            freeDirectEntry(block, WriterArena.directAllocationBytes(entryBytes[index]));
-            index++;
-            continue;
-          }
-          if (recordedClass != sizeClass) {
-            throw new IllegalStateException(
-                "allocator size class does not match entry allocation: recorded="
-                    + recordedClass
-                    + ", expected="
-                    + sizeClass);
-          }
           long handle = U.getLong(block + 56L);
           entryHandles[index] = handle;
           WriterArena.Page page = pageForHandle(handle);
@@ -636,10 +618,8 @@ public final class NativeMemory {
         for (int group = 0; group < groupCount; group++) {
           int groupSlot = groupSlots[group];
           int firstIndex = groupIndexes[groupOffsets[groupSlot]];
-          long firstEntry = entryAddresses[firstIndex];
-          long firstBlock = firstEntry - WriterArena.PREFIX_BYTES;
           long firstHandle = entryHandles[firstIndex];
-          int sizeClass = (int) ((U.getLong(firstBlock + 48L) >>> 32) & 0xffffL);
+          int sizeClass = SizeClasses.indexForEntry(entryBytes[firstIndex]);
           WriterArena.Page page = pageForHandle(firstHandle);
           if (page == null || page.sizeClass != sizeClass) {
             throw new IllegalStateException("unknown allocator page in grouped release");

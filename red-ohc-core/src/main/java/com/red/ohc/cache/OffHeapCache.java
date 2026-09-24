@@ -1967,7 +1967,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           mutationVersion,
           !deferMaintenanceWake);
     }
-    if (!deferMaintenanceWake && logicalAdmission.needsCapacityWake()) {
+    if (!deferMaintenanceWake && logicalAdmission.isOverTarget()) {
       worker.requestCapacityMaintenance();
     }
   }
@@ -4478,7 +4478,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     int valueLength = serializedSize(valueSerializer, value);
     if (deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE
         && context.writeCreatedAtMillis() == Long.MIN_VALUE) {
-      context.writeCreatedAtMillis(ticker.currentTimeMillis());
+      context.writeCreatedAtMillis(deadlineClock.wallMillisAt(deadlineClock.nowNanos()));
     }
     long keyAllocation = keyAllocationLength(keyLength);
     long valueAllocation = ValueBlock.allocationLength(valueLength);
@@ -5384,12 +5384,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean requestCapacityWake) {
     entry.finishWriter();
     if (!deferMaintenanceWake) {
-      boolean capacityWake = requestCapacityWake && logicalAdmission.needsCapacityWake();
+      // The actor snapshot is the only writer-side capacity signal; the ledger sum stays on the
+      // actor. A capacity pass blocked on this writer is the exceptional case and needs a wake.
+      boolean capacityWake = requestCapacityWake && logicalAdmission.isOverTarget();
       if (capacityWake) {
         worker.requestCapacityMaintenance();
       } else {
-        // actorOverTarget deliberately suppresses the LongAdder sum on ordinary releases. A
-        // capacity pass blocked on this writer is the exceptional case and needs a direct wake.
         worker.requestCapacityMaintenanceIfBlocked(entry);
       }
     }
@@ -5586,9 +5586,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context.writeMonotonicNowNanos(Long.MIN_VALUE);
         return MonotonicDeadlineClock.NO_DEADLINE;
       }
-      long wallNowMillis = ticker.currentTimeMillis();
       long monotonicNowNanos = deadlineClock.nowNanos();
-      context.writeCreatedAtMillis(wallNowMillis);
+      context.writeCreatedAtMillis(deadlineClock.wallMillisAt(monotonicNowNanos));
       context.writeMonotonicNowNanos(monotonicNowNanos);
       return deadlineClock.deadlineAfterMillis(defaultTtlMillis, monotonicNowNanos);
     }
@@ -5597,8 +5596,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       context.writeMonotonicNowNanos(Long.MIN_VALUE);
       return MonotonicDeadlineClock.NO_DEADLINE;
     }
-    long wallNowMillis = ticker.currentTimeMillis();
     long monotonicNowNanos = deadlineClock.nowNanos();
+    long wallNowMillis = deadlineClock.wallMillisAt(monotonicNowNanos);
     context.writeCreatedAtMillis(wallNowMillis);
     context.writeMonotonicNowNanos(monotonicNowNanos);
     return deadlineClock.deadlineFromEpochMillis(

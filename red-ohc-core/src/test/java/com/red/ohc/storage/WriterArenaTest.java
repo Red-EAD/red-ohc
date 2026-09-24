@@ -951,11 +951,6 @@ public class WriterArenaTest {
       Assert.assertTrue(
           firstPageKey != otherArenaPageKey,
           "first page=" + firstPageKey + ", other arena page=" + otherArenaPageKey);
-      Assert.assertNotEquals(
-          NativeMemory.getLong(entries[0] - WriterArena.PREFIX_BYTES + 48L) & 0xffff_ffffL,
-          NativeMemory.getLong(entries[firstCount] - WriterArena.PREFIX_BYTES + 48L)
-              & 0xffff_ffffL,
-          "records from different writer arenas must retain their owner metadata");
 
       long rawAllocations = memory.rawAllocationCount();
       memory.releaseEntryBatch(context, entries, allocations, handles, count);

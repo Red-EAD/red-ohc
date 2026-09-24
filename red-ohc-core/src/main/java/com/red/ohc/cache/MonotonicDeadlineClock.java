@@ -13,15 +13,34 @@ final class MonotonicDeadlineClock implements Ticker {
 
   private final Ticker ticker;
   private final long originNanos;
+  /**
+   * Wall-clock origin paired with {@link #originNanos}; derivation is safe only for the system
+   * ticker, whose two views advance together.
+   */
+  private final long originWallMillis;
+  private final boolean systemTicker;
 
   MonotonicDeadlineClock(Ticker ticker) {
     this.ticker = Objects.requireNonNull(ticker, "ticker");
     this.originNanos = ticker.nanos();
+    this.systemTicker = ticker == Ticker.DEFAULT;
+    this.originWallMillis = systemTicker ? ticker.currentTimeMillis() : 0L;
   }
 
   /** Returns elapsed nanoseconds relative to this cache's clock origin. */
   long nowNanos() {
     return ticker.nanos() - originNanos;
+  }
+
+  /**
+   * Wall-clock millis matching a caller-owned monotonic sample. Derived from the system ticker's
+   * single nanoTime reading (truncation error under 1ms); custom tickers keep exact dual reads.
+   */
+  long wallMillisAt(long monotonicNowNanos) {
+    if (!systemTicker) {
+      return ticker.currentTimeMillis();
+    }
+    return originWallMillis + monotonicNowNanos / NANOS_PER_MILLI;
   }
 
   @Override

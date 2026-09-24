@@ -570,7 +570,7 @@ public final class RetirementSegment {
     NativeMemory.putLong(allocationsAddress + (long) index * WORD_BYTES, allocation);
     NativeMemory.putLong(
         handlesAddress + (long) index * WORD_BYTES,
-        NativeMemory.Memory.entryAllocatorHandle(address));
+        NativeMemory.Memory.entryAllocatorHandle(address, allocation));
   }
 
   /** Clears only the live marker after a native release has completed successfully. */

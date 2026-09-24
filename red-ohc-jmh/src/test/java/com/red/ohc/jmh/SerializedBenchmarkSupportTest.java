@@ -83,7 +83,7 @@ public class SerializedBenchmarkSupportTest {
     int combinations = 1;
     for (String fieldName :
         new String[] {
-          "allocator", "keyBytes", "valueBytes", "workload", "distribution", "writeShape",
+          "keyBytes", "valueBytes", "workload", "distribution", "writeShape",
         }) {
       try {
         Param param = OHCSerializedBenchmark.class.getDeclaredField(fieldName).getAnnotation(Param.class);

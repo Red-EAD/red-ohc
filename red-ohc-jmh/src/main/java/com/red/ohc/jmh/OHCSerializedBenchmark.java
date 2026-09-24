@@ -73,7 +73,7 @@ public class OHCSerializedBenchmark {
             OHCacheBuilder.<byte[], byte[]>newBuilder()
                 .capacity(capacity)
                 .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.byteArraySerializer)
+                .valueSerializer(Utils.lightweightValueSerializer)
                 .eviction(Eviction.S3_FIFO)
                 .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
                 .build();

@@ -225,10 +225,10 @@ public final class RetirementJournalContractTest {
         entries[index] = arena.allocate(allocation);
       }
       long pageKey =
-          NativeMemory.Memory.entryAllocatorHandle(entries[0]) >>> 14;
+          NativeMemory.Memory.entryAllocatorHandle(entries[0], allocation) >>> 14;
       for (long entry : entries) {
         assertEquals(
-            NativeMemory.Memory.entryAllocatorHandle(entry) >>> 14,
+            NativeMemory.Memory.entryAllocatorHandle(entry, allocation) >>> 14,
             pageKey,
             "the fixture must span segments while retaining one allocator page");
       }
@@ -435,10 +435,10 @@ public final class RetirementJournalContractTest {
         entries[index] = arena.allocate(allocation);
       }
       long pageKey =
-          NativeMemory.Memory.entryAllocatorHandle(entries[0]) >>> 14;
+          NativeMemory.Memory.entryAllocatorHandle(entries[0], allocation) >>> 14;
       for (long entry : entries) {
         assertEquals(
-            NativeMemory.Memory.entryAllocatorHandle(entry) >>> 14,
+            NativeMemory.Memory.entryAllocatorHandle(entry, allocation) >>> 14,
             pageKey,
             "the fixture must span two segments while retaining one allocator page");
       }

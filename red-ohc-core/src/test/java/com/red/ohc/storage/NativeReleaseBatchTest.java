@@ -148,7 +148,7 @@ public final class NativeReleaseBatchTest {
     try {
       WriterArena arena = memory.newWriterArena();
       entry = arena.allocate(112L);
-      long validHandle = NativeMemory.Memory.entryAllocatorHandle(entry);
+      long validHandle = NativeMemory.Memory.entryAllocatorHandle(entry, 112L);
       long slotOnlyHandle = WriterArena.Page.slotOf(validHandle);
       if (slotOnlyHandle == 0L) {
         slotOnlyHandle = 1L;
@@ -236,8 +236,8 @@ public final class NativeReleaseBatchTest {
       WriterArena arena = memory.newWriterArena();
       long first = arena.allocate(112L);
       long last = arena.allocate(112L);
-      long firstHandle = NativeMemory.Memory.entryAllocatorHandle(first);
-      long lastHandle = NativeMemory.Memory.entryAllocatorHandle(last);
+      long firstHandle = NativeMemory.Memory.entryAllocatorHandle(first, 112L);
+      long lastHandle = NativeMemory.Memory.entryAllocatorHandle(last, 112L);
       WriterArena.Page page = memory.pageForHandle(firstHandle);
       assertNotNull(page);
       assertSame(memory.pageForHandle(lastHandle), page);
@@ -279,10 +279,10 @@ public final class NativeReleaseBatchTest {
       long first = targetArena.allocate(112L);
       long last = targetArena.allocate(112L);
       long decoy = decoyArena.allocate(112L);
-      long firstHandle = NativeMemory.Memory.entryAllocatorHandle(first);
+      long firstHandle = NativeMemory.Memory.entryAllocatorHandle(first, 112L);
       WriterArena.Page targetPage = memory.pageForHandle(firstHandle);
       WriterArena.Page decoyPage =
-          memory.pageForHandle(NativeMemory.Memory.entryAllocatorHandle(decoy));
+          memory.pageForHandle(NativeMemory.Memory.entryAllocatorHandle(decoy, 112L));
       assertNotNull(targetPage);
       assertNotNull(decoyPage);
 
@@ -315,7 +315,7 @@ public final class NativeReleaseBatchTest {
     try {
       WriterArena arena = memory.newWriterArena();
       entry = arena.allocate(bytes);
-      long handle = NativeMemory.Memory.entryAllocatorHandle(entry);
+      long handle = NativeMemory.Memory.entryAllocatorHandle(entry, bytes);
       long pageKey = handle >>> WriterArena.HANDLE_SLOT_BITS;
       int slot = WriterArena.Page.slotOf(handle);
       int sizeClass = SizeClasses.indexForEntry(bytes);
@@ -361,11 +361,12 @@ public final class NativeReleaseBatchTest {
         entryBytes[index] = bytes;
       }
       long extra = arena.allocate(bytes);
-      long lastHandle = NativeMemory.Memory.entryAllocatorHandle(entries[slotsPerPage - 1]);
+      long lastHandle = NativeMemory.Memory.entryAllocatorHandle(entries[slotsPerPage - 1], bytes);
       WriterArena.Page page = memory.pageForHandle(lastHandle);
       assertNotNull(page);
       for (long entry : entries) {
-        assertSame(memory.pageForHandle(NativeMemory.Memory.entryAllocatorHandle(entry)), page);
+        assertSame(
+            memory.pageForHandle(NativeMemory.Memory.entryAllocatorHandle(entry, bytes)), page);
       }
 
       context.beginReleasePageMemo();
@@ -428,7 +429,7 @@ public final class NativeReleaseBatchTest {
 
       WriterArena replacementArena = memory.newWriterArena();
       long replacement = replacementArena.allocate(bytes);
-      long replacementHandle = NativeMemory.Memory.entryAllocatorHandle(replacement);
+      long replacementHandle = NativeMemory.Memory.entryAllocatorHandle(replacement, bytes);
       assertTrue(
           replacementHandle >>> WriterArena.HANDLE_SLOT_BITS != page.pageKey,
           "page-id reuse must carry a different full generation key");
@@ -479,7 +480,7 @@ public final class NativeReleaseBatchTest {
       }
       extra = arena.allocate(bytes);
       long last = entries[slotsPerPage - 1];
-      long lastHandle = NativeMemory.Memory.entryAllocatorHandle(last);
+      long lastHandle = NativeMemory.Memory.entryAllocatorHandle(last, bytes);
       WriterArena.Page page = memory.pageForHandle(lastHandle);
       assertNotNull(page);
 
@@ -555,7 +556,7 @@ public final class NativeReleaseBatchTest {
       NativeMemory.putLong(allocations + (long) index * Long.BYTES, bytes[index]);
       NativeMemory.putLong(
           handles + (long) index * Long.BYTES,
-          NativeMemory.Memory.entryAllocatorHandle(entries[index]));
+          NativeMemory.Memory.entryAllocatorHandle(entries[index], bytes[index]));
     }
   }
 

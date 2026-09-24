@@ -31,7 +31,6 @@ public final class WriterArena {
   private static final Page RETENTION_CLOSED_PAGE = new Page(null, 0, 0L, 0L, 0, 1, 1, false);
 
   private final NativeMemory.Memory memory;
-  private final int id;
   private volatile Runnable retirementHookForTest;
   /** Set by the actor's idle seal; cleared by the owner's next cold allocation. */
   private volatile boolean retentionSealed;
@@ -39,9 +38,8 @@ public final class WriterArena {
   /** Lazily populated by the exclusive writer; remote frees use Page.ownerClass instead. */
   private final SizeClassState[] sizeClasses = new SizeClassState[SizeClasses.count()];
 
-  WriterArena(NativeMemory.Memory memory, int id) {
+  WriterArena(NativeMemory.Memory memory) {
     this.memory = memory;
-    this.id = id;
   }
 
   public long allocate(long entryBytes) {
@@ -102,7 +100,6 @@ public final class WriterArena {
         page.ownerExhausted();
         continue;
       }
-      NativeMemory.putLong(block + 48L, metadata(sizeClass));
       return block + PREFIX_BYTES;
     }
   }
@@ -210,7 +207,6 @@ public final class WriterArena {
       return 0L;
     }
     memory.recordDirectEntryAllocation();
-    NativeMemory.putLong(block + 48L, metadata(DIRECT_CLASS));
     return block + PREFIX_BYTES;
   }
 
@@ -221,10 +217,6 @@ public final class WriterArena {
       SIZE_CLASS_STATE.setRelease(sizeClasses, sizeClass, state);
     }
     return state;
-  }
-
-  private long metadata(int sizeClass) {
-    return (id & 0xffffffffL) | (((long) sizeClass & 0xffffL) << 32);
   }
 
   static final class SizeClassState {
