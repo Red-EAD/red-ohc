@@ -33,11 +33,15 @@ public final class MaintenanceIdleHandoffTest {
       fixture.publishAfterCompletedScan(source);
       assertFalse((Boolean) call(fixture.loop, "hasRunnableWork"));
 
-      call(fixture.loop, "parkUntilWork");
-
-      assertTrue(
-          (Boolean) call(fixture.loop, "hasRunnableWork"),
-          "the real-time access deadline must schedule the observed source");
+      // Mirror the production loop: an external unpark permit can truncate one park, so
+      // re-park until the access deadline actually makes the observed source runnable.
+      long retryBudget = System.nanoTime() + 2_000_000_000L;
+      while (!(Boolean) call(fixture.loop, "hasRunnableWork")) {
+        assertTrue(
+            System.nanoTime() < retryBudget,
+            "the real-time access deadline must schedule the observed source");
+        call(fixture.loop, "parkUntilWork");
+      }
       call(fixture.loop, "maintenancePass");
       assertTrue(fixture.slot.access.isEmpty(), "the next turn must drain the observed ring");
       ReaderRegistry.SlotTableSnapshot slots = fixture.readers.slotTableSnapshot();

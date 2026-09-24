@@ -116,6 +116,25 @@ public class OHCSerializedBenchmark {
     }
   }
 
+  @TearDown(Level.Iteration)
+  public void iterationActorStats() {
+    OHCacheStats stats = cache.stats();
+    System.out.printf(
+        Locale.ROOT,
+        "actor-stats: wake=%d, pass=%d, cont=%d, activeNs=%d, parkNs=%d, "
+            + "collected=%d, blocked=%d, blockedNs=%d, ringDrop=%d, retireDepth=%d%n",
+        stats.maintenanceWakeCount(),
+        stats.maintenancePassCount(),
+        stats.maintenanceImmediateContinuationCount(),
+        stats.maintenanceActiveNanosTotal(),
+        stats.maintenanceParkNanosTotal(),
+        stats.maintenanceCollectedRecordsTotal(),
+        stats.retirementReclaimBlockedCount(),
+        stats.retirementReclaimBlockedNanos(),
+        stats.accessRingDroppedCount(),
+        stats.retirementQueueDepth());
+  }
+
   @Benchmark
   @Threads(1)
   public void oneThread(

@@ -9,9 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.LockSupport;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 import org.jctools.queues.MpscUnboundedArrayQueue;
@@ -46,8 +44,6 @@ public final class MaintenanceEventLoop
 
   private static final long NO_DEADLINE = Long.MIN_VALUE;
   private static final long MAX_IDLE_PARK_NANOS = 10_000_000L;
-  private static final long READER_SIGNAL_STOPPING = 1L;
-  private static final long READER_SIGNAL_HAS_SHUTDOWN_WAITER = 1L << 1;
   private static final int MAILBOX_QUEUE_CHUNK_SIZE = 1_024;
   private static final int MAILBOX_MAX_PER_TURN = 1_024;
   private static final int LIFECYCLE_MAX_PER_TURN = 1_024;
@@ -61,7 +57,11 @@ public final class MaintenanceEventLoop
    * deadline the actor already committed to.
    */
   private static final long WAKE_SUPPRESSION_WINDOW_NANOS = 1_000_000L;
+  /** Trickle-rate writer work waits one batch window so a pass processes it in bulk. */
+  private static final long WORK_BATCH_WINDOW_NANOS = 200_000L;
+  private static final int WORK_BATCH_MAILBOX_THRESHOLD = 64;
   private volatile long parkDeadlineNanos;
+  private boolean mandatoryWorkBatchPass;
   private static final int ADVISORY_MAX_PER_TURN =
       MaintenanceBudgetController.TOTAL_MAINTENANCE_HARD_CAP;
   private static final long MAX_CAPACITY_RETRY_BACKOFF_NANOS = 10_000_000L;
@@ -226,10 +226,8 @@ public final class MaintenanceEventLoop
   /** Reader-exit notification sequence; readers only increment it on the marked path. */
   private final AtomicLong readerNotificationSequence = new AtomicLong();
   private long observedReaderNotificationSequence;
-  private final ReentrantLock shutdownWaitLock = new ReentrantLock();
-  private final Condition shutdownProgress = shutdownWaitLock.newCondition();
-  /** Padded control bits read by every reader exit without sharing a line with ordinary state. */
-  private final PaddedAtomicLong readerExitSignals = new PaddedAtomicLong();
+  /** Padded stop bit: isStopping is read on every actor turn, readers touch neighbours. */
+  private final PaddedAtomicLong stopState = new PaddedAtomicLong();
 
   private volatile long nowMillis;
 
@@ -513,9 +511,8 @@ public final class MaintenanceEventLoop
   public void stop() {
     synchronized (asyncFlushPublicationLock) {
       writesUnavailable = true;
-      setReaderExitSignal(READER_SIGNAL_STOPPING);
+      stopState.set(1L);
     }
-    signalShutdownProgress(readerExitSignals.get());
     signal();
     LockSupport.unpark(thread);
   }
@@ -525,7 +522,6 @@ public final class MaintenanceEventLoop
       writesUnavailable = true;
       closing = true;
     }
-    signalShutdownProgress();
   }
 
   public void join(long timeoutMillis) throws InterruptedException {
@@ -816,13 +812,6 @@ public final class MaintenanceEventLoop
       readerNotificationSequence.incrementAndGet();
       requestWork(WORK_READER_NOTIFICATION | WORK_CLOCK);
     }
-    long signals = readerExitSignals.get();
-    if ((signals & READER_SIGNAL_STOPPING) != 0L) {
-      // shutdownAndFree parks outside WakeGate, so this must not rely on a REQUIRED gate
-      // transition to wake the actor after its final reader leaves.
-      LockSupport.unpark(thread);
-    }
-    signalShutdownProgress(signals);
   }
 
   public void recordNativeAllocationFailure() {
@@ -1481,6 +1470,11 @@ public final class MaintenanceEventLoop
         parkUntilWork();
         continue;
       }
+      if (shouldDeferSmallWorkBatch(decision)) {
+        previousBatchCompleted = false;
+        parkForWorkBatch();
+        continue;
+      }
       if (previousBatchCompleted) {
         maintenanceImmediateContinuationCount =
             saturatingAdd(maintenanceImmediateContinuationCount, 1L);
@@ -1497,6 +1491,7 @@ public final class MaintenanceEventLoop
           continue;
         }
         maintenanceWorkUnits = maintenancePass(plan);
+        mandatoryWorkBatchPass = false;
         batchCompleted = true;
       } catch (Throwable failure) {
         recordTerminalFailure(failure);
@@ -2247,7 +2242,7 @@ public final class MaintenanceEventLoop
     if (decision.capacityRetryDue) {
       return RUNNABLE_CHECK_WORK;
     }
-    if (decision.readerNotificationWork) {
+    if (decision.readerNotificationWork && !reclaimNotificationSuppressed()) {
       return RUNNABLE_CHECK_WORK;
     }
     if (decision.durableMailboxWork
@@ -2439,6 +2434,7 @@ public final class MaintenanceEventLoop
   }
 
   private void parkUntilWork() {
+    mandatoryWorkBatchPass = false;
     if (!wakeGate.armIdle()) {
       idleBackoff.reset();
       return;
@@ -2517,6 +2513,56 @@ public final class MaintenanceEventLoop
     long parkStart = System.nanoTime();
     try {
       LockSupport.parkNanos(this, delay);
+    } finally {
+      parkDeadlineNanos = 0L;
+      maintenanceParkNanosTotal =
+          saturatingAdd(maintenanceParkNanosTotal, Math.max(0L, System.nanoTime() - parkStart));
+      maintenanceWakeCount++;
+      publishActorSnapshots();
+      parked = false;
+      wakeGate.requireProcessing();
+    }
+  }
+
+  /** True when the only pending work is trickle-rate writer output that batches better. */
+  private boolean shouldDeferSmallWorkBatch(WorkDecision decision) {
+    if (mandatoryWorkBatchPass || isStopping() || decision.flushRequest != null) {
+      return false;
+    }
+    if ((decision.requested
+            & (WORK_MUTATION | WORK_REMOVAL | WORK_CAPACITY | WORK_READER_NOTIFICATION))
+        != 0) {
+      return false;
+    }
+    if (decision.capacityRetryDue
+        || decision.readerNotificationWork
+        || decision.accessScanActive
+        || decision.ttlDue
+        || decision.ghostRehash
+        || decision.writerLifecycleWork
+        || decision.writerResourceWork
+        || decision.pendingSealed
+        || decision.pendingSafe) {
+      return false;
+    }
+    return durableMailboxDepth.get() < WORK_BATCH_MAILBOX_THRESHOLD;
+  }
+
+  private void parkForWorkBatch() {
+    // One deferred window is the limit: the pass after it must run even if the batch is small.
+    mandatoryWorkBatchPass = true;
+    if (!wakeGate.armIdle()) {
+      return;
+    }
+    clearStaleWakeRequests();
+    if (!wakeGate.finishIdle()) {
+      return;
+    }
+    long parkStart = System.nanoTime();
+    parked = true;
+    parkDeadlineNanos = parkStart + WORK_BATCH_WINDOW_NANOS;
+    try {
+      LockSupport.parkNanos(this, WORK_BATCH_WINDOW_NANOS);
     } finally {
       parkDeadlineNanos = 0L;
       maintenanceParkNanosTotal =
@@ -3211,6 +3257,15 @@ public final class MaintenanceEventLoop
         || reclaimRetryNanos <= nowNanos;
   }
 
+  // While reclaim is reader-blocked, reader-exit notifications are redundant until the retry.
+  // A deep backlog keeps the notifications live: publication must not starve under load.
+  private boolean reclaimNotificationSuppressed() {
+    return reclaimBlocked
+        && reclaimRetryNanos != Long.MAX_VALUE
+        && reclaimRetryNanos > sampleMonotonicNow()
+        && retirements.queuedRecords() < WORK_BATCH_MAILBOX_THRESHOLD;
+  }
+
   private long nextRetryDeadlineNanos(int retirementState, int runnableCheck) {
     long tickerDeadline = Long.MAX_VALUE;
     LogicalAdmission admission = logicalAdmission;
@@ -3219,18 +3274,12 @@ public final class MaintenanceEventLoop
         && capacityRetryNanos != Long.MAX_VALUE) {
       tickerDeadline = Math.min(tickerDeadline, capacityRetryNanos);
     }
-    // An active reader makes reclaim non-runnable. Its actor-installed notification marker wakes
-    // the actor on exit, so exposing the retry deadline here would only create a redundant pass.
+    // Reader-blocked reclaim parks until the retry: notifications are suppressed while
+    // blocked, so the retry deadline is the wake that retries the publication.
     boolean pendingSealed =
         (retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
     if (pendingSealed && reclaimRetryNanos != Long.MAX_VALUE) {
-      boolean activeReaders =
-          (runnableCheck & RUNNABLE_CHECK_READERS) != 0
-              ? (runnableCheck & RUNNABLE_CHECK_ACTIVE_READERS) != 0
-              : hasActiveReaders();
-      if (!activeReaders) {
-        tickerDeadline = Math.min(tickerDeadline, reclaimRetryNanos);
-      }
+      tickerDeadline = Math.min(tickerDeadline, reclaimRetryNanos);
     }
     return tickerDeadline == Long.MAX_VALUE
         ? Long.MAX_VALUE
@@ -3874,39 +3923,20 @@ public final class MaintenanceEventLoop
   }
 
   private void awaitActiveReaders() {
-    boolean interrupted = false;
-    setReaderExitSignal(READER_SIGNAL_HAS_SHUTDOWN_WAITER);
-    try {
-      while (hasActiveReaders()) {
-        if (!readerLifecycleCheckActive) {
-          startReaderLifecycleSweep();
-        }
-        scanTerminatedReaders(READER_LIFECYCLE_SCAN_LIMIT);
-        WriterResourceRegistry resources = writerResources;
-        if (resources != null) {
-          resources.processRetirements();
-        }
-        if (!hasActiveReaders()) {
-          break;
-        }
-        shutdownWaitLock.lock();
-        try {
-          if (hasActiveReaders()) {
-            try {
-              shutdownProgress.awaitNanos(1_000_000L);
-            } catch (InterruptedException interruption) {
-              interrupted = true;
-            }
-          }
-        } finally {
-          shutdownWaitLock.unlock();
-        }
+    // Close is quiesced-only; this poll just covers readers still inside a get.
+    while (hasActiveReaders()) {
+      if (!readerLifecycleCheckActive) {
+        startReaderLifecycleSweep();
       }
-    } finally {
-      clearReaderExitSignal(READER_SIGNAL_HAS_SHUTDOWN_WAITER);
-    }
-    if (interrupted) {
-      Thread.currentThread().interrupt();
+      scanTerminatedReaders(READER_LIFECYCLE_SCAN_LIMIT);
+      WriterResourceRegistry resources = writerResources;
+      if (resources != null) {
+        resources.processRetirements();
+      }
+      if (!hasActiveReaders()) {
+        break;
+      }
+      LockSupport.parkNanos(1_000_000L);
     }
   }
 
@@ -3964,47 +3994,7 @@ public final class MaintenanceEventLoop
   }
 
   private boolean isStopping() {
-    return (readerExitSignals.get() & READER_SIGNAL_STOPPING) != 0L;
-  }
-
-  private void setReaderExitSignal(long signal) {
-    for (;;) {
-      long current = readerExitSignals.get();
-      if ((current & signal) != 0L) {
-        return;
-      }
-      if (readerExitSignals.compareAndSet(current, current | signal)) {
-        return;
-      }
-    }
-  }
-
-  private void clearReaderExitSignal(long signal) {
-    for (;;) {
-      long current = readerExitSignals.get();
-      if ((current & signal) == 0L) {
-        return;
-      }
-      if (readerExitSignals.compareAndSet(current, current & ~signal)) {
-        return;
-      }
-    }
-  }
-
-  private void signalShutdownProgress() {
-    signalShutdownProgress(readerExitSignals.get());
-  }
-
-  private void signalShutdownProgress(long signals) {
-    if ((signals & READER_SIGNAL_HAS_SHUTDOWN_WAITER) == 0L) {
-      return;
-    }
-    shutdownWaitLock.lock();
-    try {
-      shutdownProgress.signalAll();
-    } finally {
-      shutdownWaitLock.unlock();
-    }
+    return stopState.get() != 0L;
   }
 
   private void offerDurable(Object message) {

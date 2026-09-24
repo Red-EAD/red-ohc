@@ -155,7 +155,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void s3FifoStartsNewSmallEntriesInSkipAndSuppressesTheirAccessCount() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
     Entry entry = EntryTestSupport.entry(1, 32, 0x1234_5678_9abc_def1L, 0L);
 
     policy.add(entry);
@@ -172,7 +172,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void s3FifoRequiresASecondGhostReappearanceBeforeMainAdmission() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
     long hash = 0x1234_5678_9abc_def2L;
     Entry firstEviction = EntryTestSupport.entry(1, 33, hash, 0L);
     Entry firstReappearance = EntryTestSupport.entry(1, 33, hash, 0L);
@@ -198,8 +198,8 @@ public class MaintenancePolicyTest {
   }
 
   @Test
-  public void s3SkipConvertsTheOldestEntriesAtTheQuarterSmallBoundary() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+  public void s3SkipConvertsTheOldestEntriesAtTheSkipWeightBoundary() {
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
     Entry oldest = EntryTestSupport.entry(1, 51, 51L, 0L);
     Entry middle = EntryTestSupport.entry(1, 52, 52L, 0L);
     Entry newest = EntryTestSupport.entry(1, 53, 53L, 0L);
@@ -210,7 +210,7 @@ public class MaintenancePolicyTest {
     assertEquals(
         oldest.policyState(),
         Entry.POLICY_S3_SMALL,
-        "the oldest Skip entry must leave first when Skip exceeds 25% of Small");
+        "the oldest Skip entry must leave first when Skip exceeds 15% of Small");
     assertEquals(middle.policyState(), Entry.POLICY_S4_SKIP);
 
     policy.add(newest);
@@ -220,7 +220,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void s3OrdinarySmallNeedsTwoHitsBeforePromotionToMain() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
     Entry first = EntryTestSupport.entry(1, 61, 61L, 0L);
     Entry second = EntryTestSupport.entry(1, 62, 62L, 0L);
 
@@ -245,7 +245,7 @@ public class MaintenancePolicyTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     long value = 0L;
     try {
-      MaintenancePolicy bytePolicy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+      MaintenancePolicy bytePolicy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
       Entry byteEntry = EntryTestSupport.entry(1, 71, 71L, 0L);
       bytePolicy.add(byteEntry);
       assertEquals(byteEntry.policyState(), Entry.POLICY_S4_SKIP);
@@ -282,7 +282,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void s3ExplicitRemovalClearsDeferredGhostEvidence() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
     long hash = 0x1234_5678_9abc_def3L;
     Entry evicted = EntryTestSupport.entry(1, 73, hash, 0L);
     Entry firstReturn = EntryTestSupport.entry(1, 73, hash, 0L);
@@ -302,7 +302,7 @@ public class MaintenancePolicyTest {
 
   @Test
   public void s3MainPromotionClearsDeferredGhostEvidence() {
-    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 4_000L);
+    MaintenancePolicy policy = new MaintenancePolicy(Eviction.S3_FIFO, 8_000L);
     long hash = 0x1234_5678_9abc_def4L;
     Entry evicted = EntryTestSupport.entry(1, 74, hash, 0L);
     Entry firstReturn = EntryTestSupport.entry(1, 74, hash, 0L);

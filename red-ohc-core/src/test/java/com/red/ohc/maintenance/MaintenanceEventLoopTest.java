@@ -24,7 +24,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 import org.jctools.queues.MpscUnboundedArrayQueue;
-import org.jctools.util.PaddedAtomicLong;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
@@ -96,48 +95,6 @@ public class MaintenanceEventLoopTest {
       assertTrue(
           java.util.Arrays.stream(parameterTypes).anyMatch(type -> type == long.class),
           "every constructor must require an explicit native retirement-debt budget");
-    }
-  }
-
-  @Test(timeOut = 5_000L)
-  public void shutdownReaderExitSignalsKeepStopAndWaiterBitsIndependent() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory();
-    ReaderRegistry readers = newReaderRegistry(memory);
-    ReaderSlot reader = new ReaderSlot();
-    readers.register(reader);
-    readers.setValueEpoch(reader, 1L);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
-    boolean started = false;
-    try {
-      loop.start();
-      started = true;
-      loop.stop();
-
-      PaddedAtomicLong signals = (PaddedAtomicLong) getField(loop, "readerExitSignals");
-      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
-      long observed = signals.get();
-      while ((observed & 3L) != 3L && System.nanoTime() < deadline) {
-        Thread.yield();
-        observed = signals.get();
-      }
-      assertEquals(observed & 3L, 3L, "stop and waiter bits must coexist while the actor waits");
-
-      readers.setEpoch(reader, 0L);
-      loop.readerQuiescent(reader);
-      loop.join(2_000L);
-
-      assertFalse(loop.isAlive());
-      assertEquals(signals.get() & 3L, 1L, "only the waiter bit may be cleared on reader exit");
-    } finally {
-      if (started && loop.isAlive()) {
-        readers.setEpoch(reader, 0L);
-        loop.readerQuiescent(reader);
-        loop.stop();
-        loop.join(2_000L);
-      }
-      memory.closeArenas();
     }
   }
 
@@ -571,7 +528,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void blockedRetirementDoesNotExposeRetryDeadlineWhileReaderIsActive()
+  public void blockedRetirementExposesRetryDeadlineWhileReaderIsActive()
       throws Exception {
     AtomicLong nowNanos = new AtomicLong();
     Ticker ticker =
@@ -612,13 +569,15 @@ public class MaintenanceEventLoopTest {
           MaintenanceEventLoop.class.getDeclaredMethod(
               "nextRetryDeadlineNanos", int.class, int.class);
       method.setAccessible(true);
-      assertEquals(
-          method.invoke(
-              loop,
-              decisionRetirementState.getInt(decision),
-              decisionRunnableCheck.getInt(decision)),
-          Long.MAX_VALUE,
-          "a blocked reader must not schedule actor wakeups before quiescence");
+      assertTrue(
+          (Long)
+                  method.invoke(
+                      loop,
+                      decisionRetirementState.getInt(decision),
+                      decisionRunnableCheck.getInt(decision))
+              != Long.MAX_VALUE,
+          "a blocked reader must still expose the retry deadline: notifications are"
+              + " suppressed while blocked, so the retry is the wake that retries publication");
 
       readers.setEpoch(activeReader, 0L);
       decision = captureWorkDecision.invoke(loop, false);
@@ -637,7 +596,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void idleRetryDeadlineReusesTheRunnableReaderSnapshot() throws Exception {
+  public void idleRetryDeadlineExposesTheScheduledRetryWhileReaderActive() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     ReaderRegistry readers = newReaderRegistry(memory);
@@ -683,7 +642,9 @@ public class MaintenanceEventLoopTest {
           MaintenanceEventLoop.class.getDeclaredMethod(
               "nextRetryDeadlineNanos", int.class, int.class);
       retryDeadline.setAccessible(true);
-      assertEquals(retryDeadline.invoke(loop, retirementState, check), Long.MAX_VALUE);
+      assertTrue(
+          (Long) retryDeadline.invoke(loop, retirementState, check) != Long.MAX_VALUE,
+          "a scheduled reclaim retry must expose its deadline even while a reader is active");
     } finally {
       readers.setEpoch(readerIndex, 0L);
       journal.close();
@@ -888,7 +849,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop, () -> false);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext newReader = new ThreadContext(null);
     try {
       retireOne(loop, memory);
