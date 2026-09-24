@@ -402,41 +402,6 @@ public final class ReaderRegistryTest {
     registry.close();
   }
 
-  @Test(timeOut = 5_000L)
-  public void clearWaitsForAnInFlightNativePublicationBeforeUnbindingTheSlot() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory();
-    ReaderRegistry registry = new ReaderRegistry(memory);
-    ReaderSlot slot = new ReaderSlot();
-    registry.register(slot);
-    CountDownLatch clearStarted = new CountDownLatch(1);
-    AtomicReference<Throwable> failure = new AtomicReference<>();
-    Thread clearer =
-        new Thread(
-            () -> {
-              clearStarted.countDown();
-              try {
-                registry.clear();
-              } catch (Throwable unexpected) {
-                failure.compareAndSet(null, unexpected);
-              }
-            });
-    slot.nativePublicationInFlight = true;
-    clearer.start();
-    try {
-      assertTrue(clearStarted.await(1L, TimeUnit.SECONDS));
-      LockSupport.parkNanos(1_000_000L);
-      assertTrue(clearer.isAlive(), "clear must wait for an in-flight native publication");
-      assertSame(slot.registry, registry, "the slot must remain bound while publication is active");
-    } finally {
-      slot.nativePublicationInFlight = false;
-      clearer.join(1_000L);
-      assertFalse(clearer.isAlive(), "clear did not finish after publication completed");
-      assertNull(failure.get());
-      assertNull(slot.registry);
-      registry.close();
-      memory.closeArenas();
-    }
-  }
 
   @Test
   public void ownerAssertionAllowsCloseAfterSlotValidation() throws Exception {
@@ -526,14 +491,6 @@ public final class ReaderRegistryTest {
       executor
           .submit(
               () -> {
-                expectThrows(AssertionError.class, () -> registry.setEpoch(index, 0L));
-                expectThrows(AssertionError.class, () -> registry.setEpoch(slot, 0L));
-                expectThrows(AssertionError.class, () -> registry.setValueEpoch(index, 0L));
-                expectThrows(AssertionError.class, () -> registry.setValueEpoch(slot, 0L));
-                expectThrows(AssertionError.class, () -> registry.setWriterActive(index, false));
-                expectThrows(AssertionError.class, () -> registry.setWriterAdmission(slot, false));
-                expectThrows(AssertionError.class, () -> registry.setReaderState(index, 0L));
-                expectThrows(AssertionError.class, () -> registry.setReaderState(slot, 0L));
                 expectThrows(
                     AssertionError.class, () -> registry.setReaderStateKnownEpoch(slot, 0L));
               })

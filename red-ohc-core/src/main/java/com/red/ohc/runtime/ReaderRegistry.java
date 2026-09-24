@@ -99,7 +99,6 @@ public final class ReaderRegistry {
 
       slot.owner = Thread.currentThread();
       slot.writerResource = null;
-      slot.nativePublicationInFlight = false;
       slot.readerStateAddress = stateAddress;
       slot.registryIndex = index;
       slot.registry = this;
@@ -245,73 +244,37 @@ public final class ReaderRegistry {
   public void setEpoch(int index, long epoch) {
     validateEpoch(epoch);
     SlotStorage current = storage;
-    ReaderSlot slot = beginNativePublication(current, index);
-    try {
-      assertOwner(slot);
-      setEpoch(stateAddress(current, index), epoch);
-    } finally {
-      endNativePublication(slot);
-    }
+    setEpoch(stateAddress(current, index), epoch);
   }
 
   public void setEpoch(ReaderSlot slot, long epoch) {
     validateEpoch(epoch);
     long stateAddress = slot == null ? 0L : slot.readerStateAddress;
-    beginNativePublication(slot, stateAddress);
-    try {
-      assertOwner(slot);
-      setEpoch(stateAddress, epoch);
-    } finally {
-      endNativePublication(slot);
-    }
+    setEpoch(stateAddress, epoch);
   }
 
   /** Publishes the value-protection bit in the one reader QSBR state word. */
   public void setValueEpoch(int index, long epoch) {
     validateEpoch(epoch);
     SlotStorage current = storage;
-    ReaderSlot slot = beginNativePublication(current, index);
-    try {
-      assertOwner(slot);
-      setValueEpoch(stateAddress(current, index), epoch);
-    } finally {
-      endNativePublication(slot);
-    }
+    setValueEpoch(stateAddress(current, index), epoch);
   }
 
   public void setValueEpoch(ReaderSlot slot, long epoch) {
     validateEpoch(epoch);
     long stateAddress = slot == null ? 0L : slot.readerStateAddress;
-    beginNativePublication(slot, stateAddress);
-    try {
-      assertOwner(slot);
-      setValueEpoch(stateAddress, epoch);
-    } finally {
-      endNativePublication(slot);
-    }
+    setValueEpoch(stateAddress, epoch);
   }
 
   /** Publishes writer admission in its own word in the reader's cache-line lane. */
   public void setWriterActive(int index, boolean active) {
     SlotStorage current = storage;
-    ReaderSlot slot = beginNativePublication(current, index);
-    try {
-      assertOwner(slot);
-      setWriterAdmission(stateAddress(current, index), active);
-    } finally {
-      endNativePublication(slot);
-    }
+    setWriterAdmission(stateAddress(current, index), active);
   }
 
   public void setWriterAdmission(ReaderSlot slot, boolean active) {
     long stateAddress = slot == null ? 0L : slot.readerStateAddress;
-    beginNativePublication(slot, stateAddress);
-    try {
-      assertOwner(slot);
-      setWriterAdmission(stateAddress, active);
-    } finally {
-      endNativePublication(slot);
-    }
+    setWriterAdmission(stateAddress, active);
   }
 
   public long epoch(int index) {
@@ -321,59 +284,36 @@ public final class ReaderRegistry {
   /** Returns the one volatile-loaded reader word: epoch plus value protection only. */
   public long readerState(int index) {
     SlotStorage current = storage;
-    ReaderSlot slot = beginNativePublication(current, index);
-    try {
-      return getWordVolatile(stateAddress(current, index));
-    } finally {
-      endNativePublication(slot);
-    }
+    return getWordVolatile(stateAddress(current, index));
   }
 
   public long readerState(ReaderSlot slot) {
     long stateAddress = slot == null ? 0L : slot.readerStateAddress;
-    beginNativePublication(slot, stateAddress);
-    try {
-      return getWordVolatileTrusted(stateAddress);
-    } finally {
-      endNativePublication(slot);
-    }
+    return getWordVolatileTrusted(stateAddress);
   }
 
   /** Publishes an active reader with StoreLoad ordering and a clear with release ordering. */
   public void setReaderState(int index, long state) {
     validateReaderState(state);
     SlotStorage current = storage;
-    ReaderSlot slot = beginNativePublication(current, index);
-    try {
-      assertOwner(slot);
-      setReaderBits(stateAddress(current, index), state);
-    } finally {
-      endNativePublication(slot);
-    }
+    setReaderBits(stateAddress(current, index), state);
   }
 
   public void setReaderState(ReaderSlot slot, long state) {
     long stateAddress = slot == null ? 0L : slot.readerStateAddress;
     validateReaderState(state);
-    beginNativePublication(slot, stateAddress);
-    try {
-      assertOwner(slot);
-      setReaderBitsTrusted(stateAddress, state);
-    } finally {
-      endNativePublication(slot);
-    }
+    setReaderBitsTrusted(stateAddress, state);
   }
 
   /** Publishes a validated reader state without touching writer admission. */
   public void setReaderStateKnownEpoch(ReaderSlot slot, long state) {
     long stateAddress = slot == null ? 0L : slot.readerStateAddress;
-    beginNativePublication(slot, stateAddress);
-    try {
-      assertOwner(slot);
-      setReaderBitsTrusted(stateAddress, state);
-    } finally {
-      endNativePublication(slot);
+    if (slot == null || slot.registry != this || stateAddress == 0L) {
+      throw new IllegalArgumentException("reader slot is not registered with this registry");
     }
+    // Close is quiesced-only; no teardown can race this publication.
+    assertOwner(slot);
+    setReaderBitsTrusted(stateAddress, state);
   }
 
   /** Clears a reader state when shutdown may have concurrently unbound the slot. */
@@ -595,7 +535,6 @@ public final class ReaderRegistry {
     synchronized (registrationLock) {
       closed = true;
       SlotStorage current = storage;
-      awaitNativePublishers(current);
       for (int chunkIndex = 0; chunkIndex < current.slotChunks.length; chunkIndex++) {
         long bits = liveBits(current.liveBitmaps, chunkIndex);
         while (bits != 0L) {
@@ -669,58 +608,6 @@ public final class ReaderRegistry {
   private void growLocked() {
     int newCapacity = storage.slotCapacity << 1;
     storage = storage.grow(memory, newCapacity);
-  }
-
-  /**
-   * Closes the publication gate before unlinking slots. The volatile flag and closed bit form a
-   * two-sided handshake: a publisher that can still store is visible to this scan, while a
-   * publisher arriving after the scan observes the closed gate before touching native memory.
-   */
-  private void awaitNativePublishers(SlotStorage current) {
-    for (;;) {
-      boolean pending = false;
-      for (int chunkIndex = 0; chunkIndex < current.slotChunks.length; chunkIndex++) {
-        long bits = liveBits(current.liveBitmaps, chunkIndex);
-        while (bits != 0L) {
-          int offset = Long.numberOfTrailingZeros(bits);
-          ReaderSlot slot = current.slotChunks[chunkIndex][offset];
-          if (slot != null && slot.nativePublicationInFlight) {
-            pending = true;
-            break;
-          }
-          bits &= bits - 1L;
-        }
-        if (pending) {
-          break;
-        }
-      }
-      if (!pending) {
-        return;
-      }
-      Thread.onSpinWait();
-    }
-  }
-
-  private ReaderSlot beginNativePublication(SlotStorage current, int index) {
-    long stateAddress = stateAddress(current, index);
-    ReaderSlot slot = current.slotChunks[index >> SLOT_CHUNK_SHIFT][index & SLOT_CHUNK_MASK];
-    beginNativePublication(slot, stateAddress);
-    return slot;
-  }
-
-  private void beginNativePublication(ReaderSlot slot, long stateAddress) {
-    if (slot == null) {
-      throw new IllegalArgumentException("reader slot is not registered with this registry");
-    }
-    slot.nativePublicationInFlight = true;
-    if (closed || slot.registry != this || slot.readerStateAddress != stateAddress) {
-      slot.nativePublicationInFlight = false;
-      throw new IllegalArgumentException("reader slot is not registered with this registry");
-    }
-  }
-
-  private static void endNativePublication(ReaderSlot slot) {
-    slot.nativePublicationInFlight = false;
   }
 
   private static void setEpoch(long address, long epoch) {

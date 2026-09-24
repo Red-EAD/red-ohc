@@ -10,12 +10,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -104,12 +100,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final AtomicLong totalLoadTime = new AtomicLong();
   private final Object lifecycleLock = new Object();
   private final AtomicInteger closeState = new AtomicInteger(OPEN);
-  private final AtomicBoolean shutdownStarted = new AtomicBoolean();
-  private final AtomicReference<Thread> closeLeader = new AtomicReference<>();
   private final AtomicInteger activeBulkOperations = new AtomicInteger();
-  private final ReentrantLock lifecycleWaitLock = new ReentrantLock();
-  private final Condition lifecycleProgress = lifecycleWaitLock.newCondition();
-  private final AtomicInteger lifecycleWaiters = new AtomicInteger();
   private volatile boolean closing;
   private volatile Runnable flushLifecycleHookForTest;
   private volatile PostChargeFailurePoint postChargeFailurePointForTest;
@@ -169,7 +160,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     worker.bindLogicalAdmission(logicalAdmission);
     worker.bindWriterLifecycleJournal(writerLifecycleJournal);
     worker.bindWriterResourceRegistry(writerResources);
-    this.readerGuard = new ReaderGuard(worker, () -> closing);
+    this.readerGuard = new ReaderGuard(worker);
     this.mapViews = new MapViews<>(this);
     worker.start();
   }
@@ -1431,7 +1422,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Object value,
       long requestedExpiry,
       boolean deferMaintenanceWake) {
-    worker.throwIfUnavailable();
     // These values are deterministic for one public put. Compute them once before entering the
     // retry loop; retries reuse the encoded key/value metadata while preparing a fresh candidate.
     int valueLength;
@@ -5107,6 +5097,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         snapshot.allocatorTrimmedBytesTotal);
   }
 
+  /**
+   * Quiesced-only teardown for tests and tools; the cache is process-lifetime in production
+   * and must have no concurrent readers, writers, or bulk operations when close is called.
+   */
   @Override
   public void close() {
     if (isUserCallbackThread()) {
@@ -5123,44 +5117,17 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         closeState.set(CLOSING);
         closing = true;
         worker.beginClosing();
+        worker.stop();
       }
     }
-    long deadline =
-        System.nanoTime()
-            + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(1L, closeTimeoutMillis));
-    Thread current = Thread.currentThread();
-    if (closeLeader.compareAndSet(null, current)) {
-      try {
-        if (!awaitCloseAdmissions(deadline)) {
-          throw new IllegalStateException(
-              "close timed out with active writers="
-                  + readers.activeWriterCount()
-                  + ", bulk operations="
-                  + activeBulkOperations.get());
-        }
-        if (shutdownStarted.compareAndSet(false, true)) {
-          worker.stop();
-        }
-      } finally {
-        closeLeader.compareAndSet(current, null);
-      }
-    }
-    long remainingNanos = deadline - System.nanoTime();
-    long timeout =
-        Math.max(
-            1L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(Math.max(0L, remainingNanos)));
     try {
-      worker.join(timeout);
+      worker.join(Math.max(1L, closeTimeoutMillis));
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException("interrupted while closing", e);
     }
     if (worker.isAlive()) {
-      throw new IllegalStateException(
-          "close timed out with active readers, writers, or bulk operations="
-              + readers.activeWriterCount()
-              + ", bulk operations="
-              + activeBulkOperations.get());
+      throw new IllegalStateException("close timed out; quiesce readers and writers first");
     }
     worker.assertLogicalAdmissionStable(logicalAdmission);
     synchronized (lifecycleLock) {
@@ -5215,7 +5182,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (activeBulkOperations.decrementAndGet() == 0) {
       worker.requestMaintenance();
     }
-    signalLifecycleProgress();
   }
 
   private boolean isUserCallbackThread() {
@@ -5517,9 +5483,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     boolean activated = false;
     boolean admitted = false;
     try {
-      if (closeState.get() != OPEN) {
-        return null;
-      }
       if (!context.hasWriterResources()) {
         WriterResource resource = writerResources.acquire();
         context.bindWriterResource(resource);
@@ -5541,7 +5504,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
         if (!context.isWriterEntered()) {
           worker.setWriterActive(context, false);
-          signalLifecycleProgress();
         }
       }
     }
@@ -5550,48 +5512,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private void exitWriter(ThreadContext context) {
     worker.setWriterActive(context, false);
     context.exitWriter();
-    signalLifecycleProgress();
-  }
-
-  private boolean awaitCloseAdmissions(long deadlineNanos) {
-    boolean interrupted = false;
-    lifecycleWaiters.incrementAndGet();
-    lifecycleWaitLock.lock();
-    try {
-      while (
-          readers.hasActiveWriter()
-              || activeBulkOperations.get() != 0) {
-        long remaining = deadlineNanos - System.nanoTime();
-        if (remaining <= 0L) {
-          return false;
-        }
-        try {
-          lifecycleProgress.awaitNanos(remaining);
-        } catch (InterruptedException interruption) {
-          interrupted = true;
-          return false;
-        }
-      }
-      return true;
-    } finally {
-      lifecycleWaitLock.unlock();
-      lifecycleWaiters.decrementAndGet();
-      if (interrupted) {
-        Thread.currentThread().interrupt();
-      }
-    }
-  }
-
-  private void signalLifecycleProgress() {
-    if (lifecycleWaiters.get() == 0) {
-      return;
-    }
-    lifecycleWaitLock.lock();
-    try {
-      lifecycleProgress.signalAll();
-    } finally {
-      lifecycleWaitLock.unlock();
-    }
   }
 
   private static void hit(ThreadContext context, Entry entry) {

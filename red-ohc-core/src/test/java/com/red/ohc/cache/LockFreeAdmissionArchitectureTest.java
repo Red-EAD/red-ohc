@@ -14,15 +14,12 @@ import com.red.ohc.maintenance.LogicalAdmission;
 /** Structural contracts for the lock-free data-plane admission path. */
 public final class LockFreeAdmissionArchitectureTest {
   @Test
-  public void cacheKeepsOnlyTheLifecycleWaitLock() {
-    int lifecycleWaitLocks = 0;
+  public void cacheUsesNoReentrantLocksOnTheLifecyclePath() {
     for (Field field : OffHeapCache.class.getDeclaredFields()) {
-      if (ReentrantLock.class.isAssignableFrom(field.getType())) {
-        lifecycleWaitLocks++;
-        assertTrue(field.getName().equals("lifecycleWaitLock"));
-      }
+      assertFalse(
+          ReentrantLock.class.isAssignableFrom(field.getType()),
+          "close is quiesced-only; the lifecycle path must stay lock-free: " + field.getName());
     }
-    assertTrue(lifecycleWaitLocks == 1);
   }
 
   @Test

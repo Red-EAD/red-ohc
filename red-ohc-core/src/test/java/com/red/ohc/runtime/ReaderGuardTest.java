@@ -28,7 +28,7 @@ public class ReaderGuardTest {
             1 << 20,
             Eviction.LRU,
             readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop, () -> false);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
@@ -60,7 +60,7 @@ public class ReaderGuardTest {
             Eviction.LRU,
             readers,
             Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop, () -> false);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enterAfterAdmission(context));
@@ -90,16 +90,15 @@ public class ReaderGuardTest {
             1 << 20,
             Eviction.LRU,
             readers, Long.MAX_VALUE);
-    AtomicInteger closeChecks = new AtomicInteger();
-    ReaderGuard guard = new ReaderGuard(loop, () -> closeChecks.getAndIncrement() != 0);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
-      assertFalse(
-          guard.enter(context),
-          "close after epoch publication must reject the reader instead of letting it race shutdown"
-              + " free");
+      // Close is quiesced-only now: a reader rejected by an unbinding registry must fail
+      // cleanly instead of dereferencing freed native memory.
+      loop.beginClosing();
+      readers.clear();
+      assertFalse(guard.enter(context));
       assertEquals(context.readerPublishedEpoch(), 0L);
-      assertEquals(readers.readerState(context.readerSlotIndex()), 0L);
     } finally {
       readers.clear();
       readers.close();
@@ -120,20 +119,11 @@ public class ReaderGuardTest {
             Eviction.LRU,
             readers,
             Long.MAX_VALUE);
-    AtomicInteger closeChecks = new AtomicInteger();
-    ReaderGuard guard =
-        new ReaderGuard(
-            loop,
-            () -> {
-              if (closeChecks.getAndIncrement() == 0) {
-                loop.beginClosing();
-                readers.clear();
-                return false;
-              }
-              return true;
-            });
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
+      loop.beginClosing();
+      readers.clear();
       assertFalse(guard.enter(context));
       assertFalse(context.isRegistered());
       assertEquals(context.readerPublishedEpoch(), 0L);
@@ -156,7 +146,7 @@ public class ReaderGuardTest {
             1 << 20,
             Eviction.LRU,
             readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop, () -> false);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
@@ -186,7 +176,7 @@ public class ReaderGuardTest {
             1 << 20,
             Eviction.LRU,
             readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop, () -> false);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enterLookupAfterAdmission(context));
@@ -226,7 +216,7 @@ public class ReaderGuardTest {
     Field requestedWorkField = MaintenanceEventLoop.class.getDeclaredField("requestedWork");
     requestedWorkField.setAccessible(true);
     AtomicInteger requestedWork = (AtomicInteger) requestedWorkField.get(loop);
-    ReaderGuard guard = new ReaderGuard(loop, () -> false);
+    ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
