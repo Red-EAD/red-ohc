@@ -274,6 +274,11 @@ public final class Entry {
   }
 
   public void finishWriter() {
+    finishWriterReturningStateWord();
+  }
+
+  /** Returns the word whose CAS released the claim; it carries any retry bit set under it. */
+  public long finishWriterReturningStateWord() {
     long address = stateWordAddress();
     while (true) {
       long current = NativeMemory.getLongVolatile(address);
@@ -291,9 +296,14 @@ public final class Entry {
             notifyAll();
           }
         }
-        return;
+        return current;
       }
     }
+  }
+
+  /** Retry-bit test on the word returned by the releasing CAS; avoids one volatile load. */
+  public static boolean mutationRetryRequestedInReleasedWord(long releasedWord) {
+    return (pendingFlags(releasedWord) & PENDING_RETRY) != 0;
   }
 
   public long generation() {
@@ -363,6 +373,11 @@ public final class Entry {
         return true;
       }
     }
+  }
+
+  /** Extends the scheduled tick under the writer claim; the wheel self-heals the stale link. */
+  public void extendTimerDeadlineTickAfterWriterClaim(long tick) {
+    NativeMemory.putLongRelease(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET, tick);
   }
 
   /**

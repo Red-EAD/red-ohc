@@ -462,7 +462,7 @@ public final class TimerWheel implements AutoCloseable {
     return (cycle + 1L + distance) << shift;
   }
 
-  private static long ceilTick(long nanos) {
+  public static long ceilTick(long nanos) {
     long quotient = nanos / TICK_NANOS;
     return nanos % TICK_NANOS == 0L ? quotient : quotient + 1L;
   }

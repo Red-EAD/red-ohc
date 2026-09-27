@@ -44,6 +44,7 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.EntryLinks;
 import com.red.ohc.maintenance.LogicalAdmission;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
+import com.red.ohc.maintenance.TimerWheel;
 import com.red.ohc.maintenance.RetirementJournal;
 import com.red.ohc.maintenance.RetirementSegment;
 import com.red.ohc.maintenance.WriterLifecycleJournal;
@@ -2544,6 +2545,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     boolean writerHeld = true;
     boolean residenceSampled = false;
     long residenceCreatedAtMillis = 0L;
+    long releasedStateWord = 0L;
     Throwable operationFailure = null;
     try {
       if (!retirementLane.reserve(retirementReservation)) {
@@ -2561,8 +2563,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       published = true;
       retirementLane.commit(retirementReservation);
       retirementPrepared = false;
+      releasedStateWord = releaseWriterReturningState(entry, deferMaintenanceWake);
       writerHeld = false;
-      releaseWriter(entry, deferMaintenanceWake);
       if (residenceSampled) {
         worker.recordResidenceSample(residenceCreatedAtMillis, ticker.currentTimeMillis());
       }
@@ -2592,7 +2594,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
       }
       try {
-        if (entry.claimMutationRetry()) {
+        boolean retryRequested;
+        if (releasedStateWord == 0L) {
+          retryRequested = entry.claimMutationRetry();
+        } else {
+          retryRequested = Entry.mutationRetryRequestedInReleasedWord(releasedStateWord);
+          if (retryRequested) {
+            entry.claimMutationRetry();
+          }
+        }
+        if (retryRequested) {
           enqueueWriterMutationHint(
               context,
               entry,
@@ -5377,6 +5388,21 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     releaseWriter(entry, deferMaintenanceWake, true);
   }
 
+  /** Releases a writer and reports the released state word for the retry-bit epilogue. */
+  private long releaseWriterReturningState(Entry entry, boolean deferMaintenanceWake) {
+    long released = entry.finishWriterReturningStateWord();
+    if (!deferMaintenanceWake) {
+      // The actor snapshot is the only writer-side capacity signal; the ledger sum stays on the
+      // actor. A capacity pass blocked on this writer is the exceptional case and needs a wake.
+      if (logicalAdmission.isOverTarget()) {
+        worker.requestCapacityMaintenance();
+      } else {
+        worker.requestCapacityMaintenanceIfBlocked(entry);
+      }
+    }
+    return released;
+  }
+
   /** Releases a writer with an explicit capacity-wake decision for coalesced publish paths. */
   private void releaseWriter(
       Entry entry,
@@ -5621,11 +5647,29 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     long oldDeadlineNanos = ValueBlock.deadlineNanos(oldValue);
     return oldDeadlineNanos != newDeadlineNanos
-        && !worker.canMergeTtlUpdate(
-            entry,
-            oldDeadlineNanos,
-            newDeadlineNanos,
-            context.writeMonotonicNowNanos());
+        && !canExtendTimerDeadline(
+            entry, oldDeadlineNanos, newDeadlineNanos, context.writeMonotonicNowNanos());
+  }
+
+  /**
+   * Pure extensions of a live deadline are applied by the writer under its claim: the wheel
+   * self-heals a stale link by re-adding with the current deadline when the old slot fires.
+   * Shrinks, TTL transitions, and first schedules still need the maintenance path.
+   */
+  private boolean canExtendTimerDeadline(
+      Entry entry, long oldDeadlineNanos, long newDeadlineNanos, long writerNowNanos) {
+    if (entry == null
+        || oldDeadlineNanos == MonotonicDeadlineClock.NO_DEADLINE
+        || newDeadlineNanos == MonotonicDeadlineClock.NO_DEADLINE
+        || newDeadlineNanos < oldDeadlineNanos
+        || writerNowNanos == Long.MIN_VALUE
+        || oldDeadlineNanos <= writerNowNanos
+        || !entry.timerScheduled()) {
+      return false;
+    }
+    entry.extendTimerDeadlineTickAfterWriterClaim(
+        TimerWheel.ceilTick(newDeadlineNanos));
+    return true;
   }
 
   private long resolveDeadline(long requestedExpiry) {

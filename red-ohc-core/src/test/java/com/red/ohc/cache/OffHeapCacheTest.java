@@ -533,8 +533,8 @@ public class OffHeapCacheTest {
       cache.put("key", "newer", 10_100L);
       assertEquals(
           lifecycleOffers.get(),
-          1,
-          "an extension into another timer slot must retain the maintenance mutation");
+          0,
+          "a pure extension into another timer slot self-heals in the wheel, no mutation");
     } finally {
       hook.invoke(worker(cache), (Object) null);
       cache.close();
