@@ -4,23 +4,26 @@ import com.red.ohc.api.EncodedKey;
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.NativeMemory;
 
-/** Reusable serialized lookup key; its packed identity is computed at most once per operation. */
+/** Reusable serialized lookup key; its CHM hash is computed at most once per operation. */
 public final class LookupKey {
   private byte[] bytes;
-  private int keyIndex;
+  private int length;
+  private int hash;
 
   public void set(byte[] bytes, int length) {
     if (this.bytes != bytes) {
       this.bytes = bytes;
     }
-    this.keyIndex = (KeyHash.hash(bytes, 0, length) << 8) | length;
+    this.length = length;
+    this.hash = KeyHash.hash(bytes, 0, length);
   }
 
   /** Binds an immutable encoded key without hashing its bytes a second time. */
   public void set(byte[] target, EncodedKey key) {
     key.copyTo(target, 0);
     this.bytes = target;
-    this.keyIndex = key.keyIndex();
+    this.length = key.length();
+    this.hash = key.hash();
   }
 
   public byte[] bytes() {
@@ -28,20 +31,16 @@ public final class LookupKey {
   }
 
   public int length() {
-    return keyIndex & 0xff;
-  }
-
-  public int keyIndex() {
-    return keyIndex;
+    return length;
   }
 
   public int hash() {
-    return keyIndex >>> 8;
+    return hash;
   }
 
   @Override
   public int hashCode() {
-    return keyIndex >>> 8;
+    return hash;
   }
 
   @Override
@@ -53,8 +52,7 @@ public final class LookupKey {
       return false;
     }
     Entry entry = (Entry) other;
-    int length = keyIndex & 0xff;
-    return entry.keyIndex() == keyIndex
+    return entry.keyLength() == length
         && (length == 0 || NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, length));
   }
 }

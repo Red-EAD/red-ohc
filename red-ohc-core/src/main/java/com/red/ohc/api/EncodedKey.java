@@ -5,17 +5,14 @@ import java.util.Objects;
 
 import com.red.ohc.codec.KeyHash;
 
-/** Immutable, pre-serialized key with the packed identity (hash and length) cached. */
+/** Immutable, pre-serialized key with the 32-bit CHM hash cached. */
 public final class EncodedKey {
-  /** Serialized keys beyond this length are rejected by every cache operation. */
-  public static final int MAX_KEY_LENGTH = 0xff;
-
   private final byte[] bytes;
-  final int keyIndex;
+  final int hash;
 
-  private EncodedKey(byte[] bytes, int keyIndex) {
+  private EncodedKey(byte[] bytes, int hash) {
     this.bytes = bytes;
-    this.keyIndex = keyIndex;
+    this.hash = hash;
   }
 
   public static EncodedKey copyOf(byte[] bytes, int length) {
@@ -23,11 +20,8 @@ public final class EncodedKey {
     if (length < 0 || length > bytes.length) {
       throw new IllegalArgumentException("invalid encoded key length");
     }
-    if (length > MAX_KEY_LENGTH) {
-      throw new IllegalArgumentException("encoded key exceeds " + MAX_KEY_LENGTH + " bytes");
-    }
     byte[] copy = Arrays.copyOf(bytes, length);
-    return new EncodedKey(copy, (KeyHash.hash(copy, 0, copy.length) << 8) | copy.length);
+    return new EncodedKey(copy, KeyHash.hash(copy, 0, copy.length));
   }
 
   public static EncodedKey copyOf(byte[] bytes) {
@@ -52,17 +46,13 @@ public final class EncodedKey {
     System.arraycopy(bytes, 0, target, targetOffset, bytes.length);
   }
 
-  public int keyIndex() {
-    return keyIndex;
-  }
-
   public int hash() {
-    return keyIndex >>> 8;
+    return hash;
   }
 
   @Override
   public int hashCode() {
-    return keyIndex >>> 8;
+    return hash;
   }
 
   @Override
@@ -74,6 +64,6 @@ public final class EncodedKey {
       return false;
     }
     EncodedKey key = (EncodedKey) other;
-    return keyIndex == key.keyIndex && Arrays.equals(bytes, key.bytes);
+    return hash == key.hash && Arrays.equals(bytes, key.bytes);
   }
 }

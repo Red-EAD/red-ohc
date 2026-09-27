@@ -41,7 +41,8 @@ public final class EntryTestSupport {
       WriterArena arena, int keyLength, int chmHash, long keyHash, long valueAddress) {
     long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
     long address = arena.allocate(allocation);
-    Entry entry = new Entry(address, (((int) keyHash & 0xff_ffff) << 8) | keyLength, valueAddress);
+    Entry entry = new Entry(address, keyLength, valueAddress);
+    entry.initializeKeyHash((int) keyHash);
     entry.initializeNativeMetadata();
     return entry;
   }

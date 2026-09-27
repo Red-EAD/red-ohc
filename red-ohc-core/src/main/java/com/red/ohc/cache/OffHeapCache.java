@@ -817,7 +817,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     try {
       NativeMemory.copy(keyBytes, 0, address, keyLength);
       Entry probe =
-          new Entry(address, lookup.keyIndex(), 0L);
+          new Entry(address, keyLength, 0L);
+      probe.initializeKeyHash(lookup.hash());
       probe.initializeNativeMetadata();
       probe.currentValueAllocation(0L);
       return probe;
@@ -2716,9 +2717,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry entry =
           new Entry(
               keyAddress,
-              (hash << 8) | keyLength,
+              keyLength,
               Entry.tagValueAddress(
                   valueAddress, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE));
+      entry.initializeKeyHash(hash);
       entry.initializeNativeMetadata();
       entry.currentValueAllocation(valueAllocation);
       return entry;

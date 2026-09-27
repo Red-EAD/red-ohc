@@ -13,61 +13,61 @@ import com.red.ohc.codec.KeyHash;
 import com.red.ohc.codec.LookupKey;
 import com.red.ohc.storage.NativeMemory;
 
-/** The native key block is headerless: bytes start at the block address, identity is packed. */
+/**
+ * The native key block is headerless: bytes start at the block address and the immutable 32-bit
+ * hash lives in the native prefix slot at +48.
+ */
 public final class KeyIndexHeaderTest {
   @Test
-  public void keyBytesStartAtTheBlockAddress() {
+  public void keyBytesStartAtTheBlockAddressAndHashLivesInThePrefix() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     byte[] bytes = fill(16);
-    long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(16);
-    long address = memory.allocate(allocation);
+    long allocation = Entry.keyAllocationLengthForKeyLength(16);
+    long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
     try {
       NativeMemory.copy(bytes, 0, address, 16);
-      Entry entry = new Entry(address, packed(bytes), 0L);
+      Entry entry = new Entry(address, 16, 0L);
+      entry.initializeKeyHash(0x9b7f4601);
       assertEquals(address, entry.nativeKeyBytesAddress());
       assertTrue(NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, 16));
+      assertEquals(NativeMemory.getInt(address - 16L), 0x9b7f4601);
+      assertEquals(entry.keyHash(), 0x9b7f4601);
+      assertEquals(entry.hashCode(), 0x9b7f4601);
     } finally {
-      memory.free(address, allocation);
+      memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
       memory.closeArenas();
     }
   }
 
   @Test
-  public void packedKeyIndexCarriesHashAndLength() {
+  public void negativeHashRoundTripsThroughThePrefixSlot() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
-    byte[] bytes = fill(16);
     long allocation = Entry.keyAllocationLengthForKeyLength(16);
-    long address = memory.allocate(allocation);
+    long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
     try {
-      Entry entry = new Entry(address, packed(bytes), 0L);
-      assertEquals(entry.keyLength(), 16);
-      assertEquals(entry.keyHash(), KeyHash.hash(bytes, 0, 16));
-      assertEquals(entry.hashCode(), entry.keyHash());
-      assertTrue(entry.keyHash() >= 0);
-      assertTrue(entry.keyHash() <= 0xff_ffff);
+      Entry entry = new Entry(address, 16, 0L);
+      entry.initializeKeyHash(0x9b7f4601 | Integer.MIN_VALUE);
+      assertEquals(entry.keyHash(), 0x9b7f4601 | Integer.MIN_VALUE);
     } finally {
-      memory.free(address, allocation);
+      memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
       memory.closeArenas();
     }
   }
 
   @Test
-  public void entryAndLookupAgreeOnThePackedIdentity() {
+  public void entryAndLookupAgreeOnTheHash() {
     byte[] bytes = fill(16);
-    while (KeyHash.hash(bytes, 0, 16) < 0x80_0000) {
-      bytes[0]++;
-    }
     NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(16);
-    long address = memory.allocate(allocation);
+    long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
     try {
       NativeMemory.copy(bytes, 0, address, 16);
-      Entry entry = new Entry(address, packed(bytes), 0L);
+      Entry entry = new Entry(address, 16, 0L);
+      entry.initializeKeyHash(KeyHash.hash(bytes, 0, 16));
       LookupKey lookup = new LookupKey();
       lookup.set(bytes, 16);
 
       assertEquals(lookup.hashCode(), entry.hashCode());
-      assertEquals(lookup.keyIndex(), entry.keyIndex());
       assertTrue(lookup.equals(entry));
 
       byte[] mutated = bytes.clone();
@@ -76,7 +76,7 @@ public final class KeyIndexHeaderTest {
       other.set(mutated, 16);
       assertFalse(other.equals(entry));
     } finally {
-      memory.free(address, allocation);
+      memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
       memory.closeArenas();
     }
   }
@@ -103,10 +103,6 @@ public final class KeyIndexHeaderTest {
       double z = (chi2 - (buckets - 1)) / Math.sqrt(2.0 * (buckets - 1));
       assertTrue(Math.abs(z) < 5, "bits=" + bits + ", chi2/df=" + (chi2 / (buckets - 1)));
     }
-  }
-
-  private static int packed(byte[] bytes) {
-    return (KeyHash.hash(bytes, 0, bytes.length) << 8) | bytes.length;
   }
 
   private static byte[] fill(int length) {

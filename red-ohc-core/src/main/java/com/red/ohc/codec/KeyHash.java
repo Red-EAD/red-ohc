@@ -3,14 +3,13 @@ package com.red.ohc.codec;
 import com.red.ohc.storage.NativeMemory;
 
 /**
- * Canonical 24-bit key hash over serialized bytes. The hash values are process-internal
+ * Canonical 32-bit key hash over serialized bytes. The hash values are process-internal
  * (insert and lookup share this function) and never persisted, so the function may change.
  */
 public final class KeyHash {
   private static final long P1 = 0xe7037ed1a0b428dbL;
   private static final long P2 = 0x8ebc6af09c88c6e3L;
   private static final long P3 = 0xa0761d6478bd642fL;
-  private static final long MASK24 = 0xff_ffffL;
 
   /**
    * Head and tail overlapping reads cover every length; middle bytes fold through a
@@ -52,7 +51,7 @@ public final class KeyHash {
     long x = a ^ m ^ P1 ^ length;
     long y = b ^ P2;
     long folded = (x * y) ^ Math.multiplyHigh(x, y);
-    return (int) (folded & MASK24);
+    return (int) folded;
   }
 
   private KeyHash() {}

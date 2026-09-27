@@ -4,7 +4,6 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -37,7 +36,6 @@ public final class KeyHashTest {
 
     EncodedKey encoded = EncodedKey.copyOf(bytes);
     assertEquals(encoded.hash(), lookup.hash());
-    assertEquals(encoded.keyIndex(), lookup.keyIndex());
   }
 
   @Test
@@ -103,62 +101,23 @@ public final class KeyHashTest {
   }
 
   @Test
-  public void keysBeyondThePackedLengthCapAreRejected() {
-    byte[] tooLong = new byte[EncodedKey.MAX_KEY_LENGTH + 1];
-    try {
-      EncodedKey.copyOf(tooLong);
-      fail("encoded keys beyond the cap must be rejected");
-    } catch (IllegalArgumentException expected) {
-      // expected
-    }
-    try {
-      Entry.keyDataAllocationLength(EncodedKey.MAX_KEY_LENGTH + 1);
-      fail("allocation lengths beyond the cap must be rejected");
-    } catch (IllegalArgumentException expected) {
-      // expected
-    }
-    CacheSerializer<byte[]> serializer =
-        new CacheSerializer<byte[]>() {
-          @Override
-          public void serialize(byte[] value, ByteBuffer buffer) {
-            buffer.put(value);
-          }
-
-          @Override
-          public byte[] deserialize(ByteBuffer buffer) {
-            throw new UnsupportedOperationException();
-          }
-
-          @Override
-          public int serializedSize(byte[] value) {
-            return value.length;
-          }
-        };
-    try {
-      KeyEncoder.encode(serializer, tooLong, new ThreadContext(null));
-      fail("encoded keys beyond the cap must be rejected at the encoder boundary");
-    } catch (IllegalArgumentException expected) {
-      // expected
-    }
-  }
-
-  @Test
   public void equalIdentitiesStillRequireAnExactNativeKeyMatch() {
     byte[] lookupBytes = "hello".getBytes(StandardCharsets.US_ASCII);
     byte[] storedBytes = "world".getBytes(StandardCharsets.US_ASCII);
     NativeMemory.Memory memory = new NativeMemory.Memory();
     long allocation = Entry.keyAllocationLengthForKeyLength(storedBytes.length);
-    long address = memory.allocate(allocation);
+    long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
     try {
       NativeMemory.copy(storedBytes, 0, address, storedBytes.length);
       LookupKey lookup = new LookupKey();
       lookup.set(lookupBytes, lookupBytes.length);
       // Deliberately hand the entry the lookup's identity so only the bytes can differ.
-      Entry entry = new Entry(address, lookup.keyIndex(), 0L);
+      Entry entry = new Entry(address, storedBytes.length, 0L);
+      entry.initializeKeyHash(lookup.hash());
 
       assertFalse(lookup.equals(entry));
     } finally {
-      memory.free(address, allocation);
+      memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
       memory.closeArenas();
     }
   }
@@ -168,17 +127,18 @@ public final class KeyHashTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
     try {
-      for (int length : new int[] {0, 1, 7, 8, 9, 16, 17, 63, 64, 127, 128, 129, 255}) {
+      for (int length : new int[] {0, 1, 7, 8, 9, 16, 17, 63, 64, 127, 128, 129, 255, 256, 257, 300}) {
         byte[] bytes = new byte[length];
         for (int index = 0; index < length; index++) {
           bytes[index] = (byte) (index * 31 + length);
         }
         long allocation = Entry.keyAllocationLengthForKeyLength(length);
-        long address = memory.allocate(allocation);
+        long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
         try {
           NativeMemory.copy(bytes, 0, address, length);
           lookup.set(bytes, length);
-          Entry entry = new Entry(address, lookup.keyIndex(), 0L);
+          Entry entry = new Entry(address, length, 0L);
+          entry.initializeKeyHash(lookup.hash());
 
           assertTrue(lookup.equals(entry), "length=" + length);
           if (length != 0) {
@@ -187,7 +147,7 @@ public final class KeyHashTest {
             assertFalse(lookup.equals(entry), "mismatch length=" + length);
           }
         } finally {
-          memory.free(address, allocation);
+          memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
         }
       }
     } finally {
@@ -200,17 +160,18 @@ public final class KeyHashTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
     try {
-      for (int length : new int[] {1, 9, 16, 24, 64, 255}) {
+      for (int length : new int[] {1, 9, 16, 24, 64, 255, 300}) {
         byte[] bytes = new byte[length];
         for (int index = 0; index < length; index++) {
           bytes[index] = (byte) (index * 17 + length);
         }
         long allocation = Entry.keyAllocationLengthForKeyLength(length);
-        long address = memory.allocate(allocation);
+        long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
         try {
           NativeMemory.copy(bytes, 0, address, length);
           lookup.set(bytes, length);
-          Entry entry = new Entry(address, lookup.keyIndex(), 0L);
+          Entry entry = new Entry(address, length, 0L);
+          entry.initializeKeyHash(lookup.hash());
 
           for (int mismatch :
               new int[] {
@@ -232,7 +193,7 @@ public final class KeyHashTest {
             }
           }
         } finally {
-          memory.free(address, allocation);
+          memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
         }
       }
     } finally {
@@ -276,7 +237,7 @@ public final class KeyHashTest {
           int flipped = KeyHash.hash(base, 0, length);
           base[bit >> 3] ^= (byte) (1 << (bit & 7));
           flips += Integer.bitCount(baseline ^ flipped);
-          observations += 24;
+          observations += 32;
         }
       }
       double rate = (double) flips / observations;
@@ -301,7 +262,7 @@ public final class KeyHashTest {
         pairs++;
       }
     }
-    double birthdayBound = (double) count * (count - 1) / (1L << 25);
+    double birthdayBound = (double) count * (count - 1) / (1L << 33);
     assertTrue(pairs <= birthdayBound * 2, "pairs=" + pairs + ", bound=" + birthdayBound);
   }
 

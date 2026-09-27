@@ -39,7 +39,7 @@ public class HeapLayoutTest {
         new HashSet<>(
             Arrays.asList(
                 "nativeKeyAddress",
-                "keyIndex",
+                "keyLength",
                 "valueAddress")));
   }
 

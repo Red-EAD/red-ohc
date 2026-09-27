@@ -54,7 +54,7 @@ public final class Entry {
   private static final long TIMER_LOCATION_OFFSET = 28L;
   private static final long TIMER_DEADLINE_OFFSET = 32L;
   private static final long POLICY_BYTE_WEIGHT_OFFSET = 40L;
-  /** Unified native header: allocator metadata occupies +48 and +56. */
+  /** Unified native header: +48 holds the key hash, +56 the allocator handle. */
   public static final long NATIVE_METADATA_BYTES = 64L;
   private static final long MUTATION_VERSION_SHIFT = 32L;
   private static final long VERSION_MASK = 0xffffffffL;
@@ -71,29 +71,32 @@ public final class Entry {
   private static final long VALUE_ALLOCATION_MASK = Long.MAX_VALUE;
 
   public final long nativeKeyAddress;
-  /** Packed key identity: 24-bit hash above the low 8 length bits. */
-  public final int keyIndex;
+  public final int keyLength;
 
   /** Eight-byte aligned native value address; low bits carry TTL/lifecycle tags. */
   public volatile long valueAddress;
 
-  public Entry(long nativeKeyAddress, int keyIndex, long valueAddress) {
+  public Entry(long nativeKeyAddress, int keyLength, long valueAddress) {
     this.nativeKeyAddress = nativeKeyAddress;
-    this.keyIndex = keyIndex;
+    if (keyLength < 0) {
+      throw new IllegalArgumentException("keyLength must be non-negative");
+    }
+    this.keyLength = keyLength;
     this.valueAddress = valueAddress;
   }
 
-  /** Packed key identity: 24-bit hash in the high bits, key length in the low 8. */
-  public int keyIndex() {
-    return keyIndex;
+  /** Immutable 32-bit key hash stored in the native prefix at +48; 0 without a native block. */
+  public int keyHash() {
+    return nativeKeyAddress == 0L ? 0 : NativeMemory.getInt(nativeKeyAddress - 16L);
   }
 
-  public int keyHash() {
-    return keyIndex >>> 8;
+  /** Writes the immutable key hash; must run before the entry is published to the CHM. */
+  public void initializeKeyHash(int keyHash) {
+    NativeMemory.putInt(nativeKeyAddress - 16L, keyHash);
   }
 
   public int keyLength() {
-    return keyIndex & 0xff;
+    return keyLength;
   }
 
   public long nativeKeyAddress() {
@@ -105,8 +108,8 @@ public final class Entry {
   }
 
   public static long keyDataAllocationLength(int keyLength) {
-    if (keyLength < 0 || keyLength > 0xff) {
-      throw new IllegalArgumentException("keyLength must be in [0, 255]");
+    if (keyLength < 0) {
+      throw new IllegalArgumentException("keyLength must be non-negative");
     }
     return Math.max(8L, CacheMath.roundUpTo8((long) keyLength));
   }
@@ -229,11 +232,11 @@ public final class Entry {
     Entry entry = (Entry) other;
     // Entry-to-Entry equality is also used by CHM.remove(key, value). Keep that value contract
     // distinct from LookupKey.equals: a zero-length key must not make every candidate value equal.
-    if (keyIndex != entry.keyIndex) {
+    if (keyHash() != entry.keyHash() || keyLength != entry.keyLength) {
       return false;
     }
-    return keyLength() == 0
-        || NativeMemory.equals(nativeKeyBytesAddress(), entry.nativeKeyBytesAddress(), keyLength());
+    return keyLength == 0
+        || NativeMemory.equals(nativeKeyBytesAddress(), entry.nativeKeyBytesAddress(), keyLength);
   }
 
   public boolean claimWriter() {
