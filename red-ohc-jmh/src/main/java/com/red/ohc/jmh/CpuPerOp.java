@@ -1,5 +1,6 @@
 package com.red.ohc.jmh;
 
+import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
@@ -22,7 +23,7 @@ import com.red.ohc.cache.OffHeapCache;
 
 public final class CpuPerOp {
   static final int KEY_BYTES = 16;
-  static final int VALUE_BYTES = 256;
+  static final int VALUE_BYTES = 64;
   static final ThreadMXBean MX = ManagementFactory.getThreadMXBean();
 
   static final CacheSerializer<byte[]> BYTES =
@@ -64,6 +65,75 @@ public final class CpuPerOp {
       return "jvm";
     }
     return "other";
+  }
+
+  static final Map<Long, long[]> PROC_LAST = new java.util.concurrent.ConcurrentHashMap<>();
+  static final Map<String, long[]> PROC_GROUP = new java.util.concurrent.ConcurrentHashMap<>();
+  static volatile boolean SAMPLING;
+
+  static String procGroup(String comm) {
+    if (comm.startsWith("bench-worker")) {
+      return "workers";
+    }
+    if (comm.startsWith("red-ohc-mainten")) {
+      return "actor";
+    }
+    if (comm.startsWith("C2 Compiler") || comm.startsWith("C1 Compiler")
+        || comm.startsWith("Nmethod Sw")) {
+      return "compiler";
+    }
+    if (comm.startsWith("GC") || comm.startsWith("G1")) {
+      return "gc";
+    }
+    if (comm.startsWith("commonPool")) {
+      return "commonPool";
+    }
+    return "other";
+  }
+
+  static void sampleProcOnce() {
+    String self = "" + ProcessHandle.current().pid();
+    File[] tasks = new File("/proc/" + self + "/task").listFiles();
+    if (tasks == null) {
+      return;
+    }
+    for (File task : tasks) {
+      String line;
+      try (java.io.BufferedReader reader =
+          new java.io.BufferedReader(new java.io.FileReader(task + "/stat"))) {
+        line = reader.readLine();
+      } catch (java.io.IOException failure) {
+        continue;
+      }
+      if (line == null) {
+        continue;
+      }
+      int close = line.lastIndexOf(')');
+      if (close < 0) {
+        continue;
+      }
+      String comm = line.substring(line.indexOf('(') + 1, close);
+      String[] rest = line.substring(close + 2).split(" ");
+      if (rest.length < 13) {
+        continue;
+      }
+      long utime;
+      long stime;
+      try {
+        utime = Long.parseLong(rest[11]);
+        stime = Long.parseLong(rest[12]);
+      } catch (NumberFormatException failure) {
+        continue;
+      }
+      long[] previous = PROC_LAST.put(Long.parseLong(task.getName()), new long[] {utime, stime});
+      if (previous != null && (utime > previous[0] || stime > previous[1])) {
+        long[] group = PROC_GROUP.computeIfAbsent(procGroup(comm), key -> new long[2]);
+        synchronized (group) {
+          group[0] += utime - previous[0];
+          group[1] += stime - previous[1];
+        }
+      }
+    }
   }
 
   static Map<Long, long[]> snapshot() {
@@ -124,6 +194,7 @@ public final class CpuPerOp {
                 .keySerializer(BYTES)
                 .valueSerializer(BYTES)
                 .eviction(Eviction.S3_FIFO)
+                .defaultTTLmillis(600_000L)
                 .build();
     for (int i = 0; i < workingSet; i++) {
       cache.put(keys[i], values[i]);
@@ -135,11 +206,27 @@ public final class CpuPerOp {
 
     int[] seq = zipf(workingSet);
 
+    Thread procSampler =
+        new Thread(
+            () -> {
+              while (SAMPLING) {
+                sampleProcOnce();
+                try {
+                  Thread.sleep(20);
+                } catch (InterruptedException failure) {
+                  return;
+                }
+              }
+            },
+            "proc-sampler");
+    SAMPLING = true;
+    procSampler.start();
     List<double[]> results = new ArrayList<>();
     for (int rep = 0; rep < reps + 2; rep++) {
       boolean warmup = rep < 2;
       Map<Long, long[]> before = snapshot();
       WORKER_CPU.set(0);
+      PROC_GROUP.clear();
       long t0 = System.nanoTime();
       runOps(cache, mode, threads, opsPerRep, keys, values, seq);
       cache.flushAsync().join();
@@ -148,6 +235,15 @@ public final class CpuPerOp {
       d.put("workers", WORKER_CPU.get());
       if (warmup) {
         continue;
+      }
+      for (Map.Entry<String, long[]> entry : PROC_GROUP.entrySet()) {
+        long[] v = entry.getValue();
+        if (v[0] + v[1] > 0) {
+          System.out.printf(
+              "  proc/%-10s rep %d: user %8.1f ns/op  sys %8.1f ns/op%n",
+              entry.getKey(), rep - 1, (double) v[0] * 10_000_000L / opsPerRep,
+              (double) v[1] * 10_000_000L / opsPerRep);
+        }
       }
       long total = d.values().stream().mapToLong(Long::longValue).sum();
       long nonJvm = total - d.getOrDefault("jvm", 0L);
@@ -172,6 +268,8 @@ public final class CpuPerOp {
           "  %-16s median %10.1f   min %10.1f   max %10.1f   spread %5.1f%%%n",
           names[c], med, v[0], v[v.length - 1], med == 0 ? 0 : 100 * (v[v.length - 1] - v[0]) / med);
     }
+    SAMPLING = false;
+    procSampler.join(1_000L);
     cache.close();
   }
 
