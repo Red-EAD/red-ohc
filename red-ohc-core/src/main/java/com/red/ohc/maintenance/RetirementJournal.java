@@ -522,25 +522,21 @@ public final class RetirementJournal {
     return false;
   }
 
-  public int publishSafe(long minimumActiveEpoch) {
-    return publishSafe(minimumActiveEpoch, minimumActiveEpoch);
-  }
-
-  public int publishSafe(long minimumLookupEpoch, long minimumValueEpoch) {
+  public int publishSafe(boolean lookupSafe, boolean valueSafe) {
     int published = 0;
     for (Lane lane : writerLanes) {
-      published += publishSafeLane(lane, minimumLookupEpoch, minimumValueEpoch, false);
+      published += publishSafeLane(lane, lookupSafe, valueSafe, false);
     }
-    published += publishSafeLane(actorLane, minimumLookupEpoch, minimumValueEpoch, false);
+    published += publishSafeLane(actorLane, lookupSafe, valueSafe, false);
     return published;
   }
 
   private int publishAllSafe() {
     int published = 0;
     for (Lane lane : writerLanes) {
-      published += publishSafeLane(lane, Long.MAX_VALUE, Long.MAX_VALUE, true);
+      published += publishSafeLane(lane, true, true, true);
     }
-    published += publishSafeLane(actorLane, Long.MAX_VALUE, Long.MAX_VALUE, true);
+    published += publishSafeLane(actorLane, true, true, true);
     return published;
   }
 
@@ -556,12 +552,12 @@ public final class RetirementJournal {
   }
 
   private int publishSafeLane(
-      Lane lane, long minimumLookupEpoch, long minimumValueEpoch, boolean includeBoundary) {
+      Lane lane, boolean lookupSafe, boolean valueSafe, boolean includeBoundary) {
     if (!lane.tryAcquireProgress()) {
       return 0;
     }
     try {
-      return lane.publishSafe(minimumLookupEpoch, minimumValueEpoch, includeBoundary);
+      return lane.publishSafe(lookupSafe, valueSafe, includeBoundary);
     } finally {
       lane.releaseProgress();
     }
@@ -585,13 +581,20 @@ public final class RetirementJournal {
         captureSafePublishedTicket());
   }
 
+  /** One quiescence cut driven by a registry: arm, confirm, then publish what is unblocked. */
+  public int publishSafeForQuiescence(ReaderRegistry readers) {
+    long[] snapshot = new long[readers.slotCapacity()];
+    boolean[] blocked = new boolean[2];
+    readers.armReaderQuiescence(snapshot);
+    readers.confirmReaderQuiescence(snapshot, blocked);
+    return publishSafe(!blocked[0], !blocked[1]);
+  }
+
   ReclaimResult reclaimActorResult(ReaderRegistry readers, int maximumRecords) {
     if (readers == null) {
       throw new NullPointerException("readers");
     }
-    long[] minimumEpochs = new long[2];
-    readers.minActiveEpochs(minimumEpochs);
-    publishSafe(minimumEpochs[0], minimumEpochs[1]);
+    publishSafeForQuiescence(readers);
     return reclaimInternal(
         memory,
         maximumRecords,
@@ -1347,27 +1350,23 @@ public final class RetirementJournal {
           && segment.baseSequence() + segment.snapshotTail() <= maximumSequenceInclusive;
     }
 
-    private int publishSafe(long minimumLookupEpoch, long minimumValueEpoch) {
-      return publishSafe(minimumLookupEpoch, minimumValueEpoch, false);
+    private int publishSafe(boolean lookupSafe, boolean valueSafe) {
+      return publishSafe(lookupSafe, valueSafe, false);
     }
 
     private int publishAllSafe() {
-      return publishSafe(Long.MAX_VALUE, Long.MAX_VALUE, true);
+      return publishSafe(true, true, true);
     }
 
     private int publishSafe(
-        long minimumLookupEpoch, long minimumValueEpoch, boolean includeBoundary) {
+        boolean lookupSafe, boolean valueSafe, boolean includeBoundary) {
       int published = 0;
       for (;;) {
         RetirementSegment segment = sealedSegments.peek();
-        long minimumActiveEpoch =
-            segment != null && segment.requiresStructuralEpoch()
-                ? minimumLookupEpoch
-                : minimumValueEpoch;
-        if (segment == null
-            || (includeBoundary
-                ? segment.sealedEpoch() > minimumActiveEpoch
-                : segment.sealedEpoch() >= minimumActiveEpoch)) {
+        boolean safe =
+            includeBoundary
+                || (segment != null && segment.requiresStructuralEpoch() ? lookupSafe : valueSafe);
+        if (segment == null || !safe) {
           break;
         }
         segment = sealedSegments.poll();

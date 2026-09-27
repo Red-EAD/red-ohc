@@ -1306,7 +1306,7 @@ public final class ConcurrentMapBehaviorTest {
       if (!armed || Thread.currentThread() != owner) {
         return;
       }
-      long state = readers.readerState(context.slot);
+      long state = readers.readerSequence(context.slot);
       if ((state & ReaderRegistry.VALUE_PROTECTION_BIT) == 0L) {
         throw new AssertionError("compute payload read escaped value protection");
       }
@@ -1333,7 +1333,7 @@ public final class ConcurrentMapBehaviorTest {
     @Override
     public long nanos() {
       if (armed && Thread.currentThread() == owner) {
-        long state = readers.readerState(context.slot);
+        long state = readers.readerSequence(context.slot);
         if ((state & ReaderRegistry.VALUE_PROTECTION_BIT) == 0L) {
           throw new AssertionError("compute TTL read escaped value protection");
         }

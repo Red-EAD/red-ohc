@@ -5,8 +5,9 @@ import java.util.Objects;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
 
 /**
- * Publishes a reader epoch and keeps native payloads protected until exit. Close is a
- * quiesced-only teardown, so this guard owns reader-vs-reclaimer safety, not close racing.
+ * Publishes a per-op sequence word (odd = inside an op) and keeps native payloads protected until
+ * the depth-0 exit store. Close is a quiesced-only teardown, so this guard owns
+ * reader-vs-reclaimer safety, not close racing.
  */
 public final class ReaderGuard {
   private final MaintenanceEventLoop worker;
@@ -36,48 +37,25 @@ public final class ReaderGuard {
       }
     }
     if (context.readerDepth() != 0) {
+      // Nested scopes only bump depth; the first value protector re-stores the odd word with
+      // the protection bit, and a lookup-only inner scope inherits whatever the outer set.
       if (context.enterReader(protectsValues)) {
-        publishReaderState(
-            context, ReaderRegistry.VALUE_PROTECTION_BIT | context.readerPublishedEpoch());
+        context.upgradeReaderOpValueBit();
       }
       return true;
     }
-    for (;;) {
-      long observed = worker.epoch();
-      try {
-        publishReaderState(
-            context, protectsValues ? ReaderRegistry.VALUE_PROTECTION_BIT | observed : observed);
-      } catch (IllegalArgumentException failure) {
-        // A slot that unbound concurrently can only belong to teardown; reject the reader.
-        context.readerPublishedEpoch(0L);
-        return false;
-      }
-      if (observed == worker.epoch()) {
-        context.enterReader(protectsValues);
-        return true;
-      }
-      worker.clearReaderStateIfRegistered(context);
-    }
-  }
-
-  private void publishReaderState(ThreadContext context, long state) {
-    worker.publishReaderStateKnownEpoch(context, state);
+    context.beginReaderOp(protectsValues);
+    context.enterReader(protectsValues);
+    return true;
   }
 
   public void exit(ThreadContext context) {
     int exited = context.exitReader();
-    long exitedEpoch = context.readerPublishedEpoch();
-    if ((exited & ThreadContext.READER_EXITED_VALUES) != 0) {
-      if ((exited & ThreadContext.READER_EXITED_LOOKUP) == 0) {
-        // A nested value reader may be released while an outer lookup-only guard remains active.
-        worker.publishReaderState(context, exitedEpoch);
-        worker.readerQuiescent(context.slot);
-      }
+    if ((exited & ThreadContext.READER_EXITED_LOOKUP) != 0) {
+      // The value bit deliberately persists until depth 0: a mid-stack downgrade is a no-op so
+      // the actor never sees an unprotecting store inside one op.
+      context.endReaderOp();
+      worker.readerQuiescent(context.slot);
     }
-    if ((exited & ThreadContext.READER_EXITED_LOOKUP) == 0) {
-      return;
-    }
-    worker.clearReaderState(context);
-    worker.readerQuiescent(context.slot);
   }
 }

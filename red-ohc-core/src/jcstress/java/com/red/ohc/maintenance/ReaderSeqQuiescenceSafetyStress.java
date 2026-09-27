@@ -16,12 +16,15 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
-/** A value-protected reader must keep its native value out of the SAFE queue. */
+/**
+ * A reader whose odd sequence word spans the actor's arm-confirm cut must keep its native value
+ * out of the reclaim path, regardless of how the entry and the arm interleave.
+ */
 @JCStressTest
-@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the active value reader blocks native release")
-@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "native value was released while the reader guard was active")
+@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the in-op reader blocks native release")
+@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "value released while an armed odd reader held it")
 @State
-public class ReaderNativeRetirementSafetyStress {
+public class ReaderSeqQuiescenceSafetyStress {
   private static final int VALUE_LENGTH = 32_768;
 
   private final NativeMemory.Memory memory = new NativeMemory.Memory();
@@ -34,7 +37,7 @@ public class ReaderNativeRetirementSafetyStress {
   private final long value = arena.allocate(allocation);
   private final AtomicInteger valueWasRead = new AtomicInteger();
 
-  public ReaderNativeRetirementSafetyStress() {
+  public ReaderSeqQuiescenceSafetyStress() {
     ValueBlock.initialize(value, 0L, VALUE_LENGTH, 0L);
     journal.append(value, allocation);
     journal.cutAllProducersAtWatermark();
@@ -44,16 +47,15 @@ public class ReaderNativeRetirementSafetyStress {
   }
 
   @Actor
-  public void readValue() {
+  public void reader() {
     readers.beginOpForTest(slotIndex, true);
     NativeMemory.getLong(value);
     valueWasRead.set(1);
-    // Keep the value guard active while the maintenance actor attempts publication and reclaim.
     NativeMemory.getLong(value);
   }
 
   @Actor
-  public void reclaim() {
+  public void actor() {
     if (valueWasRead.get() == 0) {
       return;
     }

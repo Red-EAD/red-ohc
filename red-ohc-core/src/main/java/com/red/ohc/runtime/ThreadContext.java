@@ -11,6 +11,7 @@ import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.RetirementJournal;
 import com.red.ohc.maintenance.RetirementSegment;
+import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.maintenance.WriterLifecycleLane;
 import com.red.ohc.storage.WriterArena;
 
@@ -32,7 +33,7 @@ public final class ThreadContext {
   private int readerDepth;
   /** Number of active reader scopes that remain inside the value-protection region. */
   private int valueProtectionDepth;
-  private long readerPublishedEpoch;
+  private long readerSeq;
   private int userCallbackDepth;
   private ByteBuffer writableValueBuffer;
   private ByteBuffer[] readOnlyValueBuffers;
@@ -619,21 +620,24 @@ public final class ThreadContext {
     return readerDepth;
   }
 
-  /** Epoch carried by the reader state currently published for this context. */
-  public long readerPublishedEpoch() {
-    return readerPublishedEpoch;
+  /** Depth-0 entry: one fenced odd-seq store; the fence orders it before this op's native loads. */
+  void beginReaderOp(boolean protectsValues) {
+    readerSeq = (readerSeq + 1L) | 1L;
+    NativeMemory.putLongVolatile(
+        slot.seqAddress,
+        protectsValues ? readerSeq | ReaderRegistry.VALUE_PROTECTION_BIT : readerSeq);
   }
 
-  public void readerPublishedEpoch(long epoch) {
-    if (epoch < 0L || epoch > ReaderRegistry.MAX_READER_EPOCH) {
-      throw new IllegalArgumentException("reader epoch must be in [0, 2^62 - 2]");
-    }
-    readerPublishedEpoch = epoch;
+  /** Nested value entry inside an already-odd op: re-store the same odd value with the bit. */
+  void upgradeReaderOpValueBit() {
+    NativeMemory.putLongVolatile(
+        slot.seqAddress, readerSeq | ReaderRegistry.VALUE_PROTECTION_BIT);
   }
 
-  /** Records an epoch already validated by the reader publication path. */
-  public void readerPublishedEpochKnown(long epoch) {
-    readerPublishedEpoch = epoch;
+  /** Depth-0 exit: plain even store, then the actor's wake marker is consumed by the guard. */
+  void endReaderOp() {
+    readerSeq = (readerSeq + 2L) & ~1L;
+    NativeMemory.putLongRelease(slot.seqAddress, readerSeq);
   }
 
   public boolean isUserCallbackActive() {

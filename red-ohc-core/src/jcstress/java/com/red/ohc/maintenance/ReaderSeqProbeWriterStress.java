@@ -16,13 +16,16 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
-/** A value-protected reader must keep its native value out of the SAFE queue. */
+/**
+ * A writer-side probe (odd with the value bit clear) and a structural retirement record: the
+ * probe's open op must pin the key block through the same arm-confirm cut.
+ */
 @JCStressTest
-@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the active value reader blocks native release")
-@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "native value was released while the reader guard was active")
+@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the in-op probe blocks structural release")
+@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "key block released under the open probe")
 @State
-public class ReaderNativeRetirementSafetyStress {
-  private static final int VALUE_LENGTH = 32_768;
+public class ReaderSeqProbeWriterStress {
+  private static final int KEY_LENGTH = 32;
 
   private final NativeMemory.Memory memory = new NativeMemory.Memory();
   private final WriterArena arena = memory.newWriterArena();
@@ -30,31 +33,31 @@ public class ReaderNativeRetirementSafetyStress {
   private final ReaderSlot slot = new ReaderSlot();
   private final int slotIndex = readers.register(slot);
   private final RetirementJournal journal = new RetirementJournal(memory);
-  private final long allocation = ValueBlock.allocationLength(VALUE_LENGTH);
-  private final long value = arena.allocate(allocation);
-  private final AtomicInteger valueWasRead = new AtomicInteger();
+  private final long keyAllocation =
+      com.red.ohc.index.Entry.keyAllocationLengthForKeyLength(KEY_LENGTH);
+  private final long key = arena.allocate(keyAllocation);
+  private final AtomicInteger keyWasRead = new AtomicInteger();
 
-  public ReaderNativeRetirementSafetyStress() {
-    ValueBlock.initialize(value, 0L, VALUE_LENGTH, 0L);
-    journal.append(value, allocation);
+  public ReaderSeqProbeWriterStress() {
+    NativeMemory.putLong(key + 48L, 0x5eedL);
+    journal.appendStructural(key, keyAllocation);
     journal.cutAllProducersAtWatermark();
     if (journal.sealReadySegments(1L) != 1) {
-      throw new AssertionError("expected one sealed retirement segment");
+      throw new AssertionError("expected one sealed structural record");
     }
   }
 
   @Actor
-  public void readValue() {
-    readers.beginOpForTest(slotIndex, true);
-    NativeMemory.getLong(value);
-    valueWasRead.set(1);
-    // Keep the value guard active while the maintenance actor attempts publication and reclaim.
-    NativeMemory.getLong(value);
+  public void probe() {
+    readers.beginOpForTest(slotIndex, false);
+    NativeMemory.getLong(key);
+    keyWasRead.set(1);
+    NativeMemory.getLong(key);
   }
 
   @Actor
-  public void reclaim() {
-    if (valueWasRead.get() == 0) {
+  public void actor() {
+    if (keyWasRead.get() == 0) {
       return;
     }
     journal.publishSafeForQuiescence(readers);

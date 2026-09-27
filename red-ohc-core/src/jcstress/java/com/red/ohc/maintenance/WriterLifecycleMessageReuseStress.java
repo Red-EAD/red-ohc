@@ -22,7 +22,7 @@ public class WriterLifecycleMessageReuseStress {
     for (int index = 0; index < RECORDS; index++) {
       long sequence = lane.reserve();
       lane.writeMutation(
-          sequence, null, 0L, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+          sequence, null, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
       lane.commitForMailbox(sequence);
     }
   }

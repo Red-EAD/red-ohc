@@ -131,7 +131,8 @@ public final class MaintenanceEventLoop
   private volatile long asyncCompletedSequence;
 
   private final ReaderRegistry readers;
-  private final long[] readerEpochs = new long[2];
+  private long[] readerSeqSnapshot = new long[ReaderRegistry.SLOT_CHUNK_SIZE];
+  private final boolean[] readerBlocked = new boolean[2];
   private final RetirementJournal retirements;
   private final long nativeDebtBudgetBytes;
   private final MaintenanceTuning tuning;
@@ -222,6 +223,7 @@ public final class MaintenanceEventLoop
   private boolean actorRetirementNeedsFlushFence;
 
   /** Actor-published QSBR epoch, read by every cache reader. */
+  private static final long EPOCH_BOUND = Long.MAX_VALUE - 1L;
   private final AtomicLong epoch = new AtomicLong(1L);
   /** Reader-exit notification sequence; readers only increment it on the marked path. */
   private final AtomicLong readerNotificationSequence = new AtomicLong();
@@ -542,8 +544,8 @@ public final class MaintenanceEventLoop
 
   private long incrementEpoch() {
     long current = epoch.get();
-    if (current >= ReaderRegistry.MAX_READER_EPOCH) {
-      throw new IllegalStateException("reader epoch exhausted its 62-bit encoding");
+    if (current >= EPOCH_BOUND) {
+      throw new IllegalStateException("seal epoch exhausted its 62-bit encoding");
     }
     long next = current + 1L;
     epoch.set(next);
@@ -758,34 +760,9 @@ public final class MaintenanceEventLoop
       if (!closing) {
         throw failure;
       }
-      context.readerPublishedEpoch(0L);
       return false;
     }
-    context.readerPublishedEpoch(0L);
     return true;
-  }
-
-  public void publishReaderState(ThreadContext context, long state) {
-    readers.setReaderState(context.slot, state);
-    context.readerPublishedEpoch(state & ReaderRegistry.EPOCH_MASK);
-  }
-
-  /** Publishes a reader state whose epoch and protection bit are already known to be valid. */
-  public void publishReaderStateKnownEpoch(ThreadContext context, long state) {
-    readers.setReaderStateKnownEpoch(context.slot, state);
-    context.readerPublishedEpochKnown(state & ReaderRegistry.EPOCH_MASK);
-  }
-
-  public void clearReaderState(ThreadContext context) {
-    readers.setReaderStateKnownEpoch(context.slot, 0L);
-    context.readerPublishedEpoch(0L);
-  }
-
-  /** Clears a rejected reader without exposing close-side slot unbinding as an internal error. */
-  public boolean clearReaderStateIfRegistered(ThreadContext context) {
-    boolean cleared = readers.clearReaderStateIfRegistered(context.slot);
-    context.readerPublishedEpoch(0L);
-    return cleared;
   }
 
   private void requestAccessWork() {
@@ -2013,6 +1990,15 @@ public final class MaintenanceEventLoop
         queueDepth());
   }
 
+  /** Arms a quiescence cut, growing the snapshot when registrations expanded the table. */
+  private void armReaderQuiescence() {
+    int marked = readers.armReaderQuiescence(readerSeqSnapshot);
+    while (marked < 0) {
+      readerSeqSnapshot = new long[readers.slotCapacity()];
+      marked = readers.armReaderQuiescence(readerSeqSnapshot);
+    }
+  }
+
   private int drainRetirementTurn(WorkPlan plan, TurnCuts turn) {
     FlushRequest flushRequestSnapshot = plan.flushRequest;
     boolean forceCloseRetirementCut =
@@ -2045,17 +2031,16 @@ public final class MaintenanceEventLoop
     }
     int published = 0;
     if (retirements.hasSealedSegments()) {
-      long notificationEpoch = epoch.get();
-      // The actor owns the wait protocol: mark active readers first, then take the confirmation
-      // snapshot. A reader exit/value downgrade only wakes us when it consumes this marker.
-      readers.markActiveReaderNotifications(notificationEpoch);
-      readers.minActiveEpochs(readerEpochs);
-      published = retirements.publishSafe(readerEpochs[0], readerEpochs[1]);
+      // The actor owns the wait protocol: arm every odd reader with a wake marker, then confirm.
+      // A reader exit only wakes us when it consumes this marker; unchanged odd slots block.
+      armReaderQuiescence();
+      readers.confirmReaderQuiescence(readerSeqSnapshot, readerBlocked);
+      published = retirements.publishSafe(!readerBlocked[0], !readerBlocked[1]);
       if (retirements.hasSealedSegments()) {
         // A reader may consume the first marker, leave, and re-enter between the arm and the
         // confirmation load. Re-arm after publishing so that a reader observed active by this
         // pass cannot leave the actor parked without a notification.
-        readers.markActiveReaderNotifications(notificationEpoch);
+        armReaderQuiescence();
       }
     }
     long safePublishedAt = sampleMonotonicNow();
@@ -3822,7 +3807,7 @@ public final class MaintenanceEventLoop
     try {
       retirements.cutAllProducersAtWatermark();
       retirements.sealReadySegments(epoch.get());
-      retirements.publishSafe(Long.MAX_VALUE);
+      retirements.publishSafe(true, true);
       retirements.reclaimActorResult(memory, Integer.MAX_VALUE);
       while (retirements.consumeReadyHint()) {
         int sealed = retirements.sealReadySegments(epoch.get());

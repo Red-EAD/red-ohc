@@ -44,7 +44,7 @@ public final class RetirementJournalContractTest {
     assertNull(
         method(journal, "seal", long.class), "the obsolete compatibility sealing API must be gone");
     assertNotNull(
-        method(journal, "publishSafe", long.class),
+        method(journal, "publishSafe", boolean.class, boolean.class),
         "the journal must expose segment-level SAFE publication");
     assertNotNull(
         method(journal, "queuedRecords"), "the journal must expose an O(1) backlog counter");
@@ -97,7 +97,7 @@ public final class RetirementJournalContractTest {
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
       assertEquals(journal.generatedBytesTotal(), weight);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       RetirementJournal.ReclaimResult result =
           journal.reclaimActorResult(memory, Integer.MAX_VALUE);
       assertEquals(result.segments, 1);
@@ -125,7 +125,7 @@ public final class RetirementJournalContractTest {
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       Field workField = lane.getClass().getDeclaredField("completionAdvanceWork");
       workField.setAccessible(true);
@@ -161,11 +161,11 @@ public final class RetirementJournalContractTest {
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(2L), RetirementSegment.CAPACITY);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       RetirementJournal.ReclaimResult result =
           journal.reclaimActorSafeBatchResult(memory, 1);
@@ -187,12 +187,12 @@ public final class RetirementJournalContractTest {
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(2L), RetirementSegment.CAPACITY);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       Method method =
           RetirementJournal.class.getDeclaredMethod(
@@ -242,14 +242,14 @@ public final class RetirementJournalContractTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       assertTrue(lane.reserve(reservation));
       lane.write(reservation, entries[entries.length - 1], allocation);
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(2L), 1);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       Field actorContextField = RetirementJournal.class.getDeclaredField("actorContext");
       actorContextField.setAccessible(true);
@@ -296,7 +296,7 @@ public final class RetirementJournalContractTest {
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       Field handlesAddressField = RetirementSegment.class.getDeclaredField("handlesAddress");
       handlesAddressField.setAccessible(true);
@@ -350,7 +350,7 @@ public final class RetirementJournalContractTest {
     AtomicReference<Throwable> failure = new AtomicReference<>();
     AtomicBoolean publishing = new AtomicBoolean(true);
     Method publishSafe =
-        RetirementJournal.Lane.class.getDeclaredMethod("publishSafe", long.class, long.class);
+        RetirementJournal.Lane.class.getDeclaredMethod("publishSafe", boolean.class, boolean.class);
     publishSafe.setAccessible(true);
     Thread actor = null;
     try {
@@ -386,7 +386,7 @@ public final class RetirementJournalContractTest {
                 () -> {
                   try {
                     start.await();
-                    publishSafe.invoke(lane, Long.MAX_VALUE, Long.MAX_VALUE);
+                    publishSafe.invoke(lane, Boolean.TRUE, Boolean.TRUE);
                   } catch (Throwable error) {
                     failure.compareAndSet(null, error);
                   } finally {
@@ -452,7 +452,7 @@ public final class RetirementJournalContractTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY + 1);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 2);
+      assertEquals(journal.publishSafe(true, true), 2);
 
       Method hook = WriterArena.class.getDeclaredMethod("setRetirementHookForTest", Runnable.class);
       hook.setAccessible(true);
@@ -515,7 +515,7 @@ public final class RetirementJournalContractTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY + 1);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 2);
+      assertEquals(journal.publishSafe(true, true), 2);
 
       Field handlesAddressField = RetirementSegment.class.getDeclaredField("handlesAddress");
       handlesAddressField.setAccessible(true);
@@ -597,7 +597,7 @@ public final class RetirementJournalContractTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), firstSegmentRecords);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       for (long entry : secondPageEntries) {
         assertTrue(lane.reserve(reservation));
         lane.write(reservation, entry, allocation);
@@ -605,7 +605,7 @@ public final class RetirementJournalContractTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(2L), secondSegmentRecords);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       Method hook = WriterArena.class.getDeclaredMethod("setRetirementHookForTest", Runnable.class);
       hook.setAccessible(true);
@@ -692,7 +692,7 @@ public final class RetirementJournalContractTest {
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), slotsPerPage);
       assertEquals(
-          journal.publishSafe(Long.MAX_VALUE), segments, "the fixture must publish every segment");
+          journal.publishSafe(true, true), segments, "the fixture must publish every segment");
 
       RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, segments);
       assertEquals(result.records, slotsPerPage);
@@ -746,7 +746,7 @@ public final class RetirementJournalContractTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), pairs * 2);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 1);
       assertEquals(result.segments, 1);

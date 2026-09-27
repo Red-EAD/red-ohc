@@ -148,7 +148,7 @@ public final class RetirementJournalWakeTest {
       journal.finishReadyDrains();
       assertEquals(workState.invoke(journal), sealed);
 
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(workState.invoke(journal), safe);
 
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 1);
@@ -188,7 +188,7 @@ public final class RetirementJournalWakeTest {
       assertEquals(
           journal.sealSnapshotSegments(1L, watermark),
           RetirementJournal.WRITER_WAKE_RECORDS * 2);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 2);
+      assertEquals(journal.publishSafe(true, true), 2);
       assertEquals(
           journal.reclaimActorResult(memory, Integer.MAX_VALUE).records,
           RetirementJournal.WRITER_WAKE_RECORDS * 2);
@@ -317,7 +317,7 @@ public final class RetirementJournalWakeTest {
       assertEquals(
           journal.sealSnapshotSegments(1L, watermark),
           RetirementJournal.WRITER_WAKE_RECORDS);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE, Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.safeSegmentDebt(), 1L);
     } finally {
       stalledOwner.set(false);
@@ -339,19 +339,19 @@ public final class RetirementJournalWakeTest {
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot lookupOnly = new ReaderSlot();
     int lookupIndex = readers.register(lookupOnly);
-    readers.setEpoch(lookupIndex, 1L);
+    readers.beginOpForTest(lookupIndex, false);
     try {
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
 
       assertEquals(
-          journal.publishSafe(readers.minActiveEpoch(), readers.minActiveValueEpoch()),
+          journal.publishSafeForQuiescence(readers),
           1,
           "a key lookup cannot pin unrelated replaced values");
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 1);
     } finally {
-      readers.setEpoch(lookupIndex, 0L);
+      readers.endOpForTest(lookupIndex);
       readers.clear();
       readers.close();
       journal.close();
@@ -366,21 +366,21 @@ public final class RetirementJournalWakeTest {
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot lookupOnly = new ReaderSlot();
     int lookupIndex = readers.register(lookupOnly);
-    readers.setEpoch(lookupIndex, 1L);
+    readers.beginOpForTest(lookupIndex, false);
     try {
       journal.appendStructural(0L, 0L);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
 
       assertEquals(
-          journal.publishSafe(readers.minActiveEpoch(), readers.minActiveValueEpoch()),
+          journal.publishSafeForQuiescence(readers),
           0,
           "native key retirement must still wait for an in-flight lookup");
-      readers.setEpoch(lookupIndex, 0L);
+      readers.endOpForTest(lookupIndex);
       assertEquals(
-          journal.publishSafe(readers.minActiveEpoch(), readers.minActiveValueEpoch()), 1);
+          journal.publishSafeForQuiescence(readers), 1);
     } finally {
-      readers.setEpoch(lookupIndex, 0L);
+      readers.endOpForTest(lookupIndex);
       readers.clear();
       readers.close();
       journal.close();
@@ -413,7 +413,7 @@ public final class RetirementJournalWakeTest {
 
       long[] watermark = journal.captureAndCutWatermark();
       journal.sealSnapshotSegments(1L, watermark);
-      journal.publishSafe(Long.MAX_VALUE);
+      journal.publishSafe(true, true);
       journal.reclaimActorResult(memory, Integer.MAX_VALUE);
       journal.finishReadyDrains();
       signalCount.set(0);

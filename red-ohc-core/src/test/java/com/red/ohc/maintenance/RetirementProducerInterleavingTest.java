@@ -143,7 +143,7 @@ public final class RetirementProducerInterleavingTest {
           assertTrue(
               journal.hasRunnableWork(), "late completion must wake an actor that drained the cut");
           assertEquals(journal.sealReadySegments(2L), 1);
-          journal.publishSafe(Long.MAX_VALUE);
+          journal.publishSafe(true, true);
           journal.reclaimActorResult(memory, Integer.MAX_VALUE);
           journal.finishReadyDrains();
           assertEquals(journal.completedRecordsTotal(), 1L);

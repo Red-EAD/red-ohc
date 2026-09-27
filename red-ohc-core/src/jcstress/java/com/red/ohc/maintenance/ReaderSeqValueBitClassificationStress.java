@@ -1,7 +1,5 @@
 package com.red.ohc.maintenance;
 
-import java.util.concurrent.atomic.AtomicInteger;
-
 import org.openjdk.jcstress.annotations.Actor;
 import org.openjdk.jcstress.annotations.Arbiter;
 import org.openjdk.jcstress.annotations.Expect;
@@ -16,12 +14,15 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
-/** A value-protected reader must keep its native value out of the SAFE queue. */
+/**
+ * A lookup-only odd reader (value bit clear) must not pin a pure value record: confirm's
+ * valueSafe channel must stay open while blocked[0] is set.
+ */
 @JCStressTest
-@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the active value reader blocks native release")
-@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "native value was released while the reader guard was active")
+@Outcome(id = "1", expect = Expect.ACCEPTABLE, desc = "lookup-only reader releases the value record")
+@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the cut raced ahead of the reader entry")
 @State
-public class ReaderNativeRetirementSafetyStress {
+public class ReaderSeqValueBitClassificationStress {
   private static final int VALUE_LENGTH = 32_768;
 
   private final NativeMemory.Memory memory = new NativeMemory.Memory();
@@ -32,9 +33,8 @@ public class ReaderNativeRetirementSafetyStress {
   private final RetirementJournal journal = new RetirementJournal(memory);
   private final long allocation = ValueBlock.allocationLength(VALUE_LENGTH);
   private final long value = arena.allocate(allocation);
-  private final AtomicInteger valueWasRead = new AtomicInteger();
 
-  public ReaderNativeRetirementSafetyStress() {
+  public ReaderSeqValueBitClassificationStress() {
     ValueBlock.initialize(value, 0L, VALUE_LENGTH, 0L);
     journal.append(value, allocation);
     journal.cutAllProducersAtWatermark();
@@ -44,19 +44,14 @@ public class ReaderNativeRetirementSafetyStress {
   }
 
   @Actor
-  public void readValue() {
-    readers.beginOpForTest(slotIndex, true);
+  public void lookupReader() {
+    readers.beginOpForTest(slotIndex, false);
     NativeMemory.getLong(value);
-    valueWasRead.set(1);
-    // Keep the value guard active while the maintenance actor attempts publication and reclaim.
     NativeMemory.getLong(value);
   }
 
   @Actor
-  public void reclaim() {
-    if (valueWasRead.get() == 0) {
-      return;
-    }
+  public void actor() {
     journal.publishSafeForQuiescence(readers);
     journal.reclaimActorResult(memory, Integer.MAX_VALUE);
   }

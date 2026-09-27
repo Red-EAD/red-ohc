@@ -30,14 +30,14 @@ public class ReaderAdmissionStoreLoadStress {
 
   @Actor
   public void reader(II_Result result) {
-    registry.setReaderState(slot, ReaderRegistry.VALUE_PROTECTION_BIT | 1L);
+    registry.beginOpForTest(slot, true);
     result.r1 = closing.get();
   }
 
   @Actor
   public void shutdown(II_Result result) {
     closing.set(1);
-    result.r2 = registry.readerState(slot) == 0L ? 0 : 1;
+    result.r2 = (registry.readerSequence(registry.slotAt(slot)) & 1L) != 0L ? 1 : 0;
   }
 
   @Arbiter

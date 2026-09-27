@@ -15,7 +15,7 @@ import com.red.ohc.storage.NativeMemory;
 @Outcome(
     id = {"0", "-9223372036854775807"},
     expect = Expect.ACCEPTABLE,
-    desc = "the actor observes either the old quiescent state or the fully published value state")
+    desc = "the actor observes either an even word or the odd value-protecting entry")
 @State
 public class ReaderStatePublicationStress {
   private final NativeMemory.Memory memory = new NativeMemory.Memory();
@@ -24,12 +24,12 @@ public class ReaderStatePublicationStress {
 
   @Actor
   public void publish() {
-    registry.setReaderState(slot, ReaderRegistry.VALUE_PROTECTION_BIT | 1L);
+    registry.beginOpForTest(slot, true);
   }
 
   @Actor
   public void observe(J_Result result) {
-    result.r1 = registry.readerState(slot);
+    result.r1 = registry.readerSequence(registry.slotAt(slot));
   }
 
   @Arbiter

@@ -205,7 +205,7 @@ public class OffHeapCacheTest {
       }
       retirements.cutAllProducersAtWatermark();
       retirements.sealReadySegments(1L);
-      retirements.publishSafe(Long.MAX_VALUE);
+      retirements.publishSafe(true, true);
       long safeSegmentsBefore = retirements.safeSegmentDebt();
 
       cache.put("key", "replacement");

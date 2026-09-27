@@ -69,70 +69,20 @@ public final class ReaderRegistryTest {
 
     ReaderRegistry registry = newRegistry();
     int index = registry.register(new ReaderSlot());
-    registry.setEpoch(index, 7L);
-    registry.setValueEpoch(index, 7L);
-    registry.setWriterActive(index, true);
+    registry.beginOpForTest(index, true);
 
-    assertEquals(registry.minActiveEpoch(), 7L);
-    assertEquals(registry.minActiveValueEpoch(), 7L);
-    assertEquals(
-        registry.readerState(index),
-        ReaderRegistry.VALUE_PROTECTION_BIT | 7L);
-    assertTrue(registry.hasActiveWriter());
-
-    registry.setEpoch(index, 0L);
-    registry.setValueEpoch(index, 0L);
-    assertEquals(registry.readerState(index), 0L);
-    assertTrue(registry.hasActiveWriter());
-    registry.setWriterActive(index, false);
-    assertEquals(registry.readerState(index), 0L);
-    assertEquals(registry.minActiveEpoch(), Long.MAX_VALUE);
-    assertEquals(registry.minActiveValueEpoch(), Long.MAX_VALUE);
-  }
-
-  @Test
-  public void readerStateRejectsSentinelEpochAndAllowsIndependentWriterAdmission() {
-    ReaderRegistry registry = newRegistry();
-    int index = registry.register(new ReaderSlot());
-
-    registry.setReaderState(
-        index, ReaderRegistry.VALUE_PROTECTION_BIT | ReaderRegistry.MAX_READER_EPOCH);
-    assertEquals(
-        registry.readerState(index),
-        ReaderRegistry.VALUE_PROTECTION_BIT | ReaderRegistry.MAX_READER_EPOCH);
-
-    registry.setReaderState(index, 0L);
-    registry.setWriterActive(index, true);
-    assertEquals(registry.readerState(index), 0L);
-    assertTrue(registry.hasActiveWriter());
-    try {
-      registry.setReaderState(index, ReaderRegistry.VALUE_PROTECTION_BIT);
-      fail("value protection must carry a non-zero epoch");
-    } catch (IllegalArgumentException expected) {
-      // Expected.
-    }
-    try {
-      registry.setReaderState(index, ReaderRegistry.EPOCH_MASK);
-      fail("the all-ones epoch is reserved as the scan sentinel");
-    } catch (IllegalArgumentException expected) {
-      // Expected.
-    }
-  }
-
-  @Test
-  public void readerStatePublicationDoesNotTouchWriterAdmission() {
-    ReaderRegistry registry = newRegistry();
-    ReaderSlot slot = new ReaderSlot();
-    registry.register(slot);
-
-    registry.setWriterActive(slot.registryIndex, true);
-    registry.setValueEpoch(slot, 7L);
-    registry.setReaderState(slot, 7L);
-
-    assertEquals(registry.readerState(slot), 7L);
+    assertTrue(registry.hasActiveReader());
+    assertEquals(registry.activeReaderCount(), 1);
+    assertTrue((registry.readerSequence(registry.slotAt(index)) & 1L) != 0L);
     assertTrue(
-        registry.hasActiveWriter(),
-        "reader publication must not clear an independently active writer admission");
+        (registry.readerSequence(registry.slotAt(index))
+                & ReaderRegistry.VALUE_PROTECTION_BIT)
+            != 0L);
+
+    registry.endOpForTest(index);
+    assertFalse(registry.hasActiveReader());
+    assertEquals(registry.activeReaderCount(), 0);
+    assertEquals(registry.readerSequence(registry.slotAt(index)) & 1L, 0L);
   }
 
   @Test
@@ -141,13 +91,13 @@ public final class ReaderRegistryTest {
     ReaderSlot slot = new ReaderSlot();
     int index = registry.register(slot);
 
-    registry.setEpoch(index, 7L);
+    registry.beginOpForTest(index, false);
     assertFalse(registry.consumeReaderNotification(slot));
-    assertEquals(registry.markActiveReaderNotifications(), 1);
+    assertEquals(registry.armReaderQuiescence(new long[registry.slotCapacity()]), 1);
     assertTrue(registry.consumeReaderNotification(slot));
     assertFalse(registry.consumeReaderNotification(slot));
 
-    registry.markActiveReaderNotifications();
+    registry.armReaderQuiescence(new long[registry.slotCapacity()]);
     registry.clear();
     assertFalse(registry.consumeReaderNotification(slot));
   }
@@ -225,15 +175,25 @@ public final class ReaderRegistryTest {
     int olderIndex = registry.register(older);
     int newerIndex = registry.register(newer);
 
-    registry.setEpoch(olderIndex, 7L);
-    registry.setEpoch(newerIndex, 9L);
-    assertEquals(registry.minActiveEpoch(), 7L);
+    long[] snapshot = new long[registry.slotCapacity()];
+    boolean[] blocked = new boolean[2];
+    registry.beginOpForTest(olderIndex, false);
+    registry.beginOpForTest(newerIndex, false);
+    registry.armReaderQuiescence(snapshot);
+    registry.confirmReaderQuiescence(snapshot, blocked);
+    assertTrue(blocked[0]);
+    assertFalse(blocked[1]);
 
-    registry.setEpoch(olderIndex, 0L);
-    assertEquals(registry.minActiveEpoch(), 9L);
+    registry.endOpForTest(olderIndex);
+    registry.armReaderQuiescence(snapshot);
+    registry.confirmReaderQuiescence(snapshot, blocked);
+    assertTrue(blocked[0]);
 
-    registry.setEpoch(newerIndex, 0L);
-    assertEquals(registry.minActiveEpoch(), Long.MAX_VALUE);
+    registry.endOpForTest(newerIndex);
+    registry.armReaderQuiescence(snapshot);
+    registry.confirmReaderQuiescence(snapshot, blocked);
+    assertFalse(blocked[0]);
+    assertFalse(blocked[1]);
   }
 
   @Test
@@ -244,13 +204,21 @@ public final class ReaderRegistryTest {
     int lookupIndex = registry.register(lookupOnly);
     int valueIndex = registry.register(valueReader);
 
-    registry.setEpoch(lookupIndex, 7L);
-    registry.setValueEpoch(valueIndex, 11L);
-    long[] minimums = new long[2];
-    registry.minActiveEpochs(minimums);
+    registry.beginOpForTest(lookupIndex, false);
+    registry.beginOpForTest(valueIndex, true);
+    long[] snapshot = new long[registry.slotCapacity()];
+    boolean[] blocked = new boolean[2];
+    registry.armReaderQuiescence(snapshot);
+    registry.confirmReaderQuiescence(snapshot, blocked);
 
-    assertEquals(minimums[0], 7L);
-    assertEquals(minimums[1], 11L);
+    assertTrue(blocked[0]);
+    assertTrue(blocked[1]);
+
+    registry.endOpForTest(valueIndex);
+    registry.armReaderQuiescence(snapshot);
+    registry.confirmReaderQuiescence(snapshot, blocked);
+    assertTrue(blocked[0]);
+    assertFalse(blocked[1]);
   }
 
   @Test(timeOut = 5_000L)
@@ -258,35 +226,15 @@ public final class ReaderRegistryTest {
     ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
     int index = registry.register(slot);
-    registry.setEpoch(index, 7L);
+    registry.beginOpForTest(index, false);
     Field lockField = ReaderRegistry.class.getDeclaredField("registrationLock");
     lockField.setAccessible(true);
     Object lock = lockField.get(registry);
     ExecutorService executor = Executors.newSingleThreadExecutor();
     try {
       synchronized (lock) {
-        Future<Long> minimum = executor.submit(registry::minActiveEpoch);
-        assertEquals(minimum.get(1L, TimeUnit.SECONDS).longValue(), 7L);
-      }
-    } finally {
-      executor.shutdownNow();
-    }
-  }
-
-  @Test(timeOut = 5_000L)
-  public void epochPublicationDoesNotWaitForRegistrationLock() throws Exception {
-    ReaderRegistry registry = newRegistry();
-    ReaderSlot slot = new ReaderSlot();
-    Field lockField = ReaderRegistry.class.getDeclaredField("registrationLock");
-    lockField.setAccessible(true);
-    Object lock = lockField.get(registry);
-    ExecutorService executor = Executors.newSingleThreadExecutor();
-    try {
-      int index = executor.submit(() -> registry.register(slot)).get(1L, TimeUnit.SECONDS);
-      synchronized (lock) {
-        Future<?> publication = executor.submit(() -> registry.setEpoch(index, 7L));
-        publication.get(250L, TimeUnit.MILLISECONDS);
-        assertEquals(registry.epoch(index), 7L);
+        Future<Boolean> active = executor.submit(registry::hasActiveReader);
+        assertTrue(active.get(1L, TimeUnit.SECONDS));
       }
     } finally {
       executor.shutdownNow();
@@ -338,9 +286,7 @@ public final class ReaderRegistryTest {
     ReaderRegistry registry = newRegistry();
     ReaderSlot first = new ReaderSlot();
     int firstIndex = registry.register(first);
-    registry.setEpoch(firstIndex, 7L);
-    registry.setValueEpoch(firstIndex, 7L);
-    registry.setWriterActive(firstIndex, true);
+    registry.beginOpForTest(firstIndex, true);
     long[] stateChunksBefore = wordChunkAddresses(registry);
 
     List<ReaderSlot> retainedSlots = new ArrayList<>();
@@ -354,9 +300,8 @@ public final class ReaderRegistryTest {
     assertEquals(first.readerStateAddress, stateChunksBefore[0]);
     assertEquals(first.readerStateAddress & 63L, 0L);
     assertEquals(stateChunksAfter.length, 2);
-    assertEquals(registry.minActiveEpoch(), 7L);
-    assertEquals(registry.minActiveValueEpoch(), 7L);
-    assertTrue(registry.hasActiveWriter());
+    assertTrue(registry.hasActiveReader());
+    assertEquals(first.seqAddress, stateChunksBefore[0] + 8L);
     assertTrue(registry.liveBitmap(1) != 0L);
   }
 
@@ -402,107 +347,6 @@ public final class ReaderRegistryTest {
     registry.close();
   }
 
-
-  @Test
-  public void ownerAssertionAllowsCloseAfterSlotValidation() throws Exception {
-    assertTrue(ReaderRegistry.class.desiredAssertionStatus(), "owner checks require -ea");
-    ReaderRegistry registry = newRegistry();
-    ReaderSlot slot = new ReaderSlot();
-    registry.register(slot);
-    assertSame(slot.registry, registry);
-    assertTrue(slot.readerStateAddress != 0L);
-    Method checkOwner = ReaderRegistry.class.getDeclaredMethod("assertOwner", ReaderSlot.class);
-    checkOwner.setAccessible(true);
-
-    registry.clear();
-    assertNull(slot.owner);
-    // Resume at the owner check after close invalidated the already-validated slot.
-    // Reflection keeps this interleaving deterministic without a hook in the read hot path.
-    checkOwner.invoke(null, slot);
-    expectThrows(
-        IllegalArgumentException.class, () -> registry.setReaderStateKnownEpoch(slot, 7L));
-    assertEquals(registry.minActiveEpoch(), Long.MAX_VALUE);
-  }
-
-  @Test(timeOut = 10_000L)
-  public void statePublicationDuringRegistryClearRemainsAReaderRejection() throws Exception {
-    AtomicReference<Throwable> unexpected = new AtomicReference<>();
-    for (int round = 0; round < 200 && unexpected.get() == null; round++) {
-      ReaderRegistry registry = newRegistry();
-      AtomicReference<ReaderSlot> slotReference = new AtomicReference<>();
-      CountDownLatch started = new CountDownLatch(1);
-      Thread publisher =
-          new Thread(
-              () -> {
-                ReaderSlot slot = new ReaderSlot();
-                registry.register(slot);
-                slotReference.set(slot);
-                started.countDown();
-                while (slot.registry == registry) {
-                  try {
-                    registry.setReaderStateKnownEpoch(slot, 7L);
-                  } catch (IllegalArgumentException expected) {
-                    // A clear racing with publication must be reported as a rejected reader.
-                  } catch (Throwable failure) {
-                    unexpected.compareAndSet(null, failure);
-                    return;
-                  }
-                }
-              });
-      publisher.start();
-      assertTrue(started.await(1L, TimeUnit.SECONDS));
-      LockSupport.parkNanos(100_000L);
-      registry.clear();
-      publisher.join(1_000L);
-      assertFalse(publisher.isAlive(), "publisher must stop after the registry is cleared");
-      assertNull(slotReference.get().registry);
-    }
-    assertNull(unexpected.get(), "close racing with trusted publication must not leak an error");
-  }
-
-  @Test
-  public void ownerAssertionAllowsCloseAfterStorageSnapshot() throws Exception {
-    assertTrue(ReaderRegistry.class.desiredAssertionStatus(), "owner checks require -ea");
-    ReaderRegistry registry = newRegistry();
-    int index = registry.register(new ReaderSlot());
-    Field storageField = ReaderRegistry.class.getDeclaredField("storage");
-    storageField.setAccessible(true);
-    Object capturedStorage = storageField.get(registry);
-    Method checkOwner =
-        ReaderRegistry.class.getDeclaredMethod("assertOwner", capturedStorage.getClass(), int.class);
-    checkOwner.setAccessible(true);
-
-    registry.clear();
-    // An index-based publisher can retain the old storage while close removes its slot.
-    checkOwner.invoke(null, capturedStorage, index);
-    assertEquals(registry.minActiveEpoch(), Long.MAX_VALUE);
-  }
-
-  @Test
-  public void statePublicationStillRejectsAnotherLiveOwner() throws Exception {
-    assertTrue(ReaderRegistry.class.desiredAssertionStatus(), "owner checks require -ea");
-    ReaderRegistry registry = newRegistry();
-    ReaderSlot slot = new ReaderSlot();
-    int index = registry.register(slot);
-    registry.setReaderState(slot, ReaderRegistry.VALUE_PROTECTION_BIT | 7L);
-    registry.setWriterAdmission(slot, true);
-    ExecutorService executor = Executors.newSingleThreadExecutor();
-    try {
-      executor
-          .submit(
-              () -> {
-                expectThrows(
-                    AssertionError.class, () -> registry.setReaderStateKnownEpoch(slot, 0L));
-              })
-          .get(10, TimeUnit.SECONDS);
-      assertEquals(
-          registry.readerState(slot),
-          ReaderRegistry.VALUE_PROTECTION_BIT | 7L);
-    } finally {
-      executor.shutdownNow();
-      registry.clear();
-    }
-  }
 
   @Test
   public void clearKeepsNativeChunksUntilAnIdempotentClose() {

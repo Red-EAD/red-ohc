@@ -504,7 +504,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -521,7 +521,7 @@ public class MaintenanceEventLoopTest {
       method.setAccessible(true);
       assertTrue(!(Boolean) method.invoke(loop));
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.retirementJournal().close();
       memory.closeArenas();
     }
@@ -547,7 +547,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     try {
@@ -579,7 +579,7 @@ public class MaintenanceEventLoopTest {
           "a blocked reader must still expose the retry deadline: notifications are"
               + " suppressed while blocked, so the retry is the wake that retries publication");
 
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       decision = captureWorkDecision.invoke(loop, false);
       assertTrue(
           (Long)
@@ -590,7 +590,7 @@ public class MaintenanceEventLoopTest {
               != Long.MAX_VALUE,
           "the retry deadline must become visible once reclaim can run");
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       memory.closeArenas();
     }
   }
@@ -613,7 +613,7 @@ public class MaintenanceEventLoopTest {
             journal,
             Long.MAX_VALUE);
     try {
-      readers.setValueEpoch(readerIndex, 1L);
+      readers.beginOpForTest(readerIndex, true);
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
@@ -646,7 +646,7 @@ public class MaintenanceEventLoopTest {
           (Long) retryDeadline.invoke(loop, retirementState, check) != Long.MAX_VALUE,
           "a scheduled reclaim retry must expose its deadline even while a reader is active");
     } finally {
-      readers.setEpoch(readerIndex, 0L);
+      readers.endOpForTest(readerIndex);
       journal.close();
       memory.closeArenas();
     }
@@ -707,7 +707,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -725,11 +725,11 @@ public class MaintenanceEventLoopTest {
           (Boolean) method.invoke(loop, loop.retirementJournal().workState(), null),
           "a flush must park behind a pinned reader instead of spinning");
 
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       assertTrue((Boolean) method.invoke(loop, loop.retirementJournal().workState(), null));
       flush.cancel(false);
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.retirementJournal().close();
       memory.closeArenas();
     }
@@ -776,7 +776,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -797,7 +797,7 @@ public class MaintenanceEventLoopTest {
           "a pinned QSBR flush must park instead of restarting lifecycle cleanup");
       flush.cancel(false);
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.retirementJournal().close();
       memory.closeArenas();
     }
@@ -845,7 +845,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot oldReader = new ReaderSlot();
     readers.register(oldReader);
-    readers.setValueEpoch(oldReader, 1L);
+    readers.beginOpForTest(oldReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -866,16 +866,17 @@ public class MaintenanceEventLoopTest {
           readers.consumeReaderNotification(oldReader),
           "the reader from the retirement epoch must remain armed");
       requestedWork.set(0);
+      // The new reader straddled this pass's arm, so the actor armed it too: its exit must
+      // drive the retry because it may pin the sealed batch for one extra turn.
       guard.exit(newReader);
-      assertEquals(
-          requestedWork.get(),
-          0,
-          "a reader admitted after the retirement cut must not wake a blocked reclaim pass");
+      assertTrue(
+          requestedWork.get() != 0,
+          "a straddling reader's exit must wake the blocked reclaim retry");
     } finally {
       if (newReader.readerDepth() != 0) {
         guard.exit(newReader);
       }
-      readers.setEpoch(oldReader, 0L);
+      readers.endOpForTest(oldReader);
       readers.clear();
       loop.retirementJournal().close();
       memory.closeArenas();
@@ -3668,7 +3669,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
-    readers.setValueEpoch(reader, 1L);
+    readers.beginOpForTest(reader, true);
     MaintenanceEventLoop loop = new MaintenanceEventLoop(
         index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
@@ -3687,7 +3688,7 @@ public class MaintenanceEventLoopTest {
       forceMinimumWorkQuota(loop);
       invokeMaintenancePass(loop);
       assertEquals(resources.pooledCount(), 0);
-      readers.setEpoch(reader, 0L);
+      readers.endOpForTest(reader);
       loop.readerQuiescent(reader);
 
       for (int pass = 0; pass < 8 && invokeBooleanMethod(loop, "hasRunnableWork"); pass++) {
@@ -3698,7 +3699,7 @@ public class MaintenanceEventLoopTest {
           "SAFE reclaim must recheck all resources whose captured watermark completed");
       assertFalse(invokeBooleanMethod(loop, "hasRunnableWork"));
     } finally {
-      readers.setEpoch(reader, 0L);
+      readers.endOpForTest(reader);
       loop.retirementJournal().close();
       memory.closeArenas();
     }
@@ -3894,7 +3895,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -3911,7 +3912,7 @@ public class MaintenanceEventLoopTest {
       assertFalse(loop.removeFromMap(entry, false, entry.generation(), 8L));
       assertTrue(data.containsKey(entry), "a failed actor removal must preserve the mapping");
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       memory.closeArenas();
     }
   }
@@ -3971,7 +3972,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -3995,8 +3996,8 @@ public class MaintenanceEventLoopTest {
       assertFalse(
           postFenceStarted.await(1L, TimeUnit.SECONDS),
           "async work published after the flush fence must not run before the fence completes");
-      readers.markActiveReaderNotifications();
-      readers.setEpoch(activeReader, 0L);
+      readers.armReaderQuiescence(new long[readers.slotCapacity()]);
+      readers.endOpForTest(activeReader);
       loop.readerQuiescent(activeReader);
       flush.get(2L, TimeUnit.SECONDS);
 
@@ -4004,7 +4005,7 @@ public class MaintenanceEventLoopTest {
       assertTrue(postFenceStarted.await(1L, TimeUnit.SECONDS));
     } finally {
       releasePostFence.countDown();
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.stop();
       loop.join(1_000L);
       memory.closeArenas();
@@ -4017,7 +4018,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -4030,12 +4031,12 @@ public class MaintenanceEventLoopTest {
       Thread.sleep(100L);
       assertFalse(flush.isDone(), "flush must include pending QSBR retirement reclaim");
 
-      readers.markActiveReaderNotifications();
-      readers.setEpoch(activeReader, 0L);
+      readers.armReaderQuiescence(new long[readers.slotCapacity()]);
+      readers.endOpForTest(activeReader);
       loop.readerQuiescent(activeReader);
       flush.get(3, TimeUnit.SECONDS);
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.stop();
       loop.join(1_000L);
       memory.closeArenas();
@@ -4048,7 +4049,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -4062,7 +4063,7 @@ public class MaintenanceEventLoopTest {
           flush.isDone(),
           "retirement published after the flush cut must belong to the next boundary");
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.retirementJournal().close();
       memory.closeArenas();
     }
@@ -4087,7 +4088,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     try {
@@ -4102,7 +4103,7 @@ public class MaintenanceEventLoopTest {
           3_000_000L,
           "the first blocked QSBR reclaim must wait one maintenance window before rescanning readers");
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       memory.closeArenas();
     }
   }
@@ -4131,7 +4132,6 @@ public class MaintenanceEventLoopTest {
     AtomicInteger requestedWork = (AtomicInteger) getField(loop, "requestedWork");
     try {
       assertTrue(guard.enter(pinned));
-      long pinnedEpoch = pinned.readerPublishedEpoch();
 
       retireOne(loop, memory);
       invokeMaintenancePass(loop);
@@ -4143,8 +4143,8 @@ public class MaintenanceEventLoopTest {
         ThreadContext newer = new ThreadContext(null);
         assertTrue(guard.enter(newer));
         assertTrue(
-            newer.readerPublishedEpoch() > pinnedEpoch,
-            "new readers must publish after the reader that blocks reclaim");
+            (readers.readerSequence(newer.slot) & 1L) != 0L,
+            "each newer reader publishes its own odd sequence word");
         guard.exit(newer);
         invokeMaintenancePass(loop);
       }
@@ -4354,7 +4354,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     loop.start();
@@ -4372,7 +4372,7 @@ public class MaintenanceEventLoopTest {
           loop.epoch() > firstEpoch,
           "each completed retirement cut must advance the reader epoch immediately");
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.stop();
       loop.join(1_000L);
       memory.closeArenas();
@@ -4435,7 +4435,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
-    readers.setValueEpoch(reader, 1L);
+    readers.beginOpForTest(reader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -4444,8 +4444,8 @@ public class MaintenanceEventLoopTest {
       retireOne(loop, memory);
       waitForRetiredEntries(loop, 1);
 
-      readers.markActiveReaderNotifications();
-      readers.setEpoch(reader, 0L);
+      readers.armReaderQuiescence(new long[readers.slotCapacity()]);
+      readers.endOpForTest(reader);
       loop.readerQuiescent(reader);
 
       waitForNoRetiredEntries(loop);
@@ -4463,7 +4463,7 @@ public class MaintenanceEventLoopTest {
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot activeReader = new ReaderSlot();
     readers.register(activeReader);
-    readers.setValueEpoch(activeReader, 1L);
+    readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 16L << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -4472,13 +4472,13 @@ public class MaintenanceEventLoopTest {
 
       loop.start();
       waitForRetiredEntries(loop, 1);
-      readers.markActiveReaderNotifications();
-      readers.setEpoch(activeReader, 0L);
+      readers.armReaderQuiescence(new long[readers.slotCapacity()]);
+      readers.endOpForTest(activeReader);
 
       loop.readerQuiescent(activeReader);
       waitForNoRetiredEntries(loop);
     } finally {
-      readers.setEpoch(activeReader, 0L);
+      readers.endOpForTest(activeReader);
       loop.stop();
       loop.join(1_000L);
       memory.closeArenas();

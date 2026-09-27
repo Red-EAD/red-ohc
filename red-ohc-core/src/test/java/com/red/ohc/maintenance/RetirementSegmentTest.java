@@ -191,7 +191,7 @@ public final class RetirementSegmentTest {
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), records);
       assertEquals(
-          journal.publishSafe(Long.MAX_VALUE),
+          journal.publishSafe(true, true),
           (records + RetirementSegment.CAPACITY - 1) / RetirementSegment.CAPACITY);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
       assertEquals(journal.publishedRecordsTotal(), records);
@@ -292,7 +292,7 @@ public final class RetirementSegmentTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), records);
-      journal.publishSafe(Long.MAX_VALUE);
+      journal.publishSafe(true, true);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
 
       Field trackingField = RetirementJournal.class.getDeclaredField("allocatedSegmentDescriptors");
@@ -322,7 +322,7 @@ public final class RetirementSegmentTest {
       journal.cutAllProducersAtWatermark();
 
       assertEquals(journal.sealReadySegments(7L), 2);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 2);
+      assertEquals(journal.publishSafe(true, true), 2);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 2);
       assertEquals(journal.queuedRecords(), 0L);
       assertEquals(journal.actorReclaimedRecordsTotal(), 2L);
@@ -346,7 +346,7 @@ public final class RetirementSegmentTest {
       assertEquals(journal.unsafeBytes(), WriterArena.allocationWeight(allocation));
       assertEquals(journal.safeRecords(), 0L);
 
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.unsafeRecords(), 0L);
       assertEquals(journal.safeRecords(), 1L);
       assertEquals(journal.claimedRecords(), 0L);
@@ -380,7 +380,7 @@ public final class RetirementSegmentTest {
 
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), count);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, count);
       assertEquals(journal.queuedRecords(), 0L);
 
@@ -415,7 +415,7 @@ public final class RetirementSegmentTest {
       journal.append(directEntry, directAllocation);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 2);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 2);
       pooledEntry = 0L;
       directEntry = 0L;
@@ -501,7 +501,7 @@ public final class RetirementSegmentTest {
       journal.append(second, allocation);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 2);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
 
       try {
         journal.reclaimActorSafeBatchResult(memory, 1);
@@ -546,7 +546,7 @@ public final class RetirementSegmentTest {
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot active = new ReaderSlot();
     readers.register(active);
-    readers.setValueEpoch(active, 7L);
+    readers.beginOpForTest(active, true);
     RetirementJournal journal = new RetirementJournal(memory, 1);
     try {
       journal.append(0L, 0L);
@@ -556,11 +556,11 @@ public final class RetirementSegmentTest {
       assertEquals(journal.queuedRecords(), 1L);
       assertFalse(journal.hasSafeSegments());
 
-      readers.setEpoch(active, 0L);
+      readers.endOpForTest(active);
       assertEquals(journal.reclaimActorResult(readers, Integer.MAX_VALUE).records, 1);
       assertEquals(journal.queuedRecords(), 0L);
     } finally {
-      readers.setEpoch(active, 0L);
+      readers.endOpForTest(active);
       readers.clear();
       readers.close();
       journal.close();
@@ -574,7 +574,7 @@ public final class RetirementSegmentTest {
     ReaderRegistry readers = new ReaderRegistry(memory);
     ReaderSlot active = new ReaderSlot();
     readers.register(active);
-    readers.setEpoch(active, 7L);
+    readers.beginOpForTest(active, false);
     RetirementJournal journal = new RetirementJournal(memory, 1);
     try {
       journal.append(0L, 0L);
@@ -587,7 +587,7 @@ public final class RetirementSegmentTest {
           journal.hasActorWork(),
           "a sealed segment pinned by a reader must wait for reclaim retry or quiescence");
     } finally {
-      readers.setEpoch(active, 0L);
+      readers.endOpForTest(active);
       readers.clear();
       readers.close();
       journal.close();
@@ -607,7 +607,7 @@ public final class RetirementSegmentTest {
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 1);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), 1);
+      assertEquals(journal.publishSafe(true, true), 1);
       journal.finishReadyDrains();
 
       Field completionCursorField = lane.getClass().getDeclaredField("completionCursor");
@@ -666,7 +666,7 @@ public final class RetirementSegmentTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), records);
-      journal.publishSafe(Long.MAX_VALUE);
+      journal.publishSafe(true, true);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
       assertEquals(journal.queuedRecords(), 0L);
       assertTrue(journal.allocatedSegments() >= 17L);
@@ -694,7 +694,7 @@ public final class RetirementSegmentTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), records);
-      assertEquals(journal.publishSafe(Long.MAX_VALUE), records / RetirementSegment.CAPACITY + 1);
+      assertEquals(journal.publishSafe(true, true), records / RetirementSegment.CAPACITY + 1);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
       assertEquals(journal.publishedRecordsTotal(), records);
       assertEquals(journal.completedRecordsTotal(), records);
@@ -741,7 +741,7 @@ public final class RetirementSegmentTest {
                 while (writing.get() || journal.queuedRecords() != 0L) {
                   journal.cutAllProducersAtWatermark();
                   journal.sealReadySegments(epoch++);
-                  journal.publishSafe(Long.MAX_VALUE);
+                  journal.publishSafe(true, true);
                   journal.reclaimActorResult(memory, Integer.MAX_VALUE);
                   journal.finishReadyDrains();
                 }
@@ -815,7 +815,7 @@ public final class RetirementSegmentTest {
                 while (writing.get() || journal.queuedRecords() != 0L) {
                   journal.cutAllProducersAtWatermark();
                   journal.sealReadySegments(epoch++);
-                  journal.publishSafe(Long.MAX_VALUE);
+                  journal.publishSafe(true, true);
                   journal.reclaimActorResult(memory, Integer.MAX_VALUE);
                   journal.finishReadyDrains();
                 }
@@ -890,7 +890,7 @@ public final class RetirementSegmentTest {
                 while (writing.get() || journal.queuedRecords() != 0L) {
                   journal.cutAllProducersAtWatermark();
                   journal.sealReadySegments(epoch++);
-                  journal.publishSafe(Long.MAX_VALUE);
+                  journal.publishSafe(true, true);
                   while (journal.reclaimActorSafeBatchResult(memory, 1).records
                       != 0) {
                     // Drain all segments that became SAFE in this turn.
@@ -941,7 +941,7 @@ public final class RetirementSegmentTest {
       }
       journal.cutAllProducersAtWatermark();
       assertEquals(journal.sealReadySegments(1L), 4 * RetirementSegment.CAPACITY);
-      journal.publishSafe(Long.MAX_VALUE);
+      journal.publishSafe(true, true);
 
       RetirementJournal.ReclaimResult result =
           journal.reclaimActorResult(memory, Integer.MAX_VALUE);

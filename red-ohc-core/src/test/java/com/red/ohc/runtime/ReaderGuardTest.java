@@ -16,30 +16,33 @@ import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.storage.NativeMemory;
 
 public class ReaderGuardTest {
+  private static MaintenanceEventLoop loop(
+      NativeMemory.Memory memory, ReaderRegistry readers) {
+    return new MaintenanceEventLoop(
+        new ConcurrentHashMap<>(),
+        memory,
+        Ticker.DEFAULT,
+        1 << 20,
+        Eviction.LRU,
+        readers,
+        Long.MAX_VALUE);
+  }
+
   @Test
-  public void enterPublishesAnEpochAndExitQuiescesTheReader() {
+  public void enterPublishesAnOddSequenceAndExitQuiescesTheReader() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop);
+    ReaderGuard guard = new ReaderGuard(loop(memory, readers));
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
-      long epoch = context.readerPublishedEpoch();
-      assertTrue(epoch != 0L);
-      assertEquals(
-          readers.readerState(context.readerSlotIndex()),
-          ReaderRegistry.VALUE_PROTECTION_BIT | epoch);
+      long seq = readers.readerSequence(context.slot);
+      assertTrue((seq & 1L) != 0L);
+      assertTrue((seq & ReaderRegistry.VALUE_PROTECTION_BIT) != 0L);
       guard.exit(context);
-      assertEquals(context.readerPublishedEpoch(), 0L);
-      assertEquals(readers.readerState(context.readerSlotIndex()), 0L);
+      long exited = readers.readerSequence(context.slot);
+      assertEquals(exited, (seq & Long.MAX_VALUE) + 1L);
+      assertEquals(exited & 1L, 0L);
     } finally {
       readers.clear();
       readers.close();
@@ -48,29 +51,18 @@ public class ReaderGuardTest {
   }
 
   @Test
-  public void admittedReaderUsesTheSamePublishedEpochAndQuiescesOnExit() {
+  public void lookupEntryPublishesOddWithoutTheValueBit() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers,
-            Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop);
+    ReaderGuard guard = new ReaderGuard(loop(memory, readers));
     ThreadContext context = new ThreadContext(null);
     try {
-      assertTrue(guard.enterAfterAdmission(context));
-      long epoch = context.readerPublishedEpoch();
-      assertTrue(epoch != 0L);
-      assertEquals(
-          readers.readerState(context.readerSlotIndex()),
-          ReaderRegistry.VALUE_PROTECTION_BIT | epoch);
+      assertTrue(guard.enterLookupAfterAdmission(context));
+      long seq = readers.readerSequence(context.slot);
+      assertTrue((seq & 1L) != 0L);
+      assertEquals(seq & ReaderRegistry.VALUE_PROTECTION_BIT, 0L);
       guard.exit(context);
-      assertEquals(readers.readerState(context.readerSlotIndex()), 0L);
+      assertEquals(readers.readerSequence(context.slot) & 1L, 0L);
     } finally {
       readers.clear();
       readers.close();
@@ -79,26 +71,17 @@ public class ReaderGuardTest {
   }
 
   @Test
-  public void closeRacingAfterEpochPublicationRejectsTheReaderBeforeItCanDereferenceNativeMemory() {
+  public void closeRacingAfterRegistrationRejectsTheReaderBeforeNativeDereference() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers, Long.MAX_VALUE);
+    MaintenanceEventLoop loop = loop(memory, readers);
     ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
-      // Close is quiesced-only now: a reader rejected by an unbinding registry must fail
-      // cleanly instead of dereferencing freed native memory.
       loop.beginClosing();
       readers.clear();
       assertFalse(guard.enter(context));
-      assertEquals(context.readerPublishedEpoch(), 0L);
+      assertEquals(context.readerDepth(), 0);
     } finally {
       readers.clear();
       readers.close();
@@ -107,18 +90,10 @@ public class ReaderGuardTest {
   }
 
   @Test
-  public void firstReadRacingRegistryCloseReturnsMissInsteadOfLeakingAnInternalException() {
+  public void firstReadRacingRegistryCloseReturnsMissWithoutLeakingAnInternalException() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers,
-            Long.MAX_VALUE);
+    MaintenanceEventLoop loop = loop(memory, readers);
     ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext context = new ThreadContext(null);
     try {
@@ -126,7 +101,7 @@ public class ReaderGuardTest {
       readers.clear();
       assertFalse(guard.enter(context));
       assertFalse(context.isRegistered());
-      assertEquals(context.readerPublishedEpoch(), 0L);
+      assertEquals(context.readerDepth(), 0);
     } finally {
       readers.clear();
       readers.close();
@@ -135,28 +110,21 @@ public class ReaderGuardTest {
   }
 
   @Test
-  public void nestedReadersReuseOneEpochAndExitOnlyAtTheOuterBoundary() {
+  public void nestedReadersReuseOneOddSequenceAndExitOnlyAtTheOuterBoundary() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop);
+    ReaderGuard guard = new ReaderGuard(loop(memory, readers));
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enter(context));
-      long epoch = context.readerPublishedEpoch();
+      long seq = readers.readerSequence(context.slot);
       assertTrue(guard.enter(context));
-      assertEquals(context.readerPublishedEpoch(), epoch);
+      assertEquals(readers.readerSequence(context.slot), seq);
       guard.exit(context);
-      assertEquals(context.readerPublishedEpoch(), epoch);
+      assertEquals(readers.readerSequence(context.slot), seq);
       guard.exit(context);
-      assertEquals(context.readerPublishedEpoch(), 0L);
+      assertEquals(readers.readerSequence(context.slot) & 1L, 0L);
+      assertEquals(context.readerDepth(), 0);
     } finally {
       readers.clear();
       readers.close();
@@ -165,35 +133,30 @@ public class ReaderGuardTest {
   }
 
   @Test
-  public void nestedValueGuardUpgradesAndThenRestoresLookupOnlyProtection() {
+  public void nestedValueGuardUpgradesTheBitAndKeepsItUntilTheOuterExit() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers, Long.MAX_VALUE);
-    ReaderGuard guard = new ReaderGuard(loop);
+    ReaderGuard guard = new ReaderGuard(loop(memory, readers));
     ThreadContext context = new ThreadContext(null);
     try {
       assertTrue(guard.enterLookupAfterAdmission(context));
-      long epoch = context.readerPublishedEpoch();
-      assertTrue(epoch != 0L);
-      assertEquals(readers.readerState(context.readerSlotIndex()), epoch);
+      long seq = readers.readerSequence(context.slot);
+      assertTrue((seq & 1L) != 0L);
+      assertEquals(seq & ReaderRegistry.VALUE_PROTECTION_BIT, 0L);
 
       assertTrue(guard.enter(context));
       assertEquals(
-          readers.readerState(context.readerSlotIndex()),
-          ReaderRegistry.VALUE_PROTECTION_BIT | epoch);
+          readers.readerSequence(context.slot),
+          seq | ReaderRegistry.VALUE_PROTECTION_BIT);
       guard.exit(context);
-      assertEquals(context.readerPublishedEpoch(), epoch);
-      assertEquals(readers.readerState(context.readerSlotIndex()), epoch);
+      // The value bit deliberately persists until the depth-0 exit: a mid-stack downgrade is a
+      // no-op so the actor never observes an unprotecting store inside one op.
+      assertEquals(
+          readers.readerSequence(context.slot),
+          seq | ReaderRegistry.VALUE_PROTECTION_BIT);
 
       guard.exit(context);
-      assertEquals(context.readerPublishedEpoch(), 0L);
+      assertEquals(readers.readerSequence(context.slot) & 1L, 0L);
     } finally {
       readers.clear();
       readers.close();
@@ -205,14 +168,7 @@ public class ReaderGuardTest {
   public void readerExitSignalsAReclaimBlockedActor() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = new ReaderRegistry(memory);
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(),
-            memory,
-            Ticker.DEFAULT,
-            1 << 20,
-            Eviction.LRU,
-            readers, Long.MAX_VALUE);
+    MaintenanceEventLoop loop = loop(memory, readers);
     Field requestedWorkField = MaintenanceEventLoop.class.getDeclaredField("requestedWork");
     requestedWorkField.setAccessible(true);
     AtomicInteger requestedWork = (AtomicInteger) requestedWorkField.get(loop);
@@ -221,7 +177,7 @@ public class ReaderGuardTest {
     try {
       assertTrue(guard.enter(context));
       requestedWork.set(0);
-      readers.markActiveReaderNotifications();
+      readers.armReaderQuiescence(new long[readers.slotCapacity()]);
       guard.exit(context);
       assertTrue(
           requestedWork.get() != 0,

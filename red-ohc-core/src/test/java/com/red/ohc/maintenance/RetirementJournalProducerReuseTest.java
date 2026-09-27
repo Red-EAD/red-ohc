@@ -93,7 +93,7 @@ public final class RetirementJournalProducerReuseTest {
                 while (!stop.get() && (finished.getCount() != 0L || journal.hasWork())) {
                   journal.cutAllProducersAtWatermark();
                   journal.sealReadySegments(epoch++);
-                  journal.publishSafe(Long.MAX_VALUE);
+                  journal.publishSafe(true, true);
                   journal.reclaimActorResult(memory, Integer.MAX_VALUE);
                   journal.finishReadyDrains();
                 }
@@ -177,7 +177,7 @@ public final class RetirementJournalProducerReuseTest {
         lane.commit(reservation);
         journal.cutAllProducersAtWatermark();
         assertEquals(journal.sealReadySegments(round), 1);
-        journal.publishSafe(Long.MAX_VALUE);
+        journal.publishSafe(true, true);
         assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 1);
         journal.finishReadyDrains();
         while (!stop.get() && observed.get() < round) {
@@ -251,7 +251,7 @@ public final class RetirementJournalProducerReuseTest {
         // cold-path monitor. If completion is not published yet, reclamation must wait instead.
         journal.cutAllProducersAtWatermark();
         int sealed = journal.sealReadySegments(1L);
-        journal.publishSafe(Long.MAX_VALUE);
+        journal.publishSafe(true, true);
         journal.reclaimActorResult(memory, Integer.MAX_VALUE);
         receiver = journal.createLane();
         assertTrue(receiver.reserve(next));
@@ -281,7 +281,7 @@ public final class RetirementJournalProducerReuseTest {
 
       long[] watermark = journal.captureAndCutWatermark();
       journal.sealSnapshotSegments(2L, watermark);
-      journal.publishSafe(Long.MAX_VALUE);
+      journal.publishSafe(true, true);
       journal.reclaimActorResult(memory, Integer.MAX_VALUE);
       journal.finishReadyDrains();
       assertTrue(journal.watermarkComplete(watermark));

@@ -5,6 +5,8 @@ public final class ReaderSlot {
   int registryIndex = -1;
   /** Absolute address of word0 in this reader's stable 64-byte native lane. */
   long readerStateAddress;
+  /** Address of the per-op sequence word (word1) in the same lane. */
+  long seqAddress;
   volatile Thread owner;
   volatile WriterResource writerResource;
   /** Actor-owned slow-path marker; reader exit consumes it to request one maintenance rescan. */

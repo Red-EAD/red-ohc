@@ -582,7 +582,7 @@ public class BulkCacheTest {
               boundedKeys,
               (key, value) -> {
                 callbacks.incrementAndGet();
-                if (context.readerPublishedEpoch() != 0L) {
+                if (context.readerDepth() != 0) {
                   observedReaderEpoch.set(true);
                 }
                 assertTrue(value.length() > 0);
@@ -593,7 +593,7 @@ public class BulkCacheTest {
       assertTrue(observedReaderEpoch.get());
       assertTrue(readerActiveAtBoundary.get());
       assertEquals(context.readerDepth(), 0);
-      assertEquals(context.readerPublishedEpoch(), 0L);
+      assertEquals(context.readerDepth(), 0);
     }
   }
 
@@ -722,7 +722,7 @@ public class BulkCacheTest {
 
       assertTrue(propagated);
       assertEquals(context.readerDepth(), 0);
-      assertEquals(context.readerPublishedEpoch(), 0L);
+      assertEquals(context.readerDepth(), 0);
       assertTrue(cache.getDirect("key", value -> assertEquals(value.length(), 5)));
     }
   }
@@ -1389,7 +1389,7 @@ public class BulkCacheTest {
 
           @Override
           public String deserialize(ByteBuffer buffer) {
-            deserializedInsideEpoch.set(context.get().readerPublishedEpoch() != 0L);
+            deserializedInsideEpoch.set(context.get().readerDepth() != 0);
             return STRING.deserialize(buffer);
           }
 
