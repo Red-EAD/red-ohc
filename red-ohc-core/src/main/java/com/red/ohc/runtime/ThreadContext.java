@@ -11,8 +11,8 @@ import com.red.ohc.codec.LookupKey;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.RetirementJournal;
 import com.red.ohc.maintenance.RetirementSegment;
-import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.maintenance.WriterLifecycleLane;
+import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.WriterArena;
 
 public final class ThreadContext {

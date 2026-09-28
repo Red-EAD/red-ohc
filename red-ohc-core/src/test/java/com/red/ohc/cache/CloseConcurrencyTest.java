@@ -10,7 +10,6 @@ import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.OHCache;
-import com.red.ohc.cache.OHCacheBuilder;
 
 /**
  * Close is a quiesced-only teardown: the cache is process-lifetime in production and callers

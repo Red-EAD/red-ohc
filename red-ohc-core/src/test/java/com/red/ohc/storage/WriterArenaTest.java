@@ -1397,7 +1397,8 @@ public class WriterArenaTest {
   }
 
   @Test
-  public void pageMappingFailureTrimsOnlyAnEmptyAvailablePageAndRetriesOnce() {    FailingPageMapper allocator = new FailingPageMapper();
+  public void pageMappingFailureTrimsOnlyAnEmptyAvailablePageAndRetriesOnce() {
+    FailingPageMapper allocator = new FailingPageMapper();
     NativeMemory.Memory memory = new NativeMemory.Memory(allocator);
     try {
       long idleBytes = 32_700L;
