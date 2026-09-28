@@ -66,9 +66,9 @@ public final class Entry {
 
   private static final AtomicLongFieldUpdater<Entry> VALUE_ADDRESS =
       AtomicLongFieldUpdater.newUpdater(Entry.class, "valueAddress");
-  /** High bit reserved in the native allocation word for the logical mapping state. */
-  private static final long LOGICAL_ABSENT = Long.MIN_VALUE;
-  private static final long VALUE_ALLOCATION_MASK = Long.MAX_VALUE;
+  /** Logical-absence tag folded into the tagged value address; cleared when a value republishes. */
+  public static final long VALUE_LOGICALLY_ABSENT = 1L << 62;
+  private static final long VALUE_ADDRESS_MASK = ~(VALUE_TAG_MASK | VALUE_LOGICALLY_ABSENT);
 
   public final long nativeKeyAddress;
   public final int keyLength;
@@ -170,7 +170,7 @@ public final class Entry {
     NativeMemory.putLong(metadata + STATE_WORD_OFFSET, 0L);
     NativeMemory.putInt(metadata + TIMER_LOCATION_OFFSET, TIMER_UNSCHEDULED);
     NativeMemory.putInt(metadata + POLICY_META_OFFSET, 0);
-    NativeMemory.putLong(metadata + CURRENT_VALUE_ALLOCATION_OFFSET, LOGICAL_ABSENT);
+    NativeMemory.putLong(metadata + CURRENT_VALUE_ALLOCATION_OFFSET, 0L);
     NativeMemory.putLong(metadata + MAINTENANCE_META_OFFSET, 0L);
     NativeMemory.putLong(metadata + TIMER_DEADLINE_OFFSET, 0L);
     NativeMemory.putLong(metadata + POLICY_BYTE_WEIGHT_OFFSET, 0L);
@@ -178,8 +178,7 @@ public final class Entry {
 
   /** Allocation length paired with the currently published value pointer. */
   public long currentValueAllocation() {
-    return NativeMemory.getLongVolatile(nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET)
-        & VALUE_ALLOCATION_MASK;
+    return NativeMemory.getLongVolatile(nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET);
   }
 
   /** Must be published before the matching value pointer becomes visible. */
@@ -187,29 +186,23 @@ public final class Entry {
     if (allocation < 0L) {
       throw new IllegalArgumentException("negative value allocation");
     }
-    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
-    // Value writers own the Entry claim whenever they update the allocation. Preserve the
-    // logical marker observed under that claim and publish the combined word with one release
-    // store; logical present/absent transitions retain their CAS helpers below because they can
-    // be initiated by the reader/actor side.
-    long current = NativeMemory.getLong(address);
     NativeMemory.putLongRelease(
-        address, (allocation & VALUE_ALLOCATION_MASK) | (current & LOGICAL_ABSENT));
+        nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET, allocation);
   }
 
   public static long tagValueAddress(long rawAddress, boolean hasTtl) {
     if (rawAddress == 0L) {
       return 0L;
     }
-    if ((rawAddress & VALUE_TAG_MASK) != 0L) {
+    if ((rawAddress & ~VALUE_ADDRESS_MASK) != 0L) {
       throw new IllegalArgumentException(
-          "native value address must be 8-byte aligned: " + rawAddress);
+          "native value address must be 8-byte aligned below bit 62: " + rawAddress);
     }
     return hasTtl ? rawAddress | VALUE_HAS_TTL : rawAddress;
   }
 
   public static long rawValueAddress(long taggedAddress) {
-    return taggedAddress & ~VALUE_TAG_MASK;
+    return taggedAddress & VALUE_ADDRESS_MASK;
   }
 
   public static boolean hasTtl(long taggedAddress) {
@@ -328,15 +321,29 @@ public final class Entry {
     return (taggedValue & VALUE_LIFECYCLE_MASK) == 0L;
   }
 
+  /** Logical-absence test on an already-loaded tagged pointer; never dereferences native memory. */
+  public static boolean isAbsentTaggedValue(long taggedValue) {
+    return (taggedValue & VALUE_LOGICALLY_ABSENT) != 0L;
+  }
+
+  /** Initial tagged word for a mapping inserted into the CHM but not yet logically present. */
+  public static long absentTaggedValue(long rawAddress, boolean hasTtl) {
+    return tagValueAddress(rawAddress, hasTtl) | VALUE_LOGICALLY_ABSENT;
+  }
+
+  /** Equality that ignores the logical-absence tag; identity guards pair it with the generation. */
+  public static boolean samePublishedValue(long a, long b) {
+    return (a & ~VALUE_LOGICALLY_ABSENT) == (b & ~VALUE_LOGICALLY_ABSENT);
+  }
+
   /** Marks this entry as logically present and reports whether the counter needs an increment. */
   public boolean markLogicallyPresent() {
-    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
-    for (;;) {
-      long current = NativeMemory.getLongVolatile(address);
-      if ((current & LOGICAL_ABSENT) == 0L) {
+    while (true) {
+      long current = valueAddress;
+      if ((current & VALUE_LOGICALLY_ABSENT) == 0L) {
         return false;
       }
-      if (NativeMemory.compareAndSwapLong(address, current, current & VALUE_ALLOCATION_MASK)) {
+      if (VALUE_ADDRESS.compareAndSet(this, current, current & ~VALUE_LOGICALLY_ABSENT)) {
         return true;
       }
     }
@@ -344,32 +351,17 @@ public final class Entry {
 
   /** Returns whether this entry has already been excluded from logical Map accounting. */
   public boolean isLogicallyAbsent() {
-    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
-    return (NativeMemory.getLongVolatile(address) & LOGICAL_ABSENT) != 0L;
-  }
-
-  /** Single volatile read yielding allocation + absent from the metadata word. */
-  public long currentValueAllocationAndAbsent() {
-    return NativeMemory.getLongVolatile(nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET);
-  }
-
-  public static long allocationOfMetadataWord(long metadataWord) {
-    return metadataWord & VALUE_ALLOCATION_MASK;
-  }
-
-  public static boolean absentOfMetadataWord(long metadataWord) {
-    return (metadataWord & LOGICAL_ABSENT) != 0L;
+    return (valueAddress & VALUE_LOGICALLY_ABSENT) != 0L;
   }
 
   /** Marks this entry as logically absent and reports whether the counter needs a decrement. */
   public boolean markLogicallyAbsent() {
-    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
-    for (;;) {
-      long current = NativeMemory.getLongVolatile(address);
-      if ((current & LOGICAL_ABSENT) != 0L) {
+    while (true) {
+      long current = valueAddress;
+      if ((current & VALUE_LOGICALLY_ABSENT) != 0L) {
         return false;
       }
-      if (NativeMemory.compareAndSwapLong(address, current, current | LOGICAL_ABSENT)) {
+      if (VALUE_ADDRESS.compareAndSet(this, current, current | VALUE_LOGICALLY_ABSENT)) {
         return true;
       }
     }
@@ -382,18 +374,17 @@ public final class Entry {
 
   /**
    * Marks this entry absent while the caller owns the Entry writer claim. The writer claim makes
-   * the allocation word stable, so the actor can use one ordered store instead of a CAS loop.
+   * the tagged value address single-writer, so the actor can use one ordered store.
    */
   public boolean markLogicallyAbsentAfterWriterClaim() {
     if (!isWriterLocked()) {
       throw new IllegalStateException("writer claim is required for the actor absent transition");
     }
-    long address = nativeMetadataAddress() + CURRENT_VALUE_ALLOCATION_OFFSET;
-    long current = NativeMemory.getLongVolatile(address);
-    if ((current & LOGICAL_ABSENT) != 0L) {
+    long current = valueAddress;
+    if ((current & VALUE_LOGICALLY_ABSENT) != 0L) {
       return false;
     }
-    NativeMemory.putLongRelease(address, current | LOGICAL_ABSENT);
+    VALUE_ADDRESS.set(this, current | VALUE_LOGICALLY_ABSENT);
     return true;
   }
 
@@ -429,11 +420,11 @@ public final class Entry {
     setValueLifecycle(VALUE_DEAD);
   }
 
-  /** Clears only the native value pointer while retaining the retired/dead lifecycle tag. */
+  /** Clears the value pointer while retaining lifecycle and logical-absence tags. */
   public void clearValue() {
     while (true) {
       long current = valueAddress;
-      long next = current & VALUE_LIFECYCLE_MASK;
+      long next = current & (VALUE_LIFECYCLE_MASK | VALUE_LOGICALLY_ABSENT);
       if (current == next || VALUE_ADDRESS.compareAndSet(this, current, next)) {
         return;
       }

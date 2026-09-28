@@ -9,8 +9,6 @@ public final class LookupKey {
   private byte[] bytes;
   private int length;
   private int hash;
-  private Entry comparedEntry;
-  private long comparedAbsenceWord;
 
   public void set(byte[] bytes, int length) {
     if (this.bytes != bytes) {
@@ -54,29 +52,7 @@ public final class LookupKey {
       return false;
     }
     Entry entry = (Entry) other;
-    if (entry.keyLength() != length) {
-      return false;
-    }
-    if (length == 0) {
-      return true;
-    }
-    // Warm the logical-absence line while the key bytes load is still in flight.
-    comparedEntry = entry;
-    comparedAbsenceWord = entry.currentValueAllocationAndAbsent();
-    return NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, length);
-  }
-
-  /**
-   * Absence word observed during the CHM equals walk for this entry, else a fresh read. Reading at
-   * comparison time linearizes the get before any racing remove, so no fresh read is required.
-   */
-  public long absenceWordFor(Entry entry) {
-    if (entry == null) {
-      return 0L;
-    }
-    if (entry == comparedEntry) {
-      return comparedAbsenceWord;
-    }
-    return entry.currentValueAllocationAndAbsent();
+    return entry.keyLength() == length
+        && (length == 0 || NativeMemory.equals(entry.nativeKeyBytesAddress(), bytes, 0, length));
   }
 }

@@ -3468,7 +3468,7 @@ public final class MaintenanceEventLoop
       long observedGeneration,
       int observedPolicyState) {
     if (isCurrent(entry)
-        && entry.valueAddress == observedValueAddress
+        && Entry.samePublishedValue(entry.valueAddress, observedValueAddress)
         && entry.generation() == observedGeneration) {
       policy.access(entry, observedPolicyState);
       policy.recordAccessHit();
@@ -3533,7 +3533,7 @@ public final class MaintenanceEventLoop
         entry, false, expectedGeneration, expectedValueAddress, RemovalCause.EXPIRED)) {
       physicalExpired++;
     } else {
-      if (entry.valueAddress == expectedValueAddress && isCurrent(entry)) {
+      if (Entry.samePublishedValue(entry.valueAddress, expectedValueAddress) && isCurrent(entry)) {
         wheel.add(entry, deadline);
       }
     }
@@ -3572,7 +3572,8 @@ public final class MaintenanceEventLoop
         return false;
       }
       writerHeld = true;
-      if (entry.generation() != expectedGeneration || entry.valueAddress != expectedValueAddress) {
+      if (entry.generation() != expectedGeneration
+          || !Entry.samePublishedValue(entry.valueAddress, expectedValueAddress)) {
         return false;
       }
       entry.markRetired();

@@ -966,7 +966,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return null;
     }
     if (!current.isAlive()
-        || current.valueAddress != attempt.expectedTaggedValue
+        || !Entry.samePublishedValue(current.valueAddress, attempt.expectedTaggedValue)
         || current.generation() != attempt.expectedGeneration
         || !claimWriter(current)) {
       attempt.retry = true;
@@ -974,7 +974,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return current;
     }
     attempt.writerHeld = true;
-    if (current.valueAddress != attempt.expectedTaggedValue
+    if (!Entry.samePublishedValue(current.valueAddress, attempt.expectedTaggedValue)
         || current.generation() != attempt.expectedGeneration) {
       attempt.writerHeld = false;
       releaseWriter(current);
@@ -1004,7 +1004,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           Entry.tagValueAddress(
               address, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE);
       probe.currentValueAllocation(allocation);
-      probe.valueAddress = taggedValue;
+      probe.valueAddress = taggedValue | Entry.VALUE_LOGICALLY_ABSENT;
     } catch (Throwable failure) {
       freeBlock(address, allocation);
       throw failure;
@@ -2143,12 +2143,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long finalTaggedValue = entry.valueAddress;
       long finalAddress = Entry.rawValueAddress(finalTaggedValue);
       long finalGeneration = Entry.generationOfStateWord(claimedStateWord);
-      long metadataWord = entry.currentValueAllocationAndAbsent();
-      long finalAllocation = Entry.allocationOfMetadataWord(metadataWord);
+      long finalAllocation = entry.currentValueAllocation();
       if (finalAddress != 0L && finalAllocation == 0L) {
         finalAllocation = ValueBlock.allocationLength(ValueBlock.length(finalAddress));
       }
-      boolean logicallyAbsent = Entry.absentOfMetadataWord(metadataWord);
+      boolean logicallyAbsent = Entry.isAbsentTaggedValue(finalTaggedValue);
       if (!Entry.isAliveTagged(finalTaggedValue)
           || (versioned
               && (finalTaggedValue != expectedTaggedValue
@@ -2729,7 +2728,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           new Entry(
               keyAddress,
               keyLength,
-              Entry.tagValueAddress(
+              Entry.absentTaggedValue(
                   valueAddress, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE));
       entry.initializeKeyHash(hash);
       entry.initializeNativeMetadata();
@@ -2851,7 +2850,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (!entry.isAlive()
           || data.get(entry) != entry
           || (expectedTaggedValue != 0L
-              && (entry.valueAddress != expectedTaggedValue
+              && (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)
                   || entry.generation() != expectedGeneration))) {
         return false;
       }
@@ -2875,7 +2874,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (!entry.isAlive()
           || data.get(entry) != entry
           || (expectedTaggedValue != 0L
-              && (entry.valueAddress != expectedTaggedValue
+              && (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)
                   || entry.generation() != expectedGeneration))) {
         return false;
       }
@@ -2990,7 +2989,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           valueIfLive(
               entry,
               observedTaggedValue,
-              context.lookupKey.absenceWordFor(entry),
               preReadValueDeadline(observedTaggedValue),
               Entry.hasTtl(observedTaggedValue)
                   ? deadlineClock.nowNanos()
@@ -3385,7 +3383,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         valueIfLive(
             entry,
             observedTaggedValue,
-            context.lookupKey.absenceWordFor(entry),
             preReadValueDeadline(observedTaggedValue),
             Entry.hasTtl(observedTaggedValue)
                 ? deadlineClock.nowNanos()
@@ -5277,7 +5274,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     boolean writerHeld = false;
     boolean publishMutation = false;
     try {
-      if (!entry.isAlive() || entry.valueAddress != expectedTaggedValue) {
+      if (!entry.isAlive() || !Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)) {
         return;
       }
       if (!claimWriter(entry)) {
@@ -5439,15 +5436,18 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
    */
   private void markLogicallyAbsentIfCurrent(
       Entry entry, long expectedTaggedValue) {
-    if (!entry.isAlive() || entry.valueAddress != expectedTaggedValue) {
+    if (!entry.isAlive()) {
       return;
     }
     // A reader can observe an expired value while the entry is still in the insertion handoff,
-    // before finishInsertion flips the native logical marker to present. In that case there is no
-    // writer claim to acquire, but the actor still needs a mutation hint so it cannot retain a
-    // stale policy node after the handoff completes.
+    // before finishInsertion flips the logical tag to present. In that case there is no writer
+    // claim to acquire, but the actor still needs a mutation hint so it cannot retain a stale
+    // policy node after the handoff completes.
     if (entry.isLogicallyAbsent()) {
       worker.publishMutation(entry, Entry.PENDING_UPDATE);
+      return;
+    }
+    if (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)) {
       return;
     }
     if (!claimWriter(entry)) {
@@ -5455,7 +5455,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     boolean publishMutation = false;
     try {
-      if (entry.valueAddress == expectedTaggedValue) {
+      if (Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)) {
         markLogicallyAbsent(entry);
         publishMutation = true;
       }
@@ -5563,7 +5563,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return 0L;
     }
     long taggedValue = entry.valueAddress;
-    if (!isAliveTaggedValue(taggedValue) || taggedValue == 0L || entry.isLogicallyAbsent()) {
+    if (!isAliveTaggedValue(taggedValue)
+        || taggedValue == 0L
+        || Entry.isAbsentTaggedValue(taggedValue)) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);
@@ -5581,7 +5583,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (entry == null
         || taggedValue == 0L
         || !isAliveTaggedValue(taggedValue)
-        || entry.isLogicallyAbsent()) {
+        || Entry.isAbsentTaggedValue(taggedValue)) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);
@@ -5596,20 +5598,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   /**
-   * Hot-path liveness with the absence word and value deadline read before the CHM equals walk
-   * resolved, overlapping their cache misses. Absence read at comparison time linearizes the get
-   * before any racing remove, so no fresh read is required.
+   * Hot-path liveness with the value deadline pre-read so its cache miss overlaps the equals walk.
+   * The logical-absence test runs on the already-loaded tagged word, so the read path never
+   * dereferences the native metadata prefix.
    */
   private long valueIfLive(
-      Entry entry,
-      long taggedValue,
-      long observedAbsenceWord,
-      long preReadDeadline,
-      long nowNanos) {
+      Entry entry, long taggedValue, long preReadDeadline, long nowNanos) {
     if (entry == null
         || taggedValue == 0L
         || !isAliveTaggedValue(taggedValue)
-        || Entry.absentOfMetadataWord(observedAbsenceWord)) {
+        || Entry.isAbsentTaggedValue(taggedValue)) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);
@@ -5626,7 +5624,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   /** Returns the live value while the caller owns the Entry writer claim. */
   private long valueIfLiveWhileWriterHeld(Entry entry) {
     long taggedValue = entry.valueAddress;
-    if (taggedValue == 0L || !isAliveTaggedValue(taggedValue) || entry.isLogicallyAbsent()) {
+    if (taggedValue == 0L
+        || !isAliveTaggedValue(taggedValue)
+        || Entry.isAbsentTaggedValue(taggedValue)) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);
@@ -5730,7 +5730,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private void publishValue(
       Entry entry, long taggedValueAddress) {
-    entry.valueAddress = taggedValueAddress;
+    // A replacement must keep the logical-absence tag: completeReplacement counts on it.
+    entry.valueAddress = taggedValueAddress | (entry.valueAddress & Entry.VALUE_LOGICALLY_ABSENT);
   }
 
   private void clearValue(Entry entry) {

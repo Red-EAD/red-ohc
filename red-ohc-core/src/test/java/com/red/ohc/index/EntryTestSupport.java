@@ -41,7 +41,9 @@ public final class EntryTestSupport {
       WriterArena arena, int keyLength, int chmHash, long keyHash, long valueAddress) {
     long allocation = Entry.keyPhysicalAllocationLengthForKeyLength(keyLength);
     long address = arena.allocate(allocation);
-    Entry entry = new Entry(address, keyLength, valueAddress);
+    // Fixture entries start logically absent, matching real insertion before the handoff.
+    long tagged = valueAddress == 0L ? 0L : valueAddress | Entry.VALUE_LOGICALLY_ABSENT;
+    Entry entry = new Entry(address, keyLength, tagged);
     entry.initializeKeyHash((int) keyHash);
     entry.initializeNativeMetadata();
     return entry;

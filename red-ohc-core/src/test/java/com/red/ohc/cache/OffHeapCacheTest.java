@@ -99,6 +99,29 @@ public class OffHeapCacheTest {
   }
 
   @Test
+  public void replacementOfARemovedMappingIsCountedExactlyOnce() {
+    // put -> remove leaves the CHM entry logically absent; the replacement must republish with
+    // the absence tag carried so the ledger counts the new mapping exactly once.
+    try (OHCache<String, String> cache =
+        OHCacheBuilder.<String, String>newBuilder()
+            .capacity(1 << 20)
+            .keySerializer(STRING)
+            .valueSerializer(STRING)
+            .build()) {
+      cache.put("key", "first");
+      cache.flushAsync().join();
+      assertEquals(cache.size(), 1L);
+      cache.remove("key");
+      cache.flushAsync().join();
+      assertEquals(cache.size(), 0L);
+      cache.put("key", "second");
+      cache.flushAsync().join();
+      assertEquals(cache.size(), 1L);
+      assertEquals(cache.get("key"), "second");
+    }
+  }
+
+  @Test
   public void statsExposeWeaklyPublishedRequestRates() {
     try (OHCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()

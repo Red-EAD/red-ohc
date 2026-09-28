@@ -64,6 +64,7 @@ public final class ThreadContextReadCounterTest {
   public void accessRingPublishesTheObservedValueTokenNotTheLaterEntryState() {
     AccessRing ring = new AccessRing();
     Entry entry = EntryTestSupport.entry(0, 4, 0x100L);
+    entry.valueAddress = 0x100L;
 
     assertTrue(ring.offer(entry, entry.valueAddress, 7L, Entry.POLICY_NONE));
     entry.valueAddress = 0x200L;

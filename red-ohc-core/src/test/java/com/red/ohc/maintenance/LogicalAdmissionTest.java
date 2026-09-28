@@ -101,7 +101,7 @@ public final class LogicalAdmissionTest {
   @Test
   public void actorAbsentTransitionIsCountedOnce() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
-    Entry entry = EntryTestSupport.entry(memory, 0, 7, 0x77L, 0L);
+    Entry entry = EntryTestSupport.entry(memory, 0, 7, 0x77L, 0x80L);
     try {
       entry.currentValueAllocation(64L);
       LogicalAdmission admission = new LogicalAdmission(1_000L, false);

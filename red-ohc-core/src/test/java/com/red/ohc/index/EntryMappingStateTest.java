@@ -30,7 +30,7 @@ public final class EntryMappingStateTest {
 
   @Test
   public void actorAbsentTransitionUsesOneStableOrderedStoreAndIsIdempotent() {
-    Entry entry = EntryTestSupport.entry(1, 7, 0L);
+    Entry entry = EntryTestSupport.entry(1, 7, 0x80L);
     entry.currentValueAllocation(72L);
     assertTrue(entry.markLogicallyPresent());
     assertTrue(entry.claimWriter());

@@ -123,36 +123,6 @@ public final class KeyHashTest {
   }
 
   @Test
-  public void equalsRecordsTheComparisonTimeAbsenceWord() {
-    byte[] bytes = "absent-probe".getBytes(StandardCharsets.US_ASCII);
-    NativeMemory.Memory memory = new NativeMemory.Memory();
-    long allocation = Entry.keyAllocationLengthForKeyLength(bytes.length);
-    long address = memory.allocate(allocation) + Entry.NATIVE_METADATA_BYTES;
-    try {
-      NativeMemory.copy(bytes, 0, address, bytes.length);
-      Entry entry = new Entry(address, bytes.length, 0L);
-      LookupKey lookup = new LookupKey();
-      lookup.set(bytes, bytes.length);
-      entry.initializeKeyHash(lookup.hash());
-      long absenceWordAddress = address - Entry.NATIVE_METADATA_BYTES + 8L;
-      NativeMemory.putLong(absenceWordAddress, 0L);
-
-      assertTrue(lookup.equals(entry));
-      assertEquals(0L, lookup.absenceWordFor(entry));
-
-      NativeMemory.putLong(absenceWordAddress, Long.MIN_VALUE);
-      // The recorded word stays the comparison-time snapshot; unmatched entries read fresh.
-      assertEquals(0L, lookup.absenceWordFor(entry));
-      Entry unrelated = new Entry(address, bytes.length, 0L);
-      unrelated.initializeKeyHash(lookup.hash());
-      assertTrue(Entry.absentOfMetadataWord(lookup.absenceWordFor(unrelated)));
-    } finally {
-      memory.free(address - Entry.NATIVE_METADATA_BYTES, allocation);
-      memory.closeArenas();
-    }
-  }
-
-  @Test
   public void lookupKeyMatchesExactNativeBytesAcrossComparisonBoundaries() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     LookupKey lookup = new LookupKey();
