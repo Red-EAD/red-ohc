@@ -41,8 +41,12 @@ public final class ValueBlock {
     return address + HEADER;
   }
 
-  public static boolean expired(long address, long nowNanos) {
-    long deadlineNanos = deadlineNanos(address);
+  /** Expiry test on a deadline read before the liveness checks; keeps the header load overlapped. */
+  public static boolean expiredByDeadline(long deadlineNanos, long nowNanos) {
     return deadlineNanos != NO_DEADLINE && deadlineNanos <= nowNanos;
+  }
+
+  public static boolean expired(long address, long nowNanos) {
+    return expiredByDeadline(deadlineNanos(address), nowNanos);
   }
 }

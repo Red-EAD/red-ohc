@@ -2990,6 +2990,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           valueIfLive(
               entry,
               observedTaggedValue,
+              context.lookupKey.absenceWordFor(entry),
+              preReadValueDeadline(observedTaggedValue),
               Entry.hasTtl(observedTaggedValue)
                   ? deadlineClock.nowNanos()
                   : 0L);
@@ -3383,6 +3385,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         valueIfLive(
             entry,
             observedTaggedValue,
+            context.lookupKey.absenceWordFor(entry),
+            preReadValueDeadline(observedTaggedValue),
             Entry.hasTtl(observedTaggedValue)
                 ? deadlineClock.nowNanos()
                 : 0L);
@@ -5546,12 +5550,20 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return (taggedValue & VALUE_LIFECYCLE_MASK) == 0L;
   }
 
+  /** Eager value-header read issued while the equals and absence-word misses are in flight. */
+  private static long preReadValueDeadline(long taggedValue) {
+    if (taggedValue == 0L || !isAliveTaggedValue(taggedValue)) {
+      return 0L;
+    }
+    return ValueBlock.deadlineNanos(Entry.rawValueAddress(taggedValue));
+  }
+
   private long valueIfLive(Entry entry) {
-    if (entry == null || entry.isLogicallyAbsent()) {
+    if (entry == null) {
       return 0L;
     }
     long taggedValue = entry.valueAddress;
-    if (!isAliveTaggedValue(taggedValue) || taggedValue == 0L) {
+    if (!isAliveTaggedValue(taggedValue) || taggedValue == 0L || entry.isLogicallyAbsent()) {
       return 0L;
     }
     long value = Entry.rawValueAddress(taggedValue);
@@ -5577,6 +5589,34 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return value;
     }
     if (ValueBlock.expired(value, nowNanos)) {
+      markLogicallyAbsentIfCurrent(entry, taggedValue);
+      return 0L;
+    }
+    return value;
+  }
+
+  /**
+   * Hot-path liveness with the absence word and value deadline read before the CHM equals walk
+   * resolved, overlapping their cache misses. Absence read at comparison time linearizes the get
+   * before any racing remove, so no fresh read is required.
+   */
+  private long valueIfLive(
+      Entry entry,
+      long taggedValue,
+      long observedAbsenceWord,
+      long preReadDeadline,
+      long nowNanos) {
+    if (entry == null
+        || taggedValue == 0L
+        || !isAliveTaggedValue(taggedValue)
+        || Entry.absentOfMetadataWord(observedAbsenceWord)) {
+      return 0L;
+    }
+    long value = Entry.rawValueAddress(taggedValue);
+    if (!Entry.hasTtl(taggedValue)) {
+      return value;
+    }
+    if (ValueBlock.expiredByDeadline(preReadDeadline, nowNanos)) {
       markLogicallyAbsentIfCurrent(entry, taggedValue);
       return 0L;
     }
