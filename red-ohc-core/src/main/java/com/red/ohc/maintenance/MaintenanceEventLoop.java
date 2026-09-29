@@ -62,8 +62,11 @@ public final class MaintenanceEventLoop
   private static final int WORK_BATCH_MAILBOX_THRESHOLD = 64;
   private volatile long parkDeadlineNanos;
   private boolean mandatoryWorkBatchPass;
-  private static final int ADVISORY_MAX_PER_TURN =
-      MaintenanceBudgetController.TOTAL_MAINTENANCE_HARD_CAP;
+  private static final int ADVISORY_MAX_PER_TURN = 4_096;
+  private static final long CAPACITY_RETRY_NANOS = 1_000_000L;
+  private static final long RECLAIM_RETRY_INITIAL_NANOS = 1_000_000L;
+  private static final long RECLAIM_RETRY_MAX_NANOS = 10_000_000L;
+  private static final long READER_LIFECYCLE_PERIOD_NANOS = 1_000_000_000L;
   private static final long MAX_CAPACITY_RETRY_BACKOFF_NANOS = 10_000_000L;
   private static final int READER_LIFECYCLE_SCAN_LIMIT = 256;
   private static final int WORK_MUTATION = 1;
@@ -116,12 +119,6 @@ public final class MaintenanceEventLoop
   // Plain fields keep the per-attempt locked-RMW count down and these counters out of the
   // writer-hot atomic instances allocated next to durableMailboxDepth; nothing reads them
   // off the actor thread.
-  private long capacityVictimsRemoved;
-  private long capacityVictimsLocked;
-  private long capacityVictimsDroppedUnmapped;
-  private long capacityVictimsSkippedMapped;
-  private long capacityScanEmpty;
-  private long capacityScanRetry;
 
   private final AtomicLong asyncSubmitted = new AtomicLong();
   private final AtomicLong asyncFailed = new AtomicLong();
@@ -135,8 +132,6 @@ public final class MaintenanceEventLoop
   private final boolean[] readerBlocked = new boolean[2];
   private final RetirementJournal retirements;
   private final long nativeDebtBudgetBytes;
-  private final MaintenanceTuning tuning;
-  private long safeReclaimSegments;
   private long safeReclaimBatches;
   private long mailboxHeadUnpublishedCount;
   /** Actor-local round-robin cursor for unmanaged lifecycle records. */
@@ -146,9 +141,7 @@ public final class MaintenanceEventLoop
   private long oldestSafeHeadNanos = Long.MAX_VALUE;
   private volatile long oldestSafeWaitNanos;
   private final RetirementRateSampler retirementRateSampler = new RetirementRateSampler();
-  private final MaintenanceBudgetController maintenanceBudgetController;
   /** Next actor-local pressure sample; expensive debt scans are not per-turn work. */
-  private long nextMaintenanceBudgetPressureNanos = Long.MIN_VALUE;
   private volatile long maintenancePassWorkNanos;
   private long maintenanceActiveNanosTotal;
   private long maintenanceParkNanosTotal;
@@ -302,11 +295,11 @@ public final class MaintenanceEventLoop
         false,
         new RetirementJournal(memory),
         nativeDebtBudgetBytes,
-        new EntryLinks(memory),
-        MaintenanceTuning.DEFAULT);
+        new EntryLinks(memory)
+        );
   }
 
-  /** Production seam allowing the cache's logical ledger to share the actor's link arena. */
+
   public MaintenanceEventLoop(
       ConcurrentHashMap<Entry, Entry> data,
       NativeMemory.Memory memory,
@@ -318,35 +311,8 @@ public final class MaintenanceEventLoop
       boolean countBounded,
       RetirementJournal retirementJournal,
       long nativeDebtBudgetBytes,
-      EntryLinks links) {
-    this(
-        data,
-        memory,
-        ticker,
-        capacity,
-        eviction,
-        evictionNotifier,
-        readers,
-        countBounded,
-        retirementJournal,
-        nativeDebtBudgetBytes,
-        links,
-        MaintenanceTuning.DEFAULT);
-  }
-
-  MaintenanceEventLoop(
-      ConcurrentHashMap<Entry, Entry> data,
-      NativeMemory.Memory memory,
-      Ticker ticker,
-      long capacity,
-      Eviction eviction,
-      EvictionNotifier evictionNotifier,
-      ReaderRegistry readers,
-      boolean countBounded,
-      RetirementJournal retirementJournal,
-      long nativeDebtBudgetBytes,
-      EntryLinks links,
-      MaintenanceTuning tuning) {
+      EntryLinks links
+      ) {
     this.data = data;
     this.memory = memory;
     this.ticker = ticker;
@@ -368,13 +334,8 @@ public final class MaintenanceEventLoop
     this.readers = readers;
     this.retirements = retirementJournal;
     this.nativeDebtBudgetBytes = nativeDebtBudgetBytes;
-    if (tuning == null) {
-      throw new NullPointerException("tuning");
-    }
-    this.tuning = tuning;
-    this.maintenanceBudgetController = new MaintenanceBudgetController(tuning);
-    this.idleBackoff = new IdleBackoff(tuning);
-    this.reclaimRetryBackoffNanos = tuning.reclaimRetryInitialNanos;
+    this.idleBackoff = new IdleBackoff();
+    this.reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
     this.turnCuts = new TurnCuts(retirementJournal.laneCount() + 1);
     long initialNowNanos = ticker.nanos();
     long initialNowMillis = ticker.currentTimeMillis();
@@ -408,8 +369,8 @@ public final class MaintenanceEventLoop
         false,
         retirementJournal,
         nativeDebtBudgetBytes,
-        new EntryLinks(memory),
-        MaintenanceTuning.DEFAULT);
+        new EntryLinks(memory)
+        );
   }
 
   public MaintenanceEventLoop(
@@ -432,8 +393,8 @@ public final class MaintenanceEventLoop
         false,
         new RetirementJournal(memory),
         nativeDebtBudgetBytes,
-        new EntryLinks(memory),
-        MaintenanceTuning.DEFAULT);
+        new EntryLinks(memory)
+        );
   }
 
   public MaintenanceEventLoop(
@@ -458,8 +419,8 @@ public final class MaintenanceEventLoop
         countBounded,
         retirementJournal,
         nativeDebtBudgetBytes,
-        new EntryLinks(memory),
-        MaintenanceTuning.DEFAULT);
+        new EntryLinks(memory)
+        );
   }
 
   public void start() {
@@ -623,15 +584,6 @@ public final class MaintenanceEventLoop
     return policy.ghostRehashPending();
   }
 
-  /** Legacy alias for the number of sampled Skip accesses suppressed by the policy. */
-  public long admissionSkipSuppressedAccesses() {
-    return policy.skipSuppressedAccesses();
-  }
-
-  /** Legacy alias for the number of first Ghost reappearances deferred by the policy. */
-  public long admissionGhostDeferredPromotions() {
-    return policy.ghostDeferredPromotions();
-  }
 
   public long admissionGhostNativeBytes() {
     return policy.ghostNativeBytes();
@@ -1149,7 +1101,6 @@ public final class MaintenanceEventLoop
     RetirementJournal.ReclaimResult reclaimed =
         retirements.reclaimActorSafeBatchResult(memory, maximumSegments);
     if (reclaimed.segments != 0) {
-      safeReclaimSegments = saturatingAdd(safeReclaimSegments, reclaimed.segments);
       safeReclaimBatches = saturatingAdd(safeReclaimBatches, 1L);
       requestWriterResourceScan();
     }
@@ -1420,8 +1371,6 @@ public final class MaintenanceEventLoop
         } finally {
           long endNanos = System.nanoTime();
           long elapsed = Math.max(0L, endNanos - mailboxStartNanos);
-          maintenanceBudgetController.observeTurn(endNanos, elapsed, mailboxProcessed);
-          updateMaintenanceBudget(endNanos);
           maintenancePassWorkNanos = elapsed;
           maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
           advancePageAudit();
@@ -1471,8 +1420,6 @@ public final class MaintenanceEventLoop
       } finally {
         long endNanos = System.nanoTime();
         long elapsed = Math.max(0L, endNanos - passStartNanos);
-        maintenanceBudgetController.observeTurn(endNanos, elapsed, maintenanceWorkUnits);
-        updateMaintenanceBudget(endNanos);
         maintenancePassWorkNanos = elapsed;
         maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
         maintenanceCollectedRecordsTotal =
@@ -1827,10 +1774,8 @@ public final class MaintenanceEventLoop
       if (victim == null) {
         if (selection.kind == MaintenancePolicy.Selection.Kind.SCAN_EXHAUSTED
             && attempts < attemptBudget) {
-          capacityScanRetry++;
           continue;
         }
-        capacityScanEmpty++;
         scheduleCapacityRetry();
         break;
       }
@@ -1843,12 +1788,10 @@ public final class MaintenanceEventLoop
         // unlink once the mapping is verifiably gone; otherwise defer via skipLocked so the
         // tail selection moves on without losing the victim.
         if (isMappedEntry(victim)) {
-          capacityVictimsSkippedMapped++;
           policy.skipLocked(victim);
           attempts++;
           continue;
         }
-        capacityVictimsDroppedUnmapped++;
         policy.remove(victim, false);
         continue;
       }
@@ -1857,7 +1800,6 @@ public final class MaintenanceEventLoop
       // of straddling a racing finishWriter.
       long claimState = victim.writerClaimStateWord();
       if ((claimState & Entry.WRITER_LOCK) != 0L) {
-        capacityVictimsLocked++;
         capacityBlockedEntry = victim;
         capacityBlocked = true;
         if (!victim.isWriterLocked()) {
@@ -1880,7 +1822,6 @@ public final class MaintenanceEventLoop
           taggedValue,
           RemovalCause.SIZE)) {
         removed++;
-        capacityVictimsRemoved++;
         // The shared LongAdder is updated by the logical-absent transition. Keep this actor-local
         // sample in step without paying for a contended exact sum after every victim.
         admission.actorSubtractReleasedCharge(victimCharge);
@@ -1890,7 +1831,6 @@ public final class MaintenanceEventLoop
         continue;
       }
       if (victim.isWriterLocked()) {
-        capacityVictimsLocked++;
         capacityBlockedEntry = victim;
         capacityBlocked = true;
         if (!victim.isWriterLocked()) {
@@ -1910,15 +1850,12 @@ public final class MaintenanceEventLoop
         // Same rule as the selection-time drop: only unlink once the mapping is verifiably
         // gone; a still-mapped dead victim stays linked and selectable for its own protocol.
         if (isMappedEntry(victim)) {
-          capacityVictimsSkippedMapped++;
           policy.skipLocked(victim);
           attempts++;
           continue;
         }
-        capacityVictimsDroppedUnmapped++;
         policy.remove(victim, false);
       } else {
-        capacityVictimsSkippedMapped++;
         policy.skipLocked(victim);
         scheduleCapacityRetry();
         break;
@@ -1955,7 +1892,7 @@ public final class MaintenanceEventLoop
     long backoff =
         Math.min(
             MAX_CAPACITY_RETRY_BACKOFF_NANOS,
-            Math.max(tuning.capacityRetryNanos, capacityRetryBackoffNanos << 1));
+            Math.max(CAPACITY_RETRY_NANOS, capacityRetryBackoffNanos << 1));
     capacityRetryBackoffNanos = backoff;
     capacityRetryNanos = saturatingAdd(sampleMonotonicNow(), backoff);
   }
@@ -1969,25 +1906,6 @@ public final class MaintenanceEventLoop
         sampleNanos,
         retirements.generatedBytesTotal(),
         retirements.completedBytesTotal());
-  }
-
-  private void updateMaintenanceBudget(long nowNanos) {
-    if (nextMaintenanceBudgetPressureNanos != Long.MIN_VALUE
-        && nowNanos - nextMaintenanceBudgetPressureNanos < 0L) {
-      return;
-    }
-    nextMaintenanceBudgetPressureNanos =
-        saturatingAdd(nowNanos, tuning.controllerSampleNanos);
-    WriterLifecycleJournal lifecycle = writerLifecycleJournal;
-    maintenanceBudgetController.updatePressure(
-        nowNanos,
-        retirements.retirementDebtBytes(),
-        nativeDebtBudgetBytes,
-        retirementRateSampler.generatedBytesPerSecond(),
-        retirementRateSampler.completedBytesPerSecond(),
-        lifecycle == null ? 0L : lifecycle.lagRecords(),
-        oldestSafeWaitNanos,
-        queueDepth());
   }
 
   /** Arms a quiescence cut, growing the snapshot when registrations expanded the table. */
@@ -2071,10 +1989,6 @@ public final class MaintenanceEventLoop
   }
 
   /** Policy is actor-owned and is updated asynchronously from mutation hints. */
-  private long observedLiveWeight() {
-    return policy.usedWeight();
-  }
-
   private boolean hasWriterLifecycleWork() {
     WriterLifecycleJournal journal = writerLifecycleJournal;
     return journal != null && journal.hasPendingReadyLanes();
@@ -2155,7 +2069,6 @@ public final class MaintenanceEventLoop
     boolean accessUrgent =
         !isStopping() && (accessImmediate || accessDeadlineDue);
     decision.accessImmediate = accessImmediate;
-    decision.accessUrgent = accessUrgent;
     decision.accessScanActive =
         accessUrgent;
     decision.readerLifecycleWork =
@@ -2896,16 +2809,12 @@ public final class MaintenanceEventLoop
     }
   }
 
-  private int drainWriterLifecycleJournal(long[] watermark) {
-    return drainWriterLifecycleJournal(watermark, Integer.MAX_VALUE, false);
+  private int drainWriterLifecycleJournal(long[] watermark, int maximumRecords) {
+    return drainWriterLifecycleJournal(watermark, maximumRecords, false);
   }
 
   private int drainAllWriterLifecycleJournal(long[] watermark) {
     return drainWriterLifecycleJournal(watermark, Integer.MAX_VALUE, true);
-  }
-
-  private int drainWriterLifecycleJournal(long[] watermark, int maximumRecords) {
-    return drainWriterLifecycleJournal(watermark, maximumRecords, false);
   }
 
   private int drainWriterLifecycleJournal(
@@ -3420,7 +3329,7 @@ public final class MaintenanceEventLoop
     readerLifecycleWrapped = false;
     nextReaderLifecycleCheckNanos =
         readers.hasRegisteredSlots()
-            ? saturatingAdd(sampleMonotonicNow(), tuning.readerLifecyclePeriodNanos)
+            ? saturatingAdd(sampleMonotonicNow(), READER_LIFECYCLE_PERIOD_NANOS)
             : Long.MAX_VALUE;
   }
 
@@ -3504,12 +3413,12 @@ public final class MaintenanceEventLoop
   private void scheduleReclaimRetry() {
     reclaimRetryNanos = saturatingAdd(sampleMonotonicNow(), reclaimRetryBackoffNanos);
     reclaimRetryBackoffNanos =
-        Math.min(tuning.reclaimRetryMaxNanos, reclaimRetryBackoffNanos << 1);
+        Math.min(RECLAIM_RETRY_MAX_NANOS, reclaimRetryBackoffNanos << 1);
   }
 
   private void resetReclaimRetry() {
     reclaimRetryNanos = Long.MAX_VALUE;
-    reclaimRetryBackoffNanos = tuning.reclaimRetryInitialNanos;
+    reclaimRetryBackoffNanos = RECLAIM_RETRY_INITIAL_NANOS;
   }
 
   @Override
@@ -4028,7 +3937,7 @@ public final class MaintenanceEventLoop
     }
     if (markerRequired) {
       try {
-        if (!mailbox.offer(ActorMessage.advisory(work))) {
+        if (!mailbox.offer(ActorMessage.advisory())) {
           throw new IllegalStateException("actor mailbox rejected an advisory marker");
         }
       } catch (Throwable failure) {
@@ -4168,7 +4077,6 @@ public final class MaintenanceEventLoop
     private boolean writerResourceWork;
     private boolean ghostRehash;
     private boolean accessImmediate;
-    private boolean accessUrgent;
     private boolean accessScanActive;
     private boolean readerLifecycleWork;
     private boolean readerNotificationWork;
@@ -4303,41 +4211,38 @@ public final class MaintenanceEventLoop
     private static final int ASYNC = 4;
     private static final int FLUSH = 5;
     private static final ActorMessage ADVISORY_MESSAGE =
-        new ActorMessage(ADVISORY, null, null, null, 0);
+        new ActorMessage(ADVISORY, null, null, null);
 
     private final int kind;
     private final Entry entry;
     private final AsyncMutationTask async;
     private final FlushRequest flush;
-    private final int advisoryWork;
 
     private ActorMessage(
         int kind,
         Entry entry,
         AsyncMutationTask async,
-        FlushRequest flush,
-        int advisoryWork) {
+        FlushRequest flush) {
       this.kind = kind;
       this.entry = entry;
       this.async = async;
       this.flush = flush;
-      this.advisoryWork = advisoryWork;
     }
 
-    private static ActorMessage advisory(int work) {
+    private static ActorMessage advisory() {
       return ADVISORY_MESSAGE;
     }
 
     private static ActorMessage mutation(Entry entry) {
-      return new ActorMessage(MUTATION, entry, null, null, 0);
+      return new ActorMessage(MUTATION, entry, null, null);
     }
 
     private static ActorMessage async(AsyncMutationTask task) {
-      return new ActorMessage(ASYNC, null, task, null, 0);
+      return new ActorMessage(ASYNC, null, task, null);
     }
 
     private static ActorMessage flush(FlushRequest flush) {
-      return new ActorMessage(FLUSH, null, null, flush, 0);
+      return new ActorMessage(FLUSH, null, null, flush);
     }
 
   }

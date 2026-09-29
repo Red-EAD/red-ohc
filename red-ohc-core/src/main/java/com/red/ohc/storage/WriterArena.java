@@ -119,18 +119,6 @@ public final class WriterArena {
   }
 
   /** QSBR reclaim returns a slot to the page's current owner. */
-  public void remoteFree(long block, int sizeClass) {
-    long handle = NativeMemory.getLong(block + 56L);
-    if (handle == 0L) {
-      throw new IllegalStateException("small allocation has no stable slot handle");
-    }
-    Page page = memory.pageForHandle(handle);
-    if (page == null || page.sizeClass != sizeClass || !page.ownsEntry(block, handle)) {
-      throw new IllegalStateException("unknown allocator slot handle " + handle);
-    }
-    int remaining = page.freeSlot(block, handle);
-    page.completeRemoteFree(remaining);
-  }
 
   void completeRemoteFree(Page page, int remaining) {
     // Publish before the optional test hook so a racing trim still sees the page.

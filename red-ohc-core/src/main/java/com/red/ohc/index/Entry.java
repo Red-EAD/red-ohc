@@ -469,24 +469,9 @@ public final class Entry {
     }
   }
 
-  public int timerLevel() {
-    int location = timerLocation();
-    return location >= 0 ? location >>> TIMER_SLOT_BITS : -1;
-  }
 
-  public void timerLevel(int level) {
-    int location = timerLocation();
-    timerLocation((level << TIMER_SLOT_BITS) | (location & TIMER_SLOT_MASK));
-  }
 
-  public int timerSlot() {
-    return timerLocation() & TIMER_SLOT_MASK;
-  }
 
-  public void timerSlot(int slot) {
-    int location = timerLocation();
-    timerLocation((location & ~TIMER_SLOT_MASK) | (slot & TIMER_SLOT_MASK));
-  }
 
   public long timerDeadlineTick() {
     return NativeMemory.getLongVolatile(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET);

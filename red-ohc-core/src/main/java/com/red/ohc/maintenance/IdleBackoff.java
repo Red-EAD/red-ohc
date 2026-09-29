@@ -2,32 +2,21 @@ package com.red.ohc.maintenance;
 
 /** Actor-local idle backoff for the transition from confirmed no-work to parking. */
 final class IdleBackoff {
-  private final int maxSpins;
-  private final int maxYields;
-  private final long initialParkNanos;
-  private final long maxParkNanos;
+  private static final int MAX_SPINS = 100;
+  private static final int MAX_YIELDS = 5;
+  private static final long INITIAL_PARK_NANOS = 1_000_000L;
+  private static final long MAX_PARK_NANOS = 10_000_000L;
 
   private int spins;
   private int yields;
   private long parkNanos;
 
   IdleBackoff() {
-    this(MaintenanceTuning.DEFAULT);
-  }
-
-  IdleBackoff(MaintenanceTuning tuning) {
-    if (tuning == null) {
-      throw new NullPointerException("tuning");
-    }
-    maxSpins = tuning.idleMaxSpins;
-    maxYields = tuning.idleMaxYields;
-    initialParkNanos = tuning.idleInitialParkNanos;
-    maxParkNanos = tuning.idleMaxParkNanos;
-    parkNanos = initialParkNanos;
+    parkNanos = INITIAL_PARK_NANOS;
   }
 
   boolean takeSpinTurn() {
-    if (spins >= maxSpins) {
+    if (spins >= MAX_SPINS) {
       return false;
     }
     spins++;
@@ -35,7 +24,7 @@ final class IdleBackoff {
   }
 
   boolean takeYieldTurn() {
-    if (yields >= maxYields) {
+    if (yields >= MAX_YIELDS) {
       return false;
     }
     yields++;
@@ -44,8 +33,8 @@ final class IdleBackoff {
 
   long nextParkNanos() {
     long current = parkNanos;
-    if (current < maxParkNanos) {
-      parkNanos = Math.min(maxParkNanos, current << 1);
+    if (current < MAX_PARK_NANOS) {
+      parkNanos = Math.min(MAX_PARK_NANOS, current << 1);
     }
     return current;
   }
@@ -53,6 +42,6 @@ final class IdleBackoff {
   void reset() {
     spins = 0;
     yields = 0;
-    parkNanos = initialParkNanos;
+    parkNanos = INITIAL_PARK_NANOS;
   }
 }

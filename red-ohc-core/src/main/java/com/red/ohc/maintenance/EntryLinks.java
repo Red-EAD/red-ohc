@@ -200,9 +200,6 @@ public final class EntryLinks implements AutoCloseable {
     return entry(policyPrev(entry));
   }
 
-  Entry policyPrevEntry(int linkId) {
-    return entry(policyPrev(linkId));
-  }
 
   Entry policyNextEntry(Entry entry) {
     return entry(policyNext(entry));
@@ -212,13 +209,7 @@ public final class EntryLinks implements AutoCloseable {
     return entry(policyNext(linkId));
   }
 
-  Entry timerPrevEntry(Entry entry) {
-    return entry(timerPrev(entry));
-  }
 
-  Entry timerPrevEntry(int linkId) {
-    return entry(timerPrev(linkId));
-  }
 
   Entry timerNextEntry(Entry entry) {
     return entry(timerNext(entry));

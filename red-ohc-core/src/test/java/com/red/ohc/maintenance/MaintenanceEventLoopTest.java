@@ -117,13 +117,13 @@ public class MaintenanceEventLoopTest {
 
       Method drain =
           MaintenanceEventLoop.class.getDeclaredMethod(
-              "drainWriterLifecycleJournal", long[].class);
+              "drainWriterLifecycleJournal", long[].class, int.class, boolean.class);
       drain.setAccessible(true);
-      assertEquals(drain.invoke(loop, (Object) watermark), 2);
+      assertEquals(drain.invoke(loop, watermark, Integer.MAX_VALUE, false), 2);
       assertEquals(first.reservedRecords(), 1L);
       assertEquals(second.reservedRecords(), 0L);
 
-      assertEquals(drain.invoke(loop, (Object) lifecycle.captureWatermark()), 1);
+      assertEquals(drain.invoke(loop, lifecycle.captureWatermark(), Integer.MAX_VALUE, false), 1);
       assertEquals(first.reservedRecords(), 0L);
     } finally {
       loop.stop();
@@ -151,14 +151,14 @@ public class MaintenanceEventLoopTest {
       long[] watermark = lifecycle.captureWatermark();
       Method drain =
           MaintenanceEventLoop.class.getDeclaredMethod(
-              "drainWriterLifecycleJournal", long[].class, int.class);
+              "drainWriterLifecycleJournal", long[].class, int.class, boolean.class);
       drain.setAccessible(true);
 
-      assertEquals(drain.invoke(loop, (Object) watermark, 1), 1);
+      assertEquals(drain.invoke(loop, watermark, 1, false), 1);
       assertEquals(lifecycle.lane(0).reservedRecords(), 0L);
       assertEquals(lifecycle.lane(1).reservedRecords(), 1L);
 
-      assertEquals(drain.invoke(loop, (Object) watermark, 1), 1);
+      assertEquals(drain.invoke(loop, watermark, 1, false), 1);
       assertEquals(lifecycle.lane(1).reservedRecords(), 0L);
     } finally {
       loop.stop();
@@ -278,20 +278,6 @@ public class MaintenanceEventLoopTest {
             return 0L;
           }
         };
-    MaintenanceTuning tuning =
-        new MaintenanceTuning(
-            0,
-            0,
-            2_000_000L,
-            4_000_000L,
-            7_000_000L,
-            3_000_000L,
-            12_000_000L,
-            17_000_000L,
-            500_000L,
-            2_000_000L,
-            4_000_000L,
-            10L);
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     RetirementJournal journal = new RetirementJournal(memory);
@@ -308,21 +294,17 @@ public class MaintenanceEventLoopTest {
             false,
             journal,
             Long.MAX_VALUE,
-            links,
-            tuning);
+            links);
     try {
-      MaintenanceBudgetController controller =
-          (MaintenanceBudgetController) getField(loop, "maintenanceBudgetController");
-      assertEquals(controller.budgetNanos(), tuning.initialBudgetNanos);
       setBooleanField(loop, "reclaimBlocked", true);
 
       Method schedule = MaintenanceEventLoop.class.getDeclaredMethod("scheduleReclaimRetry");
       schedule.setAccessible(true);
       schedule.invoke(loop);
-      assertEquals(getLongField(loop, "reclaimRetryNanos"), tuning.reclaimRetryInitialNanos);
+      assertEquals(getLongField(loop, "reclaimRetryNanos"), 1_000_000L);
       assertEquals(
           getLongField(loop, "reclaimRetryBackoffNanos"),
-          tuning.reclaimRetryInitialNanos * 2L);
+          1_000_000L * 2L);
 
       readers.register(new ReaderSlot());
       Method finish = MaintenanceEventLoop.class.getDeclaredMethod("finishReaderLifecycleSweep");
@@ -330,7 +312,7 @@ public class MaintenanceEventLoopTest {
       finish.invoke(loop);
       assertEquals(
           getLongField(loop, "nextReaderLifecycleCheckNanos"),
-          tuning.readerLifecyclePeriodNanos);
+          1_000_000_000L);
     } finally {
       journal.close();
       links.close();
@@ -3377,41 +3359,6 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  @Test
-  public void pressureSamplingKeepsTheIntervalBoundaryAndUpdatesTheBudget() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory();
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
-    try {
-      Method sample = MaintenanceEventLoop.class.getDeclaredMethod("updateMaintenanceBudget", long.class);
-      sample.setAccessible(true);
-      MaintenanceBudgetController controller =
-          (MaintenanceBudgetController) getField(loop, "maintenanceBudgetController");
-      long interval = MaintenanceTuning.DEFAULT.controllerSampleNanos;
-      sample.invoke(loop, 0L);
-      assertEquals(getLongField(loop, "nextMaintenanceBudgetPressureNanos"), interval);
-      Field age = MaintenanceEventLoop.class.getDeclaredField("oldestSafeWaitNanos");
-      age.setAccessible(true);
-      age.setLong(loop, interval);
-
-      sample.invoke(loop, interval - 1L);
-      assertEquals(controller.budgetNanos(), MaintenanceTuning.DEFAULT.initialBudgetNanos);
-      assertEquals(getLongField(loop, "nextMaintenanceBudgetPressureNanos"), interval);
-
-      sample.invoke(loop, interval);
-      long firstBudget = controller.budgetNanos();
-      assertTrue(firstBudget > MaintenanceTuning.DEFAULT.initialBudgetNanos);
-      assertEquals(getLongField(loop, "nextMaintenanceBudgetPressureNanos"), interval * 2L);
-      sample.invoke(loop, interval * 2L - 1L);
-      assertEquals(controller.budgetNanos(), firstBudget);
-      sample.invoke(loop, interval * 2L);
-      assertTrue(controller.budgetNanos() > firstBudget);
-    } finally {
-      loop.stop();
-      memory.closeArenas();
-    }
-  }
 
   @Test
   public void minimumBudgetStillExpiresEntriesAndCompletesFlush() throws Exception {
@@ -3440,7 +3387,6 @@ public class MaintenanceEventLoopTest {
         data.put(entry, entry);
         invokeApplyEntry(loop, entry);
       }
-      forceMinimumWorkQuota(loop);
       now.set(TimerWheel.TICK_NANOS);
       CompletableFuture<Void> flush = loop.flush();
       for (int pass = 0; pass < 8 && !flush.isDone(); pass++) {
@@ -3600,7 +3546,6 @@ public class MaintenanceEventLoopTest {
       assertEquals(resources.processRetirements(), 0);
       ((AtomicInteger) getField(loop, "requestedWork"))
           .set(intField(MaintenanceEventLoop.class, "WORK_MUTATION"));
-      forceMinimumWorkQuota(loop);
 
       invokeMaintenancePass(loop);
 
@@ -3640,7 +3585,6 @@ public class MaintenanceEventLoopTest {
       resources.requestRetirement(first);
       resources.requestRetirement(second);
       assertEquals(resources.processRetirements(), 0);
-      forceMinimumWorkQuota(loop);
       invokeMaintenancePass(loop);
       if (mailboxOwned) {
         loop.cancelWriterLifecycle(first.lifecycleLane(), firstSequence, true);
@@ -3685,7 +3629,6 @@ public class MaintenanceEventLoopTest {
       resources.requestRetirement(first);
       resources.requestRetirement(second);
       assertEquals(resources.processRetirements(), 0);
-      forceMinimumWorkQuota(loop);
       invokeMaintenancePass(loop);
       assertEquals(resources.pooledCount(), 0);
       readers.endOpForTest(reader);
@@ -3712,16 +3655,6 @@ public class MaintenanceEventLoopTest {
     resource.lifecycleLane().release(record);
   }
 
-  private static void forceMinimumWorkQuota(MaintenanceEventLoop loop) throws Exception {
-    MaintenanceBudgetController controller =
-        (MaintenanceBudgetController) getField(loop, "maintenanceBudgetController");
-    controller.observeTurn(0L, 0L, 0);
-    controller.observeTurn(
-        MaintenanceTuning.DEFAULT.controllerSampleNanos,
-        MaintenanceTuning.DEFAULT.controllerSampleNanos,
-        1);
-    assertEquals(controller.workQuota(), 1);
-  }
 
   @Test
   public void advisoryQuotaIsNotCountedTwiceAcrossMaintenancePhases() throws Exception {

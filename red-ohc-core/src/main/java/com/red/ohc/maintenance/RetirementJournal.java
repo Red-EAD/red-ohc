@@ -572,14 +572,6 @@ public final class RetirementJournal {
         captureSafePublishedTicket());
   }
 
-  ReclaimResult reclaimActorResult(
-      NativeMemory.Memory releaseMemory, int maximumRecords, long[] watermark) {
-    return reclaimInternal(
-        releaseMemory,
-        maximumRecords,
-        watermark,
-        captureSafePublishedTicket());
-  }
 
   /** One quiescence cut driven by a registry: arm, confirm, then publish what is unblocked. */
   public int publishSafeForQuiescence(ReaderRegistry readers) {
