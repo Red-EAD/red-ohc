@@ -185,7 +185,6 @@ public final class MaintenanceEventLoop
   /** Serializes control-plane publication without putting ordinary cache writes behind a lock. */
   private final Object asyncFlushPublicationLock = new Object();
   private volatile Runnable asyncSequenceAllocatedHookForTest;
-  private volatile Runnable lifecycleMessageOfferHookForTest;
   private volatile Runnable flushRetirementExtensionHookForTest;
   private final TurnCuts turnCuts;
   private volatile boolean closing;
@@ -806,10 +805,6 @@ public final class MaintenanceEventLoop
     asyncSequenceAllocatedHookForTest = hook;
   }
 
-  void setLifecycleMessageOfferHookForTest(Runnable hook) {
-    lifecycleMessageOfferHookForTest = hook;
-  }
-
   void setFlushRetirementExtensionHookForTest(Runnable hook) {
     flushRetirementExtensionHookForTest = hook;
   }
@@ -828,6 +823,18 @@ public final class MaintenanceEventLoop
   /** Publishes an ADD/UPDATE hint after the associated CHM/value mutation is visible. */
   public void publishMutation(Entry entry, int flags) {
     publishMutation(entry, flags, true);
+  }
+
+  /** Completes the advisory queue handoff after a coalesced or retry-driven mutation publication. */
+  public void enqueueMutationHint(Entry entry, boolean wake) {
+    try {
+      offerDurable(ActorMessage.mutation(entry));
+    } catch (Throwable failure) {
+      recordTerminalFailure(failure);
+    }
+    if (wake) {
+      signal();
+    }
   }
 
   /** Publishes a hint and optionally defers its wake to a surrounding write batch. */
@@ -851,18 +858,6 @@ public final class MaintenanceEventLoop
     return entry.publishMutation(flags);
   }
 
-  /** Completes the advisory queue handoff after the data-plane publication. */
-  public void enqueueMutationHint(Entry entry, boolean wake) {
-    try {
-      offerDurable(ActorMessage.mutation(entry));
-    } catch (Throwable failure) {
-      recordTerminalFailure(failure);
-    }
-    if (wake) {
-      signal();
-    }
-  }
-
   /**
    * Checks the writer-side fast path for a TTL extension that remains in the actor's timer slot.
    * The actor still owns all timer mutations; this method only reads the published timer
@@ -882,7 +877,7 @@ public final class MaintenanceEventLoop
     return wheel.hasSameScheduledSlot(entry, newDeadlineNanos);
   }
 
-  /** Publishes a writer mutation through the FIFO mailbox after its lane slot is durable. */
+  /** Publishes a writer mutation through its lane slot and the ready-lane wake channel. */
   public void enqueueWriterMutationHint(
       WriterLifecycleLane lane,
       Entry entry,
@@ -896,75 +891,40 @@ public final class MaintenanceEventLoop
     if (entry == null) {
       throw new NullPointerException("entry");
     }
-    long sequence = 0L;
-    boolean reserved = false;
+    long sequence = lane.reserve();
     try {
-      sequence = lane.reserve();
-      reserved = true;
-      WriterLifecycleLane.MailboxMessage mailboxMessage =
-          lane.commitMutationForMailbox(
-              sequence, entry, keyHash, valueAllocation, mutationVersion);
-      reserved = false;
-      enqueueWriterLifecycleMessage(mailboxMessage, wake);
+      lane.writeMutation(sequence, entry, keyHash, valueAllocation, mutationVersion);
+      lane.commit(sequence, wake);
     } catch (Throwable error) {
-      if (reserved) {
-        WriterLifecycleLane.MailboxMessage mailboxMessage = lane.cancelForMailbox(sequence);
-        try {
-          enqueueWriterLifecycleMessage(mailboxMessage, false);
-        } catch (Throwable cancelFailure) {
-          error.addSuppressed(cancelFailure);
-        }
+      try {
+        lane.cancel(sequence, false);
+      } catch (Throwable cancelFailure) {
+        error.addSuppressed(cancelFailure);
       }
       recordTerminalFailure(error);
       throwUnchecked(error);
     }
   }
 
-  /** Commits a previously written writer lifecycle slot and gives its consumption to the actor. */
+  /** Commits a previously written writer lifecycle slot and wakes the ready-lane channel. */
   public void commitWriterLifecycle(WriterLifecycleLane lane, long sequence, boolean wake) {
     if (lane == null) {
       throw new NullPointerException("lane");
     }
-    WriterLifecycleLane.MailboxMessage mailboxMessage;
     try {
-      mailboxMessage = lane.commitForMailbox(sequence);
+      lane.commit(sequence, wake);
     } catch (Throwable failure) {
       recordTerminalFailure(failure);
       throwUnchecked(failure);
-      return;
-    }
-    try {
-      enqueueWriterLifecycleMessage(mailboxMessage, wake);
-    } catch (Throwable ignored) {
-      // The lane slot was published before the mailbox offer. Leave that slot for terminal or
-      // shutdown cleanup instead of asking the caller to overwrite it with a cancellation.
     }
   }
 
-  /** Cancels a previously reserved writer lifecycle slot and gives its consumption to the actor. */
+  /** Cancels a previously reserved writer lifecycle slot and wakes the ready-lane channel. */
   public void cancelWriterLifecycle(WriterLifecycleLane lane, long sequence, boolean wake) {
     if (lane == null) {
       throw new NullPointerException("lane");
     }
-    WriterLifecycleLane.MailboxMessage mailboxMessage = lane.cancelForMailbox(sequence);
-    enqueueWriterLifecycleMessage(mailboxMessage, wake);
-  }
-
-  private void enqueueWriterLifecycleMessage(
-      WriterLifecycleLane.MailboxMessage mailboxMessage, boolean wake) {
-    try {
-      Runnable hook = lifecycleMessageOfferHookForTest;
-      if (hook != null) {
-        hook.run();
-      }
-      offerDurable(mailboxMessage);
-    } catch (Throwable failure) {
-      recordTerminalFailure(failure);
-      throwUnchecked(failure);
-    }
-    if (wake) {
-      signal();
-    }
+    lane.cancel(sequence, wake);
   }
 
   /** Cancels a reliable removal reservation before CHM visibility changes. */
@@ -992,9 +952,6 @@ public final class MaintenanceEventLoop
     int processed = 0;
     long durableConsumed = 0L;
     FlushRequest batchFlush = flushRequest.get();
-    // Only lifecycle records can advance a writer resource's captured watermark. Ordinary
-    // mutation, async, and flush messages must not reopen a blocked resource sweep.
-    boolean lifecycleProgress = false;
     mailboxFenceBlocked = false;
     mailboxHeadUnpublished = false;
     int budget = Math.min(limit, MAILBOX_MAX_PER_TURN);
@@ -1030,8 +987,8 @@ public final class MaintenanceEventLoop
           }
           break;
         }
-        if (!(message instanceof ActorMessage)
-            || ((ActorMessage) message).kind != ActorMessage.ADVISORY) {
+        ActorMessage actorMessage = (ActorMessage) message;
+        if (actorMessage.kind != ActorMessage.ADVISORY) {
           durableConsumed++;
         }
         processed++;
@@ -1044,46 +1001,34 @@ public final class MaintenanceEventLoop
                   new CacheMaintenanceException(terminal));
           break;
         }
-        if (message instanceof WriterLifecycleLane.MailboxMessage) {
-          WriterLifecycleLane.MailboxMessage lifecycleMessage =
-              (WriterLifecycleLane.MailboxMessage) message;
-          processLifecycleMessage(
-              lifecycleMessage.owner(), lifecycleMessage.sequence(), lifecycleMessage);
-          lifecycleProgress = true;
-        } else {
-          ActorMessage actorMessage = (ActorMessage) message;
-          switch (actorMessage.kind) {
-            case ActorMessage.ADVISORY:
-              // The coalesced work bits are already visible in requestedWork. The marker only keeps
-              // advisory wakeups on the same FIFO transport as durable messages.
-              break;
-            case ActorMessage.MUTATION:
-              if (actorMessage.entry != null) {
-                processEntry(actorMessage.entry);
-              }
-              break;
-            case ActorMessage.ASYNC:
-              processAsyncMutation(actorMessage.async);
-              break;
-            case ActorMessage.FLUSH:
-              lastConsumedFlushMarker = actorMessage.flush;
-              // A flush can be published while an earlier mailbox action is running.  The
-              // marker is the FIFO boundary for that publication, so refresh the batch fence at
-              // this single boundary rather than reading flushRequest for every mailbox item.
-              FlushRequest currentFlush = flushRequest.get();
-              batchFlush = currentFlush == null ? actorMessage.flush : currentFlush;
-              break;
-            default:
-              throw new AssertionError("unknown actor message kind: " + actorMessage.kind);
-          }
+        switch (actorMessage.kind) {
+          case ActorMessage.ADVISORY:
+            // The coalesced work bits are already visible in requestedWork. The marker only keeps
+            // advisory wakeups on the same FIFO transport as durable messages.
+            break;
+          case ActorMessage.MUTATION:
+            if (actorMessage.entry != null) {
+              processEntry(actorMessage.entry);
+            }
+            break;
+          case ActorMessage.ASYNC:
+            processAsyncMutation(actorMessage.async);
+            break;
+          case ActorMessage.FLUSH:
+            lastConsumedFlushMarker = actorMessage.flush;
+            // A flush can be published while an earlier mailbox action is running.  The
+            // marker is the FIFO boundary for that publication, so refresh the batch fence at
+            // this single boundary rather than reading flushRequest for every mailbox item.
+            FlushRequest currentFlush = flushRequest.get();
+            batchFlush = currentFlush == null ? actorMessage.flush : currentFlush;
+            break;
+          default:
+            throw new AssertionError("unknown actor message kind: " + actorMessage.kind);
         }
       }
     } finally {
       if (durableConsumed != 0L) {
         durableMailboxDepth.addAndGet(-durableConsumed);
-        if (lifecycleProgress) {
-          requestWriterResourceScan();
-        }
       }
     }
     if (terminalFailure.get() == null) {
@@ -1105,52 +1050,6 @@ public final class MaintenanceEventLoop
       requestWriterResourceScan();
     }
     return reclaimed.segments;
-  }
-
-  private void processLifecycleMessage(
-      WriterLifecycleLane lane,
-      long expectedSequence,
-      WriterLifecycleLane.MailboxMessage mailboxMessage) {
-    if (terminalFailure.get() != null) {
-      // Leave the lane record untouched. The close/shutdown path will drain mailbox-owned
-      // lifecycle records with its explicit ownership mode after the actor stops retrying work.
-      return;
-    }
-    if (lane == null) {
-      recordTerminalFailure(new IllegalStateException("lifecycle message has no lane"));
-      return;
-    }
-    if (mailboxMessage == null
-        || mailboxMessage.owner() != lane
-        || mailboxMessage.sequence() != expectedSequence) {
-      throw new IllegalStateException("lifecycle mailbox node does not match its lane sequence");
-    }
-    if (!lane.poll(writerRemovalRecord)) {
-      throw new IllegalStateException(
-          "lifecycle mailbox record is not published: " + expectedSequence);
-    }
-    try {
-      if (writerRemovalRecord.sequence != expectedSequence) {
-        IllegalStateException mismatch =
-            new IllegalStateException(
-                "lifecycle mailbox sequence mismatch: expected "
-                    + expectedSequence
-                    + ", actual "
-                    + writerRemovalRecord.sequence);
-        // The lane is the ownership record. Apply the actual head before surfacing the invariant
-        // violation so a terminal transition cannot strand native lifecycle state.
-        try {
-          processWriterLifecycleRecord(lane);
-        } catch (Throwable failure) {
-          mismatch.addSuppressed(failure);
-        }
-        throw mismatch;
-      }
-      processWriterLifecycleRecord(lane);
-    } finally {
-      lane.release(writerRemovalRecord);
-      lane.finishReadyDrain();
-    }
   }
 
   /** Publishes one batch-level wake for deferred mutation hints. */
@@ -1694,7 +1593,8 @@ public final class MaintenanceEventLoop
     // with the mailbox unserved. Backlog never participates in a shared denominator here;
     // each drain loop self-limits once its source runs empty.
     plan.lifecycleQuota =
-        plan.removals && lifecycle != null && lifecycle.hasPendingReadyLanes()
+        plan.removals && lifecycle != null
+                && (lifecycle.hasPendingReadyLanes() || lifecycle.hasPendingRecords())
             ? LIFECYCLE_MAX_PER_TURN
             : 0;
     plan.capacityQuota = plan.capacity ? CAPACITY_MAX_PER_TURN : 0;
@@ -1991,7 +1891,8 @@ public final class MaintenanceEventLoop
   /** Policy is actor-owned and is updated asynchronously from mutation hints. */
   private boolean hasWriterLifecycleWork() {
     WriterLifecycleJournal journal = writerLifecycleJournal;
-    return journal != null && journal.hasPendingReadyLanes();
+    return journal != null
+        && (journal.hasPendingReadyLanes() || journal.hasPendingRecords());
   }
 
   private boolean readerLifecycleWork(boolean force) {
@@ -2755,12 +2656,6 @@ public final class MaintenanceEventLoop
   }
 
   private void failMailboxMessage(Object message, Throwable failure) {
-    if (!(message instanceof ActorMessage)) {
-      // A lifecycle slot remains owned by its lane until shutdown cleanup can dispatch and release
-      // the record. Keeping the reusable node attached to that slot prevents an old FIFO reference
-      // from being reused while its native lifecycle state is still pending.
-      return;
-    }
     ActorMessage actorMessage = (ActorMessage) message;
     if (actorMessage.async != null) {
       advanceAsyncDequeuedSequence(actorMessage.async.sequence);
@@ -2770,8 +2665,6 @@ public final class MaintenanceEventLoop
     } else if (actorMessage.flush != null) {
       actorMessage.flush.future.completeExceptionally(failure);
     }
-    // Lifecycle, mutation, safe-reclaim, and advisory messages intentionally have no failure-side
-    // action. In particular, a lifecycle record must remain in its lane for shutdown cleanup.
   }
 
   private static void notifyAsyncRejection(Consumer<Throwable> reject, Throwable failure) {
@@ -2810,44 +2703,34 @@ public final class MaintenanceEventLoop
   }
 
   private int drainWriterLifecycleJournal(long[] watermark, int maximumRecords) {
-    return drainWriterLifecycleJournal(watermark, maximumRecords, false);
-  }
-
-  private int drainAllWriterLifecycleJournal(long[] watermark) {
-    return drainWriterLifecycleJournal(watermark, Integer.MAX_VALUE, true);
-  }
-
-  private int drainWriterLifecycleJournal(
-      long[] watermark, int maximumRecords, boolean includeMailboxOwned) {
     WriterLifecycleJournal journal = writerLifecycleJournal;
     if (journal == null || watermark == null || watermark.length == 0 || maximumRecords <= 0) {
       return 0;
     }
     int work = 0;
-    if (includeMailboxOwned) {
-      // Flush and close must also observe mailbox-owned heads, so they sweep every lane.
-      for (int laneIndex = 0; laneIndex < watermark.length && work < maximumRecords; laneIndex++) {
+    // Pass drains visit only lanes whose ready marker is set; the marker is rearmed by
+    // finishReadyDrain whenever unconsumed head records remain.
+    int budget = journal.readyLaneCount();
+    for (int index = 0; index < budget && work < maximumRecords; index++) {
+      WriterLifecycleLane lane = journal.pollReadyLane();
+      if (lane == null) {
+        break;
+      }
+      int laneIndex = lane.laneIndex();
+      if (laneIndex >= watermark.length) {
+        // The lane was created after this cut captured its watermark; retry next pass.
+        journal.requeueReadyLane(lane);
+        continue;
+      }
+      work += drainLifecycleLane(lane, laneIndex, watermark, maximumRecords - work);
+    }
+    // Deferred-wake commits never signal a lane into the ready queue; scan the backlog directly.
+    int laneCount = Math.min(watermark.length, journal.laneCount());
+    for (int laneIndex = 0; laneIndex < laneCount && work < maximumRecords; laneIndex++) {
+      if (!journal.lane(laneIndex).watermarkComplete(watermark[laneIndex])) {
         work +=
             drainLifecycleLane(
-                journal.lane(laneIndex), laneIndex, watermark, maximumRecords - work, true);
-      }
-    } else {
-      // Pass drains visit only lanes whose ready marker is set; the marker is rearmed by
-      // finishReadyDrain whenever unconsumed head records remain.
-      int budget = journal.readyLaneCount();
-      for (int index = 0; index < budget && work < maximumRecords; index++) {
-        WriterLifecycleLane lane = journal.pollReadyLane();
-        if (lane == null) {
-          break;
-        }
-        int laneIndex = lane.laneIndex();
-        if (laneIndex >= watermark.length) {
-          // The lane was created after this cut captured its watermark; retry next pass.
-          journal.requeueReadyLane(lane);
-          continue;
-        }
-        work +=
-            drainLifecycleLane(lane, laneIndex, watermark, maximumRecords - work, false);
+                journal.lane(laneIndex), laneIndex, watermark, maximumRecords - work);
       }
     }
     if (work != 0) {
@@ -2856,17 +2739,24 @@ public final class MaintenanceEventLoop
     return work;
   }
 
+  private int drainAllWriterLifecycleJournal(long[] watermark) {
+    WriterLifecycleJournal journal = writerLifecycleJournal;
+    if (journal == null || watermark == null || watermark.length == 0) {
+      return 0;
+    }
+    int work = 0;
+    // Close and terminal cleanup sweep every lane regardless of ready markers.
+    for (int laneIndex = 0; laneIndex < watermark.length; laneIndex++) {
+      work += drainLifecycleLane(journal.lane(laneIndex), laneIndex, watermark, Integer.MAX_VALUE);
+    }
+    return work;
+  }
+
   private int drainLifecycleLane(
-      WriterLifecycleLane lane,
-      int laneIndex,
-      long[] watermark,
-      int maximumRecords,
-      boolean includeMailboxOwned) {
+      WriterLifecycleLane lane, int laneIndex, long[] watermark, int maximumRecords) {
     int work = 0;
     while (!lane.watermarkComplete(watermark[laneIndex])) {
-      if (!(includeMailboxOwned
-          ? lane.poll(writerRemovalRecord)
-          : lane.pollUnmanaged(writerRemovalRecord))) {
+      if (!lane.poll(writerRemovalRecord)) {
         break;
       }
       try {

@@ -132,30 +132,24 @@ public final class LifecycleJournalTest {
   }
 
   @Test
-  public void mailboxOwnedHeadRemainsExcludedUntilReleaseExposesTheUnmanagedHead() {
+  public void deferredWakeCommitStaysVisibleToTheBacklogScan() {
     WriterLifecycleJournal journal = new WriterLifecycleJournal(1);
     WriterLifecycleLane lane = journal.lane(0);
     WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
     AtomicInteger signals = new AtomicInteger();
     journal.bindReadySignal(signals::incrementAndGet);
 
-    long mailboxSequence = lane.reserve();
+    long deferredSequence = lane.reserve();
     lane.writeMutation(
-        mailboxSequence, null, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
-    lane.commitForMailbox(mailboxSequence);
-    long unmanagedSequence = lane.reserve();
-    lane.writeRemoval(unmanagedSequence, null, 2L, 1L, 0L, null);
-    lane.commit(unmanagedSequence);
+        deferredSequence, null, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+    lane.commit(deferredSequence, false);
 
-    assertFalse(journal.probeUnmanagedReadyRecords());
-    assertEquals(signals.get(), 1);
+    assertEquals(signals.get(), 0, "a deferred commit must not signal");
+    assertTrue(journal.hasPendingRecords(), "the backlog scan must still see the record");
 
     assertTrue(lane.poll(record));
     lane.release(record);
-    lane.finishReadyDrain();
-    assertTrue(journal.probeUnmanagedReadyRecords());
-    assertTrue(lane.pollUnmanaged(record));
-    lane.release(record);
+    assertFalse(journal.hasPendingRecords());
   }
 
   @Test
@@ -176,7 +170,7 @@ public final class LifecycleJournalTest {
 
     for (int index = 0; index < journal.laneCount(); index++) {
       WriterLifecycleLane lane = journal.lane(index);
-      assertTrue(lane.pollUnmanaged(record));
+      assertTrue(lane.poll(record));
       lane.release(record);
       lane.finishReadyDrain();
     }
@@ -188,7 +182,7 @@ public final class LifecycleJournalTest {
     lane.commit(sequence);
     assertTrue(journal.probeUnmanagedReadyRecords());
     assertEquals(signals.get(), 3);
-    assertTrue(lane.pollUnmanaged(record));
+    assertTrue(lane.poll(record));
     lane.release(record);
     lane.finishReadyDrain();
   }
@@ -236,12 +230,12 @@ public final class LifecycleJournalTest {
     second.commit(sequence);
     assertEquals(journal.readyLaneCount(), 2);
 
-    assertTrue(first.pollUnmanaged(record));
+    assertTrue(first.poll(record));
     first.release(record);
     first.finishReadyDrain();
     assertEquals(journal.readyLaneCount(), 1);
 
-    assertTrue(second.pollUnmanaged(record));
+    assertTrue(second.poll(record));
     second.release(record);
     second.finishReadyDrain();
     assertFalse(journal.hasPendingReadyLanes());
@@ -262,11 +256,11 @@ public final class LifecycleJournalTest {
     WriterLifecycleLane polled = journal.pollReadyLane();
     assertTrue(polled == busy, "only the signalled lane joins the dirty set");
     assertTrue(polled.laneIndex() == 1);
-    assertTrue(polled.pollUnmanaged(record));
+    assertTrue(polled.poll(record));
     polled.release(record);
     polled.finishReadyDrain();
     assertFalse(journal.hasPendingReadyLanes());
-    assertTrue(idle.pollUnmanaged(record) == false);
+    assertTrue(idle.poll(record) == false);
     assertEquals(idle.completedRecordsTotal(), 0L);
   }
 

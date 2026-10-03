@@ -444,14 +444,11 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void computeHintFailureAfterConcurrentRemovalKeepsLifecycleOwnership() throws Exception {
+  public void computeHintAfterConcurrentRemovalKeepsLifecycleOwnership() throws Exception {
     try (OffHeapCache<String, String> cache = newCache()) {
-      MaintenanceEventLoop loop = worker(cache);
       ThreadContext pinned = context(cache);
-      ReaderGuard guard = new ReaderGuard(loop);
+      ReaderGuard guard = new ReaderGuard(worker(cache));
       assertTrue(guard.enter(pinned));
-      ExecutorService remover = Executors.newSingleThreadExecutor();
-      AtomicBoolean failOnce = new AtomicBoolean(true);
       Field memoryField = OffHeapCache.class.getDeclaredField("memory");
       memoryField.setAccessible(true);
       NativeMemory.Memory memory = (NativeMemory.Memory) memoryField.get(cache);
@@ -461,42 +458,21 @@ public final class ConcurrentMapBehaviorTest {
           Class.forName("com.red.ohc.storage.WriterArena$PageSharedLine")
               .getDeclaredField("freedSlots");
       freedSlots.setAccessible(true);
-      AtomicReference<Object> keyPage = new AtomicReference<>();
-      AtomicLong initialFreedSlots = new AtomicLong();
-      Field hook = MaintenanceEventLoop.class.getDeclaredField("lifecycleMessageOfferHookForTest");
-      hook.setAccessible(true);
-      hook.set(
-          loop,
-          (Runnable)
-              () -> {
-                if (!failOnce.compareAndSet(true, false)) {
-                  return;
-                }
-                Entry inserted = cache.dataForTest().values().iterator().next();
-                assertFalse(inserted.isWriterLocked());
-                try {
-                  Object page =
-                      pageForHandle.invoke(
-                          memory, NativeMemory.getLong(inserted.nativeKeyAddress - Long.BYTES));
-                  keyPage.set(page);
-                  initialFreedSlots.set(freedSlots.getLong(page));
-                  remover.submit(() -> cache.remove("computed")).get(5L, TimeUnit.SECONDS);
-                } catch (Exception failure) {
-                  throw new AssertionError(failure);
-                }
-                assertFalse(inserted.isAlive());
-                throw new IllegalStateException("injected mutation handoff failure after removal");
-              });
       try {
-        IllegalStateException failure =
-            expectThrows(
-                IllegalStateException.class,
-                () -> cache.computeIfAbsent("computed", ignored -> "value"));
-        assertEquals(failure.getMessage(), "injected mutation handoff failure after removal");
+        cache.computeIfAbsent("computed", ignored -> "value");
+        Entry inserted = cache.dataForTest().values().iterator().next();
+        assertFalse(inserted.isWriterLocked());
+        Object page =
+            pageForHandle.invoke(memory, NativeMemory.getLong(inserted.nativeKeyAddress - Long.BYTES));
+        long initialFreed = freedSlots.getLong(page);
+        assertFalse(cache.dataForTest().isEmpty());
+
+        cache.remove("computed");
+        assertFalse(inserted.isAlive());
         assertTrue(cache.dataForTest().isEmpty());
         assertEquals(
-            freedSlots.getLong(keyPage.get()),
-            initialFreedSlots.get(),
+            freedSlots.getLong(page),
+            initialFreed,
             "the reader-pinned key belongs to retirement, not private compute cleanup");
         Field ledger = OffHeapCache.class.getDeclaredField("logicalAdmission");
         ledger.setAccessible(true);
@@ -504,13 +480,7 @@ public final class ConcurrentMapBehaviorTest {
         assertEquals(admission.logicalCharge(), 0L, "published charge must not be rolled back twice");
         assertEquals(admission.logicalMappingCount(), 0L);
       } finally {
-        hook.set(loop, null);
-        remover.shutdown();
-        try {
-          assertTrue(remover.awaitTermination(5L, TimeUnit.SECONDS));
-        } finally {
-          guard.exit(pinned);
-        }
+        guard.exit(pinned);
       }
       // Closing drains the durable removal: the compute cleanup must not already have freed its key.
     }

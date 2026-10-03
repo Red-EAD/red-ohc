@@ -150,7 +150,7 @@ public final class WriterLifecycleJournal {
   /** Returns whether an explicit maintenance wake has an executable head record. */
   public boolean hasUnmanagedReadyRecords() {
     for (WriterLifecycleLane lane : lanes) {
-      if (lane.hasUnmanagedHead()) {
+      if (lane.hasHeadCommitted()) {
         return true;
       }
     }
@@ -245,6 +245,16 @@ public final class WriterLifecycleJournal {
    */
   public boolean hasPendingReadyLanes() {
     return readyLaneCount.get() != 0;
+  }
+
+  /** True when any lane's consumer head is a published record reachable by a drain. */
+  public boolean hasPendingRecords() {
+    for (WriterLifecycleLane lane : lanes) {
+      if (lane.hasHeadCommitted()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static void checkWatermark(long[] watermark, int availableLanes) {

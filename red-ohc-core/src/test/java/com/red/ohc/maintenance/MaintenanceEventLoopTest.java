@@ -117,13 +117,13 @@ public class MaintenanceEventLoopTest {
 
       Method drain =
           MaintenanceEventLoop.class.getDeclaredMethod(
-              "drainWriterLifecycleJournal", long[].class, int.class, boolean.class);
+              "drainWriterLifecycleJournal", long[].class, int.class);
       drain.setAccessible(true);
-      assertEquals(drain.invoke(loop, watermark, Integer.MAX_VALUE, false), 2);
+      assertEquals(drain.invoke(loop, watermark, Integer.MAX_VALUE), 2);
       assertEquals(first.reservedRecords(), 1L);
       assertEquals(second.reservedRecords(), 0L);
 
-      assertEquals(drain.invoke(loop, lifecycle.captureWatermark(), Integer.MAX_VALUE, false), 1);
+      assertEquals(drain.invoke(loop, lifecycle.captureWatermark(), Integer.MAX_VALUE), 1);
       assertEquals(first.reservedRecords(), 0L);
     } finally {
       loop.stop();
@@ -151,14 +151,14 @@ public class MaintenanceEventLoopTest {
       long[] watermark = lifecycle.captureWatermark();
       Method drain =
           MaintenanceEventLoop.class.getDeclaredMethod(
-              "drainWriterLifecycleJournal", long[].class, int.class, boolean.class);
+              "drainWriterLifecycleJournal", long[].class, int.class);
       drain.setAccessible(true);
 
-      assertEquals(drain.invoke(loop, watermark, 1, false), 1);
+      assertEquals(drain.invoke(loop, watermark, 1), 1);
       assertEquals(lifecycle.lane(0).reservedRecords(), 0L);
       assertEquals(lifecycle.lane(1).reservedRecords(), 1L);
 
-      assertEquals(drain.invoke(loop, watermark, 1, false), 1);
+      assertEquals(drain.invoke(loop, watermark, 1), 1);
       assertEquals(lifecycle.lane(1).reservedRecords(), 0L);
     } finally {
       loop.stop();
@@ -2832,7 +2832,9 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
-    WriterLifecycleLane lane = new WriterLifecycleLane(2);
+    WriterLifecycleJournal journal = new WriterLifecycleJournal();
+    WriterLifecycleLane lane = journal.createLane();
+    loop.bindWriterLifecycleJournal(journal);
     try {
       assertTrue(entry.claimWriter());
       assertTrue(loop.prepareMutation(entry, Entry.PENDING_ADD));
@@ -2847,7 +2849,7 @@ public class MaintenanceEventLoopTest {
       entry.finishWriter();
       assertEquals(entry.mutationVersion(), saturated ? version : version + 1L);
 
-      assertEquals(invokeDrainMutations(loop, 1), 1);
+      assertEquals(invokeMaintenancePassWork(loop), 1);
       long expected = CacheMath.logicalEntryBytes(entry.keyAllocationLength(), latestAllocation);
       MaintenancePolicy policy = (MaintenancePolicy) getField(loop, "policy");
       assertEquals(policy.usedBytes(), expected, "a coalesced value must supersede the lane seed");
@@ -3588,7 +3590,7 @@ public class MaintenanceEventLoopTest {
       invokeMaintenancePass(loop);
       if (mailboxOwned) {
         loop.cancelWriterLifecycle(first.lifecycleLane(), firstSequence, true);
-        assertEquals(invokeDrainMutations(loop, 1), 1);
+        invokeMaintenancePass(loop);
       } else {
         first.lifecycleLane().cancel(firstSequence);
       }

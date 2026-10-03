@@ -8,9 +8,9 @@ import org.openjdk.jcstress.annotations.Outcome;
 import org.openjdk.jcstress.annotations.State;
 import org.openjdk.jcstress.infra.results.II_Result;
 
-/** Exercises reusable mailbox nodes across lifecycle segment rollover and consumer release. */
+/** Exercises lane slot publication across lifecycle segment rollover and consumer release. */
 @JCStressTest
-@Outcome(id = "64, 64", expect = Expect.ACCEPTABLE, desc = "every reusable lifecycle slot is dispatched once")
+@Outcome(id = "64, 64", expect = Expect.ACCEPTABLE, desc = "every lifecycle slot is dispatched once")
 @State
 public class WriterLifecycleMessageReuseStress {
   private static final int RECORDS = 64;
@@ -23,7 +23,7 @@ public class WriterLifecycleMessageReuseStress {
       long sequence = lane.reserve();
       lane.writeMutation(
           sequence, null, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
-      lane.commitForMailbox(sequence);
+      lane.commit(sequence, false);
     }
   }
 

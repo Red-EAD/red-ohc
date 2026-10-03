@@ -123,51 +123,8 @@ public final class WriterLifecycleLane {
   }
 
   public void commit(long sequence, boolean wake) {
-    commit(sequence, wake, false);
-  }
-
-  /** Publishes a mutation and returns the mailbox node owned by the committed slot. */
-  MailboxMessage commitMutationForMailbox(
-      long sequence,
-      Entry entry,
-      int keyHash,
-      long valueAllocation,
-      long mutationVersion) {
     Segment segment = producerSegmentFor(sequence);
     int index = (int) (sequence & segmentMask);
-    segment.entries[index] = entry;
-    segment.valueAddresses[index] = keyHash;
-    segment.allocations[index] = valueAllocation;
-    segment.generations[index] = mutationVersion;
-    segment.operations[index] = MUTATION;
-    segment.causes[index] = -1;
-    MailboxMessage mailboxMessage = segment.mailboxMessages[index];
-    mailboxMessage.prepare(sequence);
-    commit(segment, index, sequence, false, true);
-    return mailboxMessage;
-  }
-
-  /** Publishes a lifecycle slot whose consumption is represented by a FIFO actor message. */
-  MailboxMessage commitForMailbox(long sequence) {
-    Segment segment = producerSegmentFor(sequence);
-    int index = (int) (sequence & segmentMask);
-    MailboxMessage mailboxMessage = segment.mailboxMessages[index];
-    mailboxMessage.prepare(sequence);
-    commit(segment, index, sequence, false, true);
-    return mailboxMessage;
-  }
-
-  private void commit(long sequence, boolean wake, boolean mailboxOwned) {
-    Segment segment = producerSegmentFor(sequence);
-    int index = (int) (sequence & segmentMask);
-    commit(segment, index, sequence, wake, mailboxOwned);
-  }
-
-  private void commit(
-      Segment segment, int index, long sequence, boolean wake, boolean mailboxOwned) {
-    // Publish ownership before the release-store of the sequence. The actor must never observe a
-    // committed lifecycle slot while still seeing the default unmanaged ownership bit.
-    segment.mailboxOwned[index] = mailboxOwned;
     segment.published.lazySet(index, sequence);
     publishedRecordsTotal++;
     if (wake) {
@@ -179,36 +136,15 @@ public final class WriterLifecycleLane {
     cancel(sequence, true);
   }
 
-  /** Publishes a cancelled slot, optionally leaving wake-up ownership to another transport. */
   public void cancel(long sequence, boolean wake) {
-    cancel(sequence, wake, false);
-  }
-
-  /** Publishes a cancelled lifecycle slot whose consumption is represented by a FIFO message. */
-  MailboxMessage cancelForMailbox(long sequence) {
     Segment segment = producerSegmentFor(sequence);
     int index = (int) (sequence & segmentMask);
-    MailboxMessage mailboxMessage = segment.mailboxMessages[index];
-    mailboxMessage.prepare(sequence);
-    cancel(segment, index, sequence, false, true);
-    return mailboxMessage;
-  }
-
-  private void cancel(long sequence, boolean wake, boolean mailboxOwned) {
-    Segment segment = producerSegmentFor(sequence);
-    int index = (int) (sequence & segmentMask);
-    cancel(segment, index, sequence, wake, mailboxOwned);
-  }
-
-  private void cancel(
-      Segment segment, int index, long sequence, boolean wake, boolean mailboxOwned) {
     segment.entries[index] = null;
     segment.valueAddresses[index] = 0L;
     segment.allocations[index] = 0L;
     segment.generations[index] = 0L;
     segment.operations[index] = 0;
     segment.causes[index] = -1;
-    segment.mailboxOwned[index] = mailboxOwned;
     segment.published.lazySet(index, sequence);
     publishedRecordsTotal++;
     if (wake) {
@@ -217,15 +153,6 @@ public final class WriterLifecycleLane {
   }
 
   public boolean poll(Record record) {
-    return poll(record, true);
-  }
-
-  /** Polls only records that are driven by the explicit maintenance wake path. */
-  boolean pollUnmanaged(Record record) {
-    return poll(record, false);
-  }
-
-  private boolean poll(Record record, boolean includeMailboxOwned) {
     if (record == null) {
       throw new NullPointerException("record");
     }
@@ -233,8 +160,7 @@ public final class WriterLifecycleLane {
       return false;
     }
     long sequence = consumerSegment.baseSequence + consumerIndex;
-    if (consumerSegment.published.get(consumerIndex) != sequence
-        || (!includeMailboxOwned && consumerSegment.mailboxOwned[consumerIndex])) {
+    if (consumerSegment.published.get(consumerIndex) != sequence) {
       if (hasCommittedRecords()) {
         headOfLineStopCount++;
       }
@@ -264,8 +190,6 @@ public final class WriterLifecycleLane {
     consumerSegment.generations[index] = 0L;
     consumerSegment.operations[index] = 0;
     consumerSegment.causes[index] = -1;
-    consumerSegment.mailboxOwned[index] = false;
-    consumerSegment.mailboxMessages[index].release();
     consumerSegment.published.lazySet(index, EMPTY);
     consumerIndex++;
     completedRecordsTotal++;
@@ -309,14 +233,6 @@ public final class WriterLifecycleLane {
   }
 
   public boolean hasHeadCommitted() {
-    return hasHeadCommitted(true);
-  }
-
-  boolean hasUnmanagedHead() {
-    return hasHeadCommitted(false);
-  }
-
-  private boolean hasHeadCommitted(boolean includeMailboxOwned) {
     Segment segment = consumerSegment;
     int index = consumerIndex;
     if (index == segmentCapacity) {
@@ -326,8 +242,7 @@ public final class WriterLifecycleLane {
         return false;
       }
     }
-    return segment.published.get(index) == segment.baseSequence + index
-        && (includeMailboxOwned || !segment.mailboxOwned[index]);
+    return segment.published.get(index) == segment.baseSequence + index;
   }
 
   public void finishReadyDrain() {
@@ -337,7 +252,7 @@ public final class WriterLifecycleLane {
       }
       notifyReadinessChanged();
     }
-    if (hasUnmanagedHead()) {
+    if (hasHeadCommitted()) {
       signalReady();
     }
   }
@@ -348,7 +263,7 @@ public final class WriterLifecycleLane {
    * after the clear to preserve the wake-up.
    */
   boolean refreshReadySignal() {
-    if (hasUnmanagedHead()) {
+    if (hasHeadCommitted()) {
       signalReady();
       return true;
     }
@@ -358,7 +273,7 @@ public final class WriterLifecycleLane {
       }
       notifyReadinessChanged();
     }
-    if (!hasUnmanagedHead()) {
+    if (!hasHeadCommitted()) {
       return false;
     }
     signalReady();
@@ -413,12 +328,6 @@ public final class WriterLifecycleLane {
       throw new IllegalStateException("lifecycle sequence is not reserved: " + sequence);
     }
     return segment;
-  }
-
-  /** Returns the fixed mailbox node owned by this lifecycle slot. */
-  MailboxMessage mailboxMessage(long sequence) {
-    Segment segment = producerSegmentFor(sequence);
-    return segment.mailboxMessages[(int) (sequence & segmentMask)];
   }
 
   private boolean advanceConsumerSegment() {
@@ -515,58 +424,6 @@ public final class WriterLifecycleLane {
     }
   }
 
-  /**
-   * Reusable lifecycle mailbox node owned by one segment slot.
-   *
-   * <p>The node is never pooled independently: its segment cannot be recycled until the actor has
-   * released the corresponding lifecycle record, which also clears this node for the next wrap.
-   */
-  static final class MailboxMessage {
-    private WriterLifecycleLane owner;
-    private final Segment segment;
-    private final int index;
-    private long sequence;
-    private boolean queued;
-
-    private MailboxMessage(WriterLifecycleLane owner, Segment segment, int index) {
-      this.owner = owner;
-      this.segment = segment;
-      this.index = index;
-    }
-
-    void bind(WriterLifecycleLane owner) {
-      this.owner = owner;
-    }
-
-    void prepare(long expectedSequence) {
-      if (queued) {
-        throw new IllegalStateException("lifecycle mailbox slot is already queued");
-      }
-      long actual = segment.baseSequence + index;
-      if (owner == null || actual != expectedSequence) {
-        throw new IllegalStateException("lifecycle mailbox sequence does not match its slot");
-      }
-      sequence = expectedSequence;
-      queued = true;
-    }
-
-    void release() {
-      queued = false;
-      sequence = 0L;
-    }
-
-    WriterLifecycleLane owner() {
-      return owner;
-    }
-
-    long sequence() {
-      if (!queued) {
-        throw new IllegalStateException("lifecycle mailbox slot is not queued");
-      }
-      return sequence;
-    }
-  }
-
   private static final class Segment {
     private final AtomicLongArray published;
     private final Entry[] entries;
@@ -575,8 +432,6 @@ public final class WriterLifecycleLane {
     private final long[] generations;
     private final int[] operations;
     private final byte[] causes;
-    private final boolean[] mailboxOwned;
-    private final MailboxMessage[] mailboxMessages;
     private volatile long baseSequence;
     private volatile Segment next;
 
@@ -588,11 +443,6 @@ public final class WriterLifecycleLane {
       generations = new long[capacity];
       operations = new int[capacity];
       causes = new byte[capacity];
-      mailboxOwned = new boolean[capacity];
-      mailboxMessages = new MailboxMessage[capacity];
-      for (int index = 0; index < capacity; index++) {
-        mailboxMessages[index] = new MailboxMessage(owner, this, index);
-      }
       reset(owner, baseSequence);
     }
 
@@ -601,9 +451,6 @@ public final class WriterLifecycleLane {
       next = null;
       for (int index = 0; index < published.length(); index++) {
         published.lazySet(index, EMPTY);
-        mailboxOwned[index] = false;
-        mailboxMessages[index].bind(owner);
-        mailboxMessages[index].release();
       }
     }
   }

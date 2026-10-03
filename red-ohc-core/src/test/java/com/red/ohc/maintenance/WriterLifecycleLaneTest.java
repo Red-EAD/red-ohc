@@ -153,56 +153,49 @@ public final class WriterLifecycleLaneTest {
   }
 
   @Test
-  public void lifecycleMailboxNodeIsReusedOnlyAfterItsSlotIsReleased() {
+  public void laneRecordsFlowInOrderAcrossSegmentRecycling() {
     WriterLifecycleLane lane = new WriterLifecycleLane(2);
     WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
     Entry entry = new Entry(0L, 0, 1L);
-    WriterLifecycleLane.MailboxMessage first = null;
 
     for (int index = 0; index < 5; index++) {
       long sequence = lane.reserve();
       lane.writeMutation(
           sequence, entry, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
-      WriterLifecycleLane.MailboxMessage message = lane.commitForMailbox(sequence);
-      if (index == 0) {
-        first = message;
-      }
+      lane.commit(sequence, false);
       assertTrue(lane.poll(record));
+      assertEquals(record.sequence, sequence);
+      assertEquals(record.operation, WriterLifecycleLane.MUTATION);
       lane.release(record);
-      if (index == 4) {
-        assertSame(message, first, "the recycled segment must carry its original slot node");
-      }
     }
+    assertEquals(lane.allocatedSegments(), 2L);
   }
 
   @Test
-  public void mutationMailboxCommitWritesAndPublishesTheSlotInOneLaneLookup() {
+  public void writeMutationAndCommitPublishTheSlotForPolling() {
     WriterLifecycleLane lane = new WriterLifecycleLane(2);
     WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
     Entry entry = new Entry(0L, 0, 1L);
 
     long sequence = lane.reserve();
-    WriterLifecycleLane.MailboxMessage message =
-        lane.commitMutationForMailbox(
-            sequence, entry, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+    lane.writeMutation(sequence, entry, 0, 0L, WriterLifecycleLane.UNSEEDED_MUTATION_VERSION);
+    lane.commit(sequence, false);
 
-    assertSame(message, lane.mailboxMessage(sequence));
-    assertEquals(message.sequence(), sequence);
     assertTrue(lane.poll(record));
+    assertEquals(record.sequence, sequence);
     assertEquals(record.operation, WriterLifecycleLane.MUTATION);
     assertSame(record.entry, entry);
     lane.release(record);
   }
 
   @Test
-  public void mailboxCancelReturnsThePreparedNodeAndPublishesATombstone() {
+  public void cancelPublishesATombstoneSlotTheActorConsumesAsNoOp() {
     WriterLifecycleLane lane = new WriterLifecycleLane(2);
     WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
 
     long sequence = lane.reserve();
-    WriterLifecycleLane.MailboxMessage message = lane.cancelForMailbox(sequence);
+    lane.cancel(sequence, false);
 
-    assertEquals(message.sequence(), sequence);
     assertTrue(lane.poll(record));
     assertNull(record.entry);
     assertEquals(record.operation, 0);

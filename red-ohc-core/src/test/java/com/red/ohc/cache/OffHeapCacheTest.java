@@ -247,19 +247,12 @@ public class OffHeapCacheTest {
   public void sameShapeReplacementHandsOffMutationRetryAfterWriterRelease() throws Exception {
     ExecutorService executor = Executors.newSingleThreadExecutor();
     OffHeapCache<String, String> cache = newTestCache();
-    Method lifecycleHook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    lifecycleHook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     Entry entry = null;
     boolean writerHeld = false;
-    boolean hookInstalled = false;
     try {
       cache.put("key", "old");
       cache.flushAsync().join();
-      lifecycleHook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
-      hookInstalled = true;
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       entry = cache.data.values().iterator().next();
       assertTrue(entry.claimWriter());
       writerHeld = true;
@@ -281,14 +274,11 @@ public class OffHeapCacheTest {
           entry.isMutationRetryRequested(),
           "the replacement writer must claim the actor's retry marker before releasing the entry");
       assertTrue(
-          lifecycleOffers.get() > 0,
+          publishedLifecycleRecords(cache) - lifecycleBefore > 0,
           "the retry handoff must publish one durable lifecycle mutation record");
       cache.flushAsync().join();
       assertEquals(cache.get("key"), "new");
     } finally {
-      if (hookInstalled) {
-        lifecycleHook.invoke(worker(cache), (Object) null);
-      }
       if (writerHeld) {
         entry.finishWriter();
       }
@@ -388,11 +378,6 @@ public class OffHeapCacheTest {
   @Test
   public void permanentSameShapeReplacementIgnoresTheUnusedNativeDeadline() throws Exception {
     OffHeapCache<String, String> cache = newTestCache();
-    Method hook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    hook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     try {
       cache.put("key", "old");
       cache.flushAsync().join();
@@ -401,16 +386,15 @@ public class OffHeapCacheTest {
       assertFalse(Entry.hasTtl(oldTaggedValue));
       NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
 
-      hook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       cache.put("key", "new");
 
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           0,
           "a permanent same-shape replacement must not inspect or maintain timer metadata");
       assertEquals(cache.get("key"), "new");
     } finally {
-      hook.invoke(worker(cache), (Object) null);
       cache.close();
     }
   }
@@ -418,11 +402,6 @@ public class OffHeapCacheTest {
   @Test
   public void permanentComputeReplacementIgnoresTheUnusedNativeDeadline() throws Exception {
     OffHeapCache<String, String> cache = newTestCache();
-    Method hook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    hook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     try {
       cache.put("key", "old");
       cache.flushAsync().join();
@@ -431,16 +410,15 @@ public class OffHeapCacheTest {
       assertFalse(Entry.hasTtl(oldTaggedValue));
       NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
 
-      hook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       cache.compute("key", (key, value) -> "new");
 
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           0,
           "a permanent compute replacement must not inspect or maintain timer metadata");
       assertEquals(cache.get("key"), "new");
     } finally {
-      hook.invoke(worker(cache), (Object) null);
       cache.close();
     }
   }
@@ -455,11 +433,6 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    Method hook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    hook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     try {
       cache.put("key", "old", 0L);
       cache.flushAsync().join();
@@ -468,16 +441,15 @@ public class OffHeapCacheTest {
       assertFalse(Entry.hasTtl(oldTaggedValue));
       NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
 
-      hook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       cache.put("key", "new", 0L);
 
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           0,
           "an explicit permanent replacement must skip timer metadata despite default TTL");
       assertEquals(cache.get("key"), "new");
     } finally {
-      hook.invoke(worker(cache), (Object) null);
       cache.close();
     }
   }
@@ -485,25 +457,19 @@ public class OffHeapCacheTest {
   @Test
   public void explicitTtlToPermanentReplacementStillMaintainsTheTimer() throws Exception {
     OffHeapCache<String, String> cache = newTestCache();
-    Method hook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    hook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     try {
       cache.put("key", "old", Long.MAX_VALUE);
       cache.flushAsync().join();
 
-      hook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       cache.put("key", "new");
 
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           1,
           "an explicit TTL must still be removed when default TTL is disabled");
       assertEquals(cache.get("key"), "new");
     } finally {
-      hook.invoke(worker(cache), (Object) null);
       cache.close();
     }
   }
@@ -531,22 +497,17 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    Method hook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    hook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     try {
       cache.put("key", "old", 10_000L);
       cache.flushAsync().join();
 
-      hook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       wallMillis.set(1_001L);
       nowNanos.set(1_000_000L);
       cache.put("key", "new", 10_010L);
 
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           0,
           "an extension in the installed timer slot must not enqueue a mutation");
       assertEquals(cache.get("key"), "new");
@@ -555,11 +516,10 @@ public class OffHeapCacheTest {
       nowNanos.set(2_000_000L);
       cache.put("key", "newer", 10_100L);
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           0,
           "a pure extension into another timer slot self-heals in the wheel, no mutation");
     } finally {
-      hook.invoke(worker(cache), (Object) null);
       cache.close();
     }
   }
@@ -588,26 +548,20 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    Method hook =
-        MaintenanceEventLoop.class.getDeclaredMethod(
-            "setLifecycleMessageOfferHookForTest", Runnable.class);
-    hook.setAccessible(true);
-    AtomicInteger lifecycleOffers = new AtomicInteger();
     try {
       cache.put("key", "old");
       cache.flushAsync().join();
 
-      hook.invoke(worker(cache), (Runnable) lifecycleOffers::incrementAndGet);
+      long lifecycleBefore = publishedLifecycleRecords(cache);
       wallMillis.set(1_001L);
       nowNanos.set(1_000_000L);
       assertEquals(cache.compute("key", (key, value) -> "new"), "new");
 
       assertEquals(
-          lifecycleOffers.get(),
+          publishedLifecycleRecords(cache) - lifecycleBefore,
           0,
           "compute must share the same timer-slot merge as put");
     } finally {
-      hook.invoke(worker(cache), (Object) null);
       cache.close();
     }
   }
@@ -640,17 +594,11 @@ public class OffHeapCacheTest {
     CountDownLatch releaseActor = new CountDownLatch(1);
     AtomicBoolean hookCalled = new AtomicBoolean();
     AtomicReference<Throwable> readFailure = new AtomicReference<>();
-    Method hook = null;
     try {
       pauseMaintenance(cache, actorPaused, releaseActor);
       MaintenanceEventLoop worker = worker(cache);
-      hook =
-          MaintenanceEventLoop.class.getDeclaredMethod(
-              "setLifecycleMessageOfferHookForTest", Runnable.class);
-      hook.setAccessible(true);
-      hook.invoke(
-          worker,
-          (Runnable)
+      lifecycle(cache)
+          .bindReadySignal(
               () -> {
                 if (!hookCalled.compareAndSet(false, true)) {
                   return;
@@ -683,9 +631,7 @@ public class OffHeapCacheTest {
           worker.snapshot().unhealthy,
           "an expired read must not make a successfully handed-off insertion unhealthy");
     } finally {
-      if (hook != null) {
-        hook.invoke(worker(cache), (Object) null);
-      }
+      lifecycle(cache).bindReadySignal(() -> {});
       releaseActor.countDown();
       reader.shutdownNow();
       cache.close();
@@ -693,22 +639,27 @@ public class OffHeapCacheTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void committedComputeRemovalIsNotCancelledWhenItsMailboxOfferFails() throws Exception {
+  public void committedComputeRemovalSurvivesAReadySignalPublicationFailure() throws Exception {
     try (OffHeapCache<String, String> cache = newTestCache()) {
       cache.put("remove", "value");
       cache.flushAsync().join();
       MaintenanceEventLoop worker = worker(cache);
       AtomicBoolean injected = new AtomicBoolean();
-      Method hook =
-          MaintenanceEventLoop.class.getDeclaredMethod(
-              "setLifecycleMessageOfferHookForTest", Runnable.class);
-      hook.setAccessible(true);
-      hook.invoke(
-          worker,
-          (Runnable)
+      Method recordFailure =
+          MaintenanceEventLoop.class.getDeclaredMethod("recordTerminalFailure", Throwable.class);
+      recordFailure.setAccessible(true);
+      lifecycle(cache)
+          .bindReadySignal(
               () -> {
                 if (injected.compareAndSet(false, true)) {
-                  throw new IllegalStateException("injected lifecycle mailbox failure");
+                  throw new IllegalStateException("injected ready signal failure");
+                }
+              },
+              failure -> {
+                try {
+                  recordFailure.invoke(worker, failure);
+                } catch (Exception invocationFailure) {
+                  throw new IllegalStateException(invocationFailure);
                 }
               });
 
@@ -718,8 +669,9 @@ public class OffHeapCacheTest {
       } catch (Throwable expected) {
         failed = true;
       }
-      assertTrue(failed, "a lifecycle mailbox publication failure must reach the writer");
-      assertTrue(worker.snapshot().unhealthy);
+      assertTrue(injected.get(), "the ready signal must run during the removal publication");
+      assertTrue(failed, "the terminal failure must reach the writer before compute returns");
+      assertTrue(worker.snapshot().unhealthy, "the signal failure must reach the terminal path");
 
       WriterLifecycleJournal lifecycle = lifecycle(cache);
       WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
@@ -1089,6 +1041,15 @@ public class OffHeapCacheTest {
     Field field = OffHeapCache.class.getDeclaredField("logicalAdmission");
     field.setAccessible(true);
     return (LogicalAdmission) field.get(cache);
+  }
+
+  private static long publishedLifecycleRecords(OffHeapCache<?, ?> cache) throws Exception {
+    WriterLifecycleJournal lifecycle = lifecycle(cache);
+    long total = 0L;
+    for (int index = 0; index < lifecycle.laneCount(); index++) {
+      total += lifecycle.lane(index).publishedRecordsTotal();
+    }
+    return total;
   }
 
   private static WriterLifecycleJournal lifecycle(OffHeapCache<?, ?> cache) throws Exception {
