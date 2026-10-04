@@ -627,6 +627,9 @@ public final class Entry {
       int current = pendingFlags();
       int next = (current | flags) & ~PENDING_RETRY;
       if ((current & PENDING_QUEUED) != 0) {
+        if (next == current) {
+          return false;
+        }
         if (compareAndSetPending(current, next)) {
           return false;
         }
