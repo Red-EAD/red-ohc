@@ -37,21 +37,31 @@ public class DirectReadAllocationTest {
   public void primitiveLongMatchesTheBigEndianByteBufferView() {
     byte[] key = new byte[] {1, 2, 3, 4};
     byte[] value = new byte[] {1, 2, 3, 4, 5, 6, 7, 8};
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, value);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put(key, value);
 
-      assertTrue(
-          cache.getDirect(
-              key,
-              view -> {
-                assertEquals(view.getLong(0), 0x0102030405060708L);
-                assertEquals(view.getLong(0), view.asReadOnlyByteBuffer().getLong(0));
-              }));
+        assertTrue(
+            cache.getDirect(
+                key,
+                view -> {
+                  assertEquals(view.getLong(0), 0x0102030405060708L);
+                  assertEquals(view.getLong(0), view.asReadOnlyByteBuffer().getLong(0));
+                }));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
@@ -67,34 +77,44 @@ public class DirectReadAllocationTest {
     }
     byte[] key = new byte[] {1, 2, 3, 4};
     byte[] value = new byte[16];
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, value);
-      cache.flushAsync().join();
-      DirectValueConsumer consumer =
-          view -> {
-            if (view.getLong(0) != 0L) {
-              throw new AssertionError();
-            }
-          };
-      for (int i = 0; i < 65_536; i++) {
-        cache.getDirect(key, consumer);
-      }
-
-      long threadId = Thread.currentThread().getId();
-      long before = bean.getThreadAllocatedBytes(threadId);
-      for (int i = 0; i < 65_536; i++) {
-        if (!cache.getDirect(key, consumer)) {
-          throw new AssertionError("direct hit unexpectedly missed");
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure1 = null;
+      try {
+        cache.put(key, value);
+        cache.flushAsync().join();
+        DirectValueConsumer consumer =
+            view -> {
+              if (view.getLong(0) != 0L) {
+                throw new AssertionError();
+              }
+            };
+        for (int i = 0; i < 65_536; i++) {
+          cache.getDirect(key, consumer);
         }
-      }
-      long after = bean.getThreadAllocatedBytes(threadId);
 
-      assertEquals(after - before, 0L);
+        long threadId = Thread.currentThread().getId();
+        long before = bean.getThreadAllocatedBytes(threadId);
+        for (int i = 0; i < 65_536; i++) {
+          if (!cache.getDirect(key, consumer)) {
+            throw new AssertionError("direct hit unexpectedly missed");
+          }
+        }
+        long after = bean.getThreadAllocatedBytes(threadId);
+
+        assertEquals(after - before, 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 }

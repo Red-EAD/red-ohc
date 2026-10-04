@@ -46,35 +46,45 @@ public class MaintenanceAccountingTest {
   @Test
   public void logicalExpiryRemovesTheLiveWeight() {
     MutableTicker ticker = new MutableTicker(0L);
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      cache.put("key", "value", 64L);
-      cache.flushAsync().join();
-      assertTrue(cache.stats().liveWeight() > 0L);
-      long logicalEntryBytes =
-          Entry.keyAllocationLengthForKeyLength(3) + ValueBlock.allocationLength(5);
-      assertEquals(cache.stats().liveWeight(), logicalEntryBytes);
-      assertTrue(cache.stats().nativeAllocatedBytes() > logicalEntryBytes);
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure4 = null;
+      try {
+        cache.put("key", "value", 64L);
+        cache.flushAsync().join();
+        assertTrue(cache.stats().liveWeight() > 0L);
+        long logicalEntryBytes =
+            Entry.keyAllocationLengthForKeyLength(3) + ValueBlock.allocationLength(5);
+        assertEquals(cache.stats().liveWeight(), logicalEntryBytes);
+        assertTrue(cache.stats().nativeAllocatedBytes() > logicalEntryBytes);
 
-      ticker.millis = 1_000L;
-      cache.flushAsync().join();
+        ticker.millis = 1_000L;
+        cache.flushAsync().join();
 
-      assertEquals(cache.size(), 0L);
-      assertEquals(cache.stats().liveWeight(), 0L, "TTL removal must refund live weight");
-      assertEquals(cache.stats().evictionCount(), 0L, "TTL removal is not a SIZE eviction");
-      assertEquals(cache.stats().evictionWeight(), 0L, "TTL removal has no eviction weight");
+        assertEquals(cache.size(), 0L);
+        assertEquals(cache.stats().liveWeight(), 0L, "TTL removal must refund live weight");
+        assertEquals(cache.stats().evictionCount(), 0L, "TTL removal is not a SIZE eviction");
+        assertEquals(cache.stats().evictionWeight(), 0L, "TTL removal has no eviction weight");
 
-      cache.put("manual", "value");
-      cache.flushAsync().join();
-      cache.remove("manual");
-      cache.flushAsync().join();
-      assertEquals(cache.stats().evictionCount(), 0L, "manual removal is not a SIZE eviction");
-      assertEquals(cache.stats().evictionWeight(), 0L, "manual removal has no eviction weight");
+        cache.put("manual", "value");
+        cache.flushAsync().join();
+        cache.remove("manual");
+        cache.flushAsync().join();
+        assertEquals(cache.stats().evictionCount(), 0L, "manual removal is not a SIZE eviction");
+        assertEquals(cache.stats().evictionWeight(), 0L, "manual removal has no eviction weight");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
@@ -90,22 +100,35 @@ public class MaintenanceAccountingTest {
   @Test(timeOut = 2_000L)
   public void scheduledTtlIsPhysicallyCleanedOnTheMaintenanceCadence() throws Exception {
     MutableTicker ticker = new MutableTicker(0L);
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("key", "value", 64L);
-      cache.flushAsync().join();
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put("key", "value", 64L);
+        cache.flushAsync().join();
 
-      ticker.millis = 128L;
-      Thread.sleep(130L);
+        ticker.millis = 128L;
+        Thread.sleep(130L);
 
-      assertEquals(
-          cache.get("key"), null, "strict reads must reject an idle cache's logically expired value");
-      assertEquals(cache.size(), 0L, "scheduled TTL cleanup must converge without a later producer event");
+        assertEquals(
+            cache.get("key"),
+            null,
+            "strict reads must reject an idle cache's logically expired value");
+        assertEquals(
+            cache.size(), 0L, "scheduled TTL cleanup must converge without a later producer event");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
@@ -113,29 +136,39 @@ public class MaintenanceAccountingTest {
   public void residenceTimeCountsEveryValueVersionAtSecondResolutionWithoutFlush()
       throws InterruptedException {
     MutableTicker ticker = new MutableTicker(0L);
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("key", "old");
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put("key", "old");
 
-      ticker.millis = 7_000L;
-      for (int index = 0; index < 1_024; index++) {
-        cache.put("key", "new-" + index);
+        ticker.millis = 7_000L;
+        for (int index = 0; index < 1_024; index++) {
+          cache.put("key", "new-" + index);
+        }
+
+        ticker.millis = 12_000L;
+        cache.remove("key");
+        assertTrue(!cache.containsKey("key"));
+
+        OHCacheStats stats = awaitResidenceStats(cache, 1L, 0.0d);
+
+        assertEquals(stats.residenceSampleCount(), 1L);
+        assertEquals(stats.residenceSampleRate(), 1.0d / 1_024.0d, 0.000001);
+        assertTrue(stats.sampledAverageResidenceTimeMillis() >= 0.0d);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
       }
-
-      ticker.millis = 12_000L;
-      cache.remove("key");
-      assertTrue(!cache.containsKey("key"));
-
-      OHCacheStats stats = awaitResidenceStats(cache, 1L, 0.0d);
-
-      assertEquals(stats.residenceSampleCount(), 1L);
-      assertEquals(stats.residenceSampleRate(), 1.0d / 1_024.0d, 0.000001);
-      assertTrue(stats.sampledAverageResidenceTimeMillis() >= 0.0d);
     }
   }
 
@@ -157,40 +190,60 @@ public class MaintenanceAccountingTest {
 
   @Test
   public void evictionPublishesThePolicyWeight() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(8_000L)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      String value = "x".repeat(5 * 1024);
-      cache.put("one", value);
-      cache.flushAsync().join();
-      Entry entry = cache.dataForTest().values().iterator().next();
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(8_000L)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure1 = null;
       try {
-        Field workerField = OffHeapCache.class.getDeclaredField("worker");
-        workerField.setAccessible(true);
-        Object worker = workerField.get(cache);
-        java.lang.reflect.Method remove =
-            worker
-                .getClass()
-                .getDeclaredMethod(
-                    "removeFromMap", Entry.class, boolean.class, long.class, long.class, RemovalCause.class);
-        remove.setAccessible(true);
-        assertTrue(
-            (Boolean)
-                remove.invoke(worker, entry, true, entry.generation(), entry.valueAddress, RemovalCause.SIZE));
-      } catch (ReflectiveOperationException failure) {
-        throw new AssertionError("failed to trigger actor eviction", failure);
-      }
+        String value = "x".repeat(5 * 1024);
+        cache.put("one", value);
+        cache.flushAsync().join();
+        Entry entry = cache.dataForTest().values().iterator().next();
+        try {
+          Field workerField = OffHeapCache.class.getDeclaredField("worker");
+          workerField.setAccessible(true);
+          Object worker = workerField.get(cache);
+          java.lang.reflect.Method remove =
+              worker
+                  .getClass()
+                  .getDeclaredMethod(
+                      "removeFromMap",
+                      Entry.class,
+                      boolean.class,
+                      long.class,
+                      long.class,
+                      RemovalCause.class);
+          remove.setAccessible(true);
+          assertTrue(
+              (Boolean)
+                  remove.invoke(
+                      worker,
+                      entry,
+                      true,
+                      entry.generation(),
+                      entry.valueAddress,
+                      RemovalCause.SIZE));
+        } catch (ReflectiveOperationException failure) {
+          throw new AssertionError("failed to trigger actor eviction", failure);
+        }
 
-      OHCacheStats stats = cache.stats();
-      long expectedWeight =
-          Entry.keyAllocationLengthForKeyLength(3) + ValueBlock.allocationLength(5 * 1024);
-      assertEquals(stats.evictionCount(), 1L);
-      assertEquals(
-          stats.evictionWeight(), expectedWeight);
-      assertEquals(logicalAdmission(cache).logicalCharge(), 0L);
+        OHCacheStats stats = cache.stats();
+        long expectedWeight =
+            Entry.keyAllocationLengthForKeyLength(3) + ValueBlock.allocationLength(5 * 1024);
+        assertEquals(stats.evictionCount(), 1L);
+        assertEquals(stats.evictionWeight(), expectedWeight);
+        assertEquals(logicalAdmission(cache).logicalCharge(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 
@@ -204,27 +257,36 @@ public class MaintenanceAccountingTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      pauseMaintenance(cache, actorPaused, releaseActor);
+    {
+      Throwable explicitCacheFailure1 = null;
+      try {
 
-      cache.put("first", "value");
-      cache.put("second", "value");
+        pauseMaintenance(cache, actorPaused, releaseActor);
 
-      OHCacheStats stats = cache.stats();
-      assertEquals(cache.size(), 2L, "writers may temporarily exceed the eviction target");
-      assertEquals(stats.evictionCount(), 0L, "the paused actor cannot evict synchronously");
+        cache.put("first", "value");
+        cache.put("second", "value");
 
-      releaseActor.countDown();
-      cache.flushAsync().join();
-      long expectedWeight =
-          Entry.keyAllocationLengthForKeyLength("first".length())
-              + ValueBlock.allocationLength("value".length());
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.stats().evictionCount(), 1L);
-      assertEquals(cache.stats().evictionWeight(), expectedWeight);
-    } finally {
-      releaseActor.countDown();
-      cache.close();
+        OHCacheStats stats = cache.stats();
+        assertEquals(cache.size(), 2L, "writers may temporarily exceed the eviction target");
+        assertEquals(stats.evictionCount(), 0L, "the paused actor cannot evict synchronously");
+
+        releaseActor.countDown();
+        cache.flushAsync().join();
+        long expectedWeight =
+            Entry.keyAllocationLengthForKeyLength("first".length())
+                + ValueBlock.allocationLength("value".length());
+        assertEquals(cache.size(), 1L);
+        assertEquals(cache.stats().evictionCount(), 1L);
+        assertEquals(cache.stats().evictionWeight(), expectedWeight);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        releaseActor.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure1);
+      }
     }
   }
 
@@ -273,5 +335,4 @@ public class MaintenanceAccountingTest {
       return millis;
     }
   }
-
 }

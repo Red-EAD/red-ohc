@@ -23,7 +23,6 @@ public final class OHCacheBuilder<K, V> {
   private Ticker ticker = Ticker.DEFAULT;
   private Eviction eviction = Eviction.S3_FIFO;
   private EvictionListener<K, V> evictionListener;
-  private long closeTimeoutMillis = 30_000L;
 
   private OHCacheBuilder() {}
 
@@ -55,9 +54,9 @@ public final class OHCacheBuilder<K, V> {
   /**
    * Selects an entry-count target. The maintenance actor asynchronously claims logical victims to
    * approach this target; writes are not rejected merely because the current count is above it.
-   * This mode is mutually exclusive with {@link #capacity(long)}; use
-   * {@link #nativeMemoryBudgetBytes(long)} to observe native retirement backlog independently of
-   * the entry-count target.
+   * This mode is mutually exclusive with {@link #capacity(long)}; use {@link
+   * #nativeMemoryBudgetBytes(long)} to observe native retirement backlog independently of the
+   * entry-count target.
    */
   public OHCacheBuilder<K, V> maxSize(long maxSize) {
     if (maxSize <= 0L) {
@@ -73,8 +72,8 @@ public final class OHCacheBuilder<K, V> {
 
   /**
    * Sets the native retirement-debt budget used for diagnostics. Physical retirement is always
-   * asynchronous and this setting never blocks, rejects, or asks a writer to reclaim native
-   * memory. Live logical capacity is controlled by {@link #capacity(long)} or {@link #maxSize(long)}.
+   * asynchronous and this setting never blocks, rejects, or asks a writer to reclaim native memory.
+   * Live logical capacity is controlled by {@link #capacity(long)} or {@link #maxSize(long)}.
    */
   public OHCacheBuilder<K, V> nativeMemoryBudgetBytes(long bytes) {
     if (bytes <= 0L) {
@@ -118,15 +117,6 @@ public final class OHCacheBuilder<K, V> {
     return this;
   }
 
-
-  public OHCacheBuilder<K, V> closeTimeoutMillis(long timeoutMillis) {
-    if (timeoutMillis <= 0L) {
-      throw new IllegalArgumentException("closeTimeoutMillis must be positive");
-    }
-    this.closeTimeoutMillis = timeoutMillis;
-    return this;
-  }
-
   public OHCache<K, V> build() {
     return buildTyped();
   }
@@ -146,7 +136,6 @@ public final class OHCacheBuilder<K, V> {
         keySerializer,
         valueSerializer,
         defaultTtlMillis,
-        closeTimeoutMillis,
         ticker,
         eviction,
         evictionListener,
@@ -160,5 +149,4 @@ public final class OHCacheBuilder<K, V> {
         ? DEFAULT_NATIVE_DEBT_BUDGET_BYTES
         : Math.max(DEFAULT_NATIVE_DEBT_BUDGET_BYTES, configuredCapacity);
   }
-
 }

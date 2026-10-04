@@ -38,66 +38,106 @@ public final class BulkTtlClockTest {
   @Test
   public void getAllReadsTheTtlClockOncePerChunk() {
     CountingTicker ticker = new CountingTicker();
-    try (OHCache<String, String> cache = newCache(ticker)) {
-      cache.put("one", "value-one");
-      cache.put("two", "value-two");
-      cache.flushAsync().join();
-      ticker.resetReaderCalls();
+    {
+      OHCache<String, String> cache = newCache(ticker);
+      Throwable cacheFailure4 = null;
+      try {
+        cache.put("one", "value-one");
+        cache.put("two", "value-two");
+        cache.flushAsync().join();
+        ticker.resetReaderCalls();
 
-      Map<String, String> values = cache.getAll(Arrays.asList("one", "two"));
+        Map<String, String> values = cache.getAll(Arrays.asList("one", "two"));
 
-      assertEquals(values.size(), 2);
-      assertEquals(ticker.readerMonotonicCalls(), 1);
-      assertEquals(ticker.readerWallCalls(), 0);
+        assertEquals(values.size(), 2);
+        assertEquals(ticker.readerMonotonicCalls(), 1);
+        assertEquals(ticker.readerWallCalls(), 0);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
   @Test
   public void getDirectAllReadsTheTtlClockOncePerChunk() {
     CountingTicker ticker = new CountingTicker();
-    try (OHCache<String, String> cache = newCache(ticker)) {
-      cache.put("one", "value-one");
-      cache.put("two", "value-two");
-      cache.flushAsync().join();
-      ticker.resetReaderCalls();
-      AtomicInteger hits = new AtomicInteger();
-      DirectEntryConsumer<String> consumer = (key, value) -> hits.incrementAndGet();
+    {
+      OHCache<String, String> cache = newCache(ticker);
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put("one", "value-one");
+        cache.put("two", "value-two");
+        cache.flushAsync().join();
+        ticker.resetReaderCalls();
+        AtomicInteger hits = new AtomicInteger();
+        DirectEntryConsumer<String> consumer = (key, value) -> hits.incrementAndGet();
 
-      assertEquals(cache.getDirectAll(Arrays.asList("one", "two"), consumer), 2);
+        assertEquals(cache.getDirectAll(Arrays.asList("one", "two"), consumer), 2);
 
-      assertEquals(hits.get(), 2);
-      assertEquals(ticker.readerMonotonicCalls(), 1);
-      assertEquals(ticker.readerWallCalls(), 0);
+        assertEquals(hits.get(), 2);
+        assertEquals(ticker.readerMonotonicCalls(), 1);
+        assertEquals(ticker.readerWallCalls(), 0);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
   @Test
   public void getAllKeepsThePublishedValueObservedBeforeTheTtlClockRead() {
     ReentrantReplacementTicker ticker = new ReentrantReplacementTicker();
-    try (OHCache<String, String> cache = newCache(ticker)) {
-      cache.put("key", "old", 1_060_000L);
-      cache.flushAsync().join();
-      ticker.arm(cache);
+    {
+      OHCache<String, String> cache = newCache(ticker);
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put("key", "old", 1_060_000L);
+        cache.flushAsync().join();
+        ticker.arm(cache);
 
-      Map<String, String> values = cache.getAll(Arrays.asList("key"));
+        Map<String, String> values = cache.getAll(Arrays.asList("key"));
 
-      assertEquals(values.get("key"), "old");
-      assertEquals(cache.get("key"), "new");
-      assertEquals(ticker.readerMonotonicCalls(), 1);
+        assertEquals(values.get("key"), "old");
+        assertEquals(cache.get("key"), "new");
+        assertEquals(ticker.readerMonotonicCalls(), 1);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
   @Test
   public void noTtlWritesDoNotReadTheWallClock() {
     CountingTicker ticker = new CountingTicker();
-    try (OHCache<String, String> cache = newNoTtlCache(ticker)) {
-      ticker.resetReaderCalls();
+    {
+      OHCache<String, String> cache = newNoTtlCache(ticker);
+      Throwable cacheFailure1 = null;
+      try {
+        ticker.resetReaderCalls();
 
-      cache.put("one", "value-one");
-      cache.put("one", "value-two");
+        cache.put("one", "value-one");
+        cache.put("one", "value-two");
 
-      assertEquals(ticker.readerMonotonicCalls(), 0);
-      assertEquals(ticker.readerWallCalls(), 0);
+        assertEquals(ticker.readerMonotonicCalls(), 0);
+        assertEquals(ticker.readerWallCalls(), 0);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 

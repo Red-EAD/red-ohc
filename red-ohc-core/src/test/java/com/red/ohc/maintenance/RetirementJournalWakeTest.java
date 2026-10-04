@@ -20,8 +20,7 @@ import com.red.ohc.storage.NativeMemory;
 
 public final class RetirementJournalWakeTest {
   @Test
-  public void journalUsesExactAggregateWorkStateAndADirectOpenSegmentReference()
-      throws Exception {
+  public void journalUsesExactAggregateWorkStateAndADirectOpenSegmentReference() throws Exception {
     assertEquals(
         RetirementJournal.class.getDeclaredField("openProducerCount").getType(),
         AtomicInteger.class);
@@ -29,8 +28,7 @@ public final class RetirementJournalWakeTest {
         RetirementJournal.class.getDeclaredField("sealedSegmentCount").getType(),
         AtomicInteger.class);
     assertEquals(
-        RetirementJournal.class.getDeclaredField("readyLaneCount").getType(),
-        AtomicInteger.class);
+        RetirementJournal.class.getDeclaredField("readyLaneCount").getType(), AtomicInteger.class);
     assertEquals(
         RetirementJournal.class.getDeclaredField("readyLanes").getType(),
         MpscUnboundedArrayQueue.class);
@@ -144,7 +142,7 @@ public final class RetirementJournalWakeTest {
       assertEquals(((Integer) workState.invoke(journal)).intValue() & open, 0);
       assertTrue((((Integer) workState.invoke(journal)).intValue() & ready) != 0);
 
-      assertEquals(journal.sealSnapshotSegments(1L, watermark), 1);
+      assertEquals(journal.sealSnapshotSegments(watermark), 1);
       journal.finishReadyDrains();
       assertEquals(workState.invoke(journal), sealed);
 
@@ -186,8 +184,7 @@ public final class RetirementJournalWakeTest {
 
       long[] watermark = journal.captureAndCutWatermark();
       assertEquals(
-          journal.sealSnapshotSegments(1L, watermark),
-          RetirementJournal.WRITER_WAKE_RECORDS * 2);
+          journal.sealSnapshotSegments(watermark), RetirementJournal.WRITER_WAKE_RECORDS * 2);
       assertEquals(journal.publishSafe(true, true), 2);
       assertEquals(
           journal.reclaimActorResult(memory, Integer.MAX_VALUE).records,
@@ -218,7 +215,8 @@ public final class RetirementJournalWakeTest {
       assertFalse(journal.hasReadyHint());
       assertTrue(
           journal.hasRunnableWork(),
-          "a closed and complete producer must remain discoverable after the wake hint is consumed");
+          "a closed and complete producer must remain discoverable after the wake hint is"
+              + " consumed");
     } finally {
       journal.close();
       memory.closeArenas();
@@ -314,9 +312,7 @@ public final class RetirementJournalWakeTest {
       long[] watermark = new long[journal.laneCount() + 1];
       journal.captureAndCutReadyWatermark(watermark);
 
-      assertEquals(
-          journal.sealSnapshotSegments(1L, watermark),
-          RetirementJournal.WRITER_WAKE_RECORDS);
+      assertEquals(journal.sealSnapshotSegments(watermark), RetirementJournal.WRITER_WAKE_RECORDS);
       assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.safeSegmentDebt(), 1L);
     } finally {
@@ -343,7 +339,7 @@ public final class RetirementJournalWakeTest {
     try {
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
 
       assertEquals(
           journal.publishSafeForQuiescence(readers),
@@ -370,15 +366,14 @@ public final class RetirementJournalWakeTest {
     try {
       journal.appendStructural(0L, 0L);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
 
       assertEquals(
           journal.publishSafeForQuiescence(readers),
           0,
           "native key retirement must still wait for an in-flight lookup");
       readers.endOpForTest(lookupIndex);
-      assertEquals(
-          journal.publishSafeForQuiescence(readers), 1);
+      assertEquals(journal.publishSafeForQuiescence(readers), 1);
     } finally {
       readers.endOpForTest(lookupIndex);
       readers.clear();
@@ -412,7 +407,7 @@ public final class RetirementJournalWakeTest {
       assertTrue(journal.hasReadyHint());
 
       long[] watermark = journal.captureAndCutWatermark();
-      journal.sealSnapshotSegments(1L, watermark);
+      journal.sealSnapshotSegments(watermark);
       journal.publishSafe(true, true);
       journal.reclaimActorResult(memory, Integer.MAX_VALUE);
       journal.finishReadyDrains();
@@ -451,9 +446,7 @@ public final class RetirementJournalWakeTest {
 
       assertEquals(watermark[1], RetirementJournal.WRITER_WAKE_RECORDS);
       assertEquals(watermark[2], 0L, "an unrelated partial writer lane must stay open");
-      assertEquals(
-          journal.sealSnapshotSegments(1L, watermark),
-          RetirementJournal.WRITER_WAKE_RECORDS);
+      assertEquals(journal.sealSnapshotSegments(watermark), RetirementJournal.WRITER_WAKE_RECORDS);
       assertTrue(journal.hasOpenProducerRecords());
     } finally {
       journal.close();
@@ -481,8 +474,7 @@ public final class RetirementJournalWakeTest {
           watermark[1],
           RetirementSegment.CAPACITY,
           "the full predecessor is ready without cutting its one-record successor");
-      assertEquals(
-          journal.sealSnapshotSegments(1L, watermark), RetirementSegment.CAPACITY);
+      assertEquals(journal.sealSnapshotSegments(watermark), RetirementSegment.CAPACITY);
       assertTrue(journal.hasOpenProducerRecords());
     } finally {
       journal.close();
@@ -532,13 +524,13 @@ public final class RetirementJournalWakeTest {
       lane.commit(reservation);
       long[] watermark = journal.captureAndCutWatermark();
 
-      assertEquals(journal.sealSnapshotSegments(1L, watermark), 1);
+      assertEquals(journal.sealSnapshotSegments(watermark), 1);
       // Dirty seal scans visit the actor lane plus the ready-marked lanes, not every lane.
       assertEquals(journal.lastSealScannedLanes(), 2);
       assertEquals(journal.lastSealSealedLanes(), 1);
       assertEquals(journal.sealScannedLanesTotal(), 2L);
 
-      assertEquals(journal.sealSnapshotSegments(2L, watermark), 0);
+      assertEquals(journal.sealSnapshotSegments(watermark), 0);
       assertEquals(journal.lastSealScannedLanes(), 2);
       assertEquals(journal.lastSealSealedLanes(), 0);
       assertEquals(journal.sealScannedLanesTotal(), 4L);
@@ -571,8 +563,7 @@ public final class RetirementJournalWakeTest {
   }
 
   @Test
-  public void retirementTransportUsesMpscSafeQueueAndUnboundedReusableQueue()
-      throws Exception {
+  public void retirementTransportUsesMpscSafeQueueAndUnboundedReusableQueue() throws Exception {
     Field safeSegments = RetirementJournal.class.getDeclaredField("safeSegments");
     Field reusableSegments = RetirementJournal.class.getDeclaredField("reusableSegments");
     Field sealedSegments = RetirementJournal.Lane.class.getDeclaredField("sealedSegments");
@@ -589,11 +580,13 @@ public final class RetirementJournalWakeTest {
 
   @Test
   public void retirementSegmentCountersDoNotWrapEverySlotInAtomicObjects() throws Exception {
-    assertEquals(RetirementSegment.class.getDeclaredField("reservationState").getType(), long.class);
+    assertEquals(
+        RetirementSegment.class.getDeclaredField("reservationState").getType(), long.class);
     assertFalse(
         hasField(RetirementSegment.class, "activeReservations"),
         "the generation-stamped reservation cursor must be the only writer reservation RMW");
-    assertEquals(RetirementSegment.class.getDeclaredField("segmentClaimState").getType(), int.class);
+    assertEquals(
+        RetirementSegment.class.getDeclaredField("segmentClaimState").getType(), int.class);
     assertEquals(RetirementSegment.class.getDeclaredField("payloadFreed").getType(), int.class);
   }
 

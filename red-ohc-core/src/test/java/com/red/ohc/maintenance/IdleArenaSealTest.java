@@ -89,8 +89,14 @@ public final class IdleArenaSealTest {
       ReaderRegistry readers = new ReaderRegistry(memory);
       loop =
           new MaintenanceEventLoop(
-              new ConcurrentHashMap<>(), memory, ticker, 1 << 22,
-              Eviction.LRU, readers, retirementJournal, Long.MAX_VALUE);
+              new ConcurrentHashMap<>(),
+              memory,
+              ticker,
+              1 << 22,
+              Eviction.LRU,
+              readers,
+              retirementJournal,
+              Long.MAX_VALUE);
       loop.bindWriterResourceRegistry(registry);
       patrol = MaintenanceEventLoop.class.getDeclaredMethod("maintenancePass");
       patrol.setAccessible(true);
@@ -104,7 +110,7 @@ public final class IdleArenaSealTest {
     public void close() throws Exception {
       loop.stop();
       if (loop.thread().getState() == Thread.State.NEW) {
-        loop.start();
+        MaintenanceTestSupport.start(loop);
       }
       loop.join(2_000L);
     }

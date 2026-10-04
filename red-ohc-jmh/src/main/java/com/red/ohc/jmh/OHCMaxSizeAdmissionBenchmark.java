@@ -42,7 +42,6 @@ public class OHCMaxSizeAdmissionBenchmark {
   private static final int BATCH_SIZE = 1 << 6;
   private static final int KEY_BYTES = 32;
 
-
   @Param({"256", "5120", "32768"})
   public int valueBytes;
 
@@ -58,25 +57,32 @@ public class OHCMaxSizeAdmissionBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new byte[WORKING_SET][];
-    values = new byte[WORKING_SET][];
-    replaceOnly = "REPLACE_ONLY".equals(scenario);
-    cache =
-        (OffHeapCache<byte[], byte[]>)
-            OHCacheBuilder.<byte[], byte[]>newBuilder()
-                .maxSize(MAX_SIZE)
-                .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.byteArraySerializer)
-                .eviction(Eviction.S3_FIFO)
-                .build();
-    for (int index = 0; index < WORKING_SET; index++) {
-      keys[index] = OHCWriteAdmissionBenchmark.bytes(KEY_BYTES, index);
-      values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
-      if (index < MAX_SIZE) {
-        putEventually(index);
+    try {
+      keys = new byte[WORKING_SET][];
+      values = new byte[WORKING_SET][];
+      replaceOnly = "REPLACE_ONLY".equals(scenario);
+      cache =
+          (OffHeapCache<byte[], byte[]>)
+              OHCacheBuilder.<byte[], byte[]>newBuilder()
+                  .maxSize(MAX_SIZE)
+                  .keySerializer(Utils.byteArraySerializer)
+                  .valueSerializer(Utils.byteArraySerializer)
+                  .eviction(Eviction.S3_FIFO)
+                  .build();
+      for (int index = 0; index < WORKING_SET; index++) {
+        keys[index] = OHCWriteAdmissionBenchmark.bytes(KEY_BYTES, index);
+        values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
+        if (index < MAX_SIZE) {
+          putEventually(index);
+        }
       }
+      cache.flushAsync().join();
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      cache = null;
+      throw failure;
     }
-    cache.flushAsync().join();
   }
 
   @Setup(Level.Iteration)
@@ -87,32 +93,34 @@ public class OHCMaxSizeAdmissionBenchmark {
 
   @TearDown(Level.Trial)
   public void tearDown() throws Exception {
-    cache.flushAsync().join();
+    Throwable failure = null;
     try {
-      OHCacheStats stats = cache.stats();
-      if (stats.maintenanceUnhealthy()
-          || stats.maintenanceQueueDepth() != 0L
-          || stats.nativeAllocationFailureCount() != 0L
-          || retirementQueueDepth() != 0L
-          || cache.size() > MAX_SIZE) {
-        throw new IllegalStateException(
-            "invalid maxSize admission: size="
-                + cache.size()
-                + ", queue="
-                + stats.maintenanceQueueDepth()
-                + ", retirement="
-                + retirementQueueDepth()
-                + ", nativeFailures="
-                + stats.nativeAllocationFailureCount()
-                + ", unhealthy="
-                + stats.maintenanceUnhealthy());
+      cache.flushAsync().join();
+      {
+        OHCacheStats stats = cache.stats();
+        if (stats.maintenanceUnhealthy()
+            || stats.lifecycleJournalLagRecords() != 0L
+            || stats.nativeAllocationFailureCount() != 0L
+            || retirementQueueDepth() != 0L
+            || cache.size() > MAX_SIZE) {
+          throw new IllegalStateException(
+              "invalid maxSize admission: size="
+                  + cache.size()
+                  + ", queue="
+                  + stats.lifecycleJournalLagRecords()
+                  + ", retirement="
+                  + retirementQueueDepth()
+                  + ", nativeFailures="
+                  + stats.nativeAllocationFailureCount()
+                  + ", unhealthy="
+                  + stats.maintenanceUnhealthy());
+        }
       }
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
     } finally {
-      cache.close();
-      if (cache.totalAllocatedBytes() != 0L) {
-        throw new IllegalStateException(
-            "native memory did not return to zero: " + cache.totalAllocatedBytes());
-      }
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
     }
   }
 
@@ -123,21 +131,18 @@ public class OHCMaxSizeAdmissionBenchmark {
       return;
     }
     OHCacheStats stats = cache.stats();
-    results.maintenanceQueueDepth = stats.maintenanceQueueDepth();
     results.nativeAllocationFailures = stats.nativeAllocationFailureCount();
     results.retirementQueueDepth = retirementQueueDepth();
     results.maintenancePassWorkNanos = stats.maintenancePassWorkNanos();
     results.maintenanceActiveNanosTotal = stats.maintenanceActiveNanosTotal();
     results.maintenanceParkNanosTotal = stats.maintenanceParkNanosTotal();
-    results.maintenanceImmediateContinuationCount =
-        stats.maintenanceImmediateContinuationCount();
+    results.maintenanceImmediateContinuationCount = stats.maintenanceImmediateContinuationCount();
     results.retirementSealScannedLanes = stats.retirementSealScannedLanes();
     results.retirementSealSealedLanes = stats.retirementSealSealedLanes();
     results.retirementSealRecords = stats.retirementSealRecords();
     results.retirementSealRecordsTotal = stats.retirementSealRecordsTotal();
     results.retirementReclaimRecordsTotal = stats.retirementReclaimRecordsTotal();
     results.retirementSealScannedLanesTotal = stats.retirementSealScannedLanesTotal();
-    results.retirementSealHeadOfLineStops = stats.retirementSealHeadOfLineStops();
     results.retirementReclaimBlockedCount = stats.retirementReclaimBlockedCount();
     results.retirementReclaimBlockedNanos = stats.retirementReclaimBlockedNanos();
     results.activeReaderCount = stats.activeReaderCount();
@@ -155,7 +160,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     results.retirementSafeSegmentCount = stats.retirementSafeSegmentCount();
     results.retirementReclaimBatchCount = stats.retirementReclaimBatchCount();
     results.retirementOldestSafeWaitNanos = stats.retirementOldestSafeWaitNanos();
-    results.mailboxHeadUnpublishedCount = stats.mailboxHeadUnpublishedCount();
     results.retirementAllocatedSegments = stats.retirementAllocatedSegments();
     results.retirementReusedSegments = stats.retirementReusedSegments();
     results.retirementTrimmedSegments = stats.retirementTrimmedSegments();
@@ -163,8 +167,7 @@ public class OHCMaxSizeAdmissionBenchmark {
     results.lifecycleJournalCompletedRecords = stats.lifecycleJournalCompletedRecords();
     results.lifecycleJournalLagRecords = stats.lifecycleJournalLagRecords();
     results.lifecycleJournalAllocatedSegments = stats.lifecycleJournalAllocatedSegments();
-    results.lifecycleJournalHeadOfLineStopCount =
-        stats.lifecycleJournalHeadOfLineStopCount();
+    results.lifecycleJournalHeadOfLineStopCount = stats.lifecycleJournalHeadOfLineStopCount();
     results.allocatorPageAllocatedCount = stats.allocatorPageAllocatedCount();
     results.allocatorPageReusedCount = stats.allocatorPageReusedCount();
     results.allocatorPageReadyCount = stats.allocatorPageReadyCount();
@@ -317,7 +320,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     public long newKeyAttempted;
     public long newKeyAccepted;
     public long newKeyRejected;
-    public long maintenanceQueueDepth;
     public long nativeAllocationFailures;
     public long retirementQueueDepth;
     public long maintenancePassWorkNanos;
@@ -330,7 +332,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     public long retirementSealRecordsTotal;
     public long retirementReclaimRecordsTotal;
     public long retirementSealScannedLanesTotal;
-    public long retirementSealHeadOfLineStops;
     public long retirementReclaimBlockedCount;
     public long retirementReclaimBlockedNanos;
     public long activeReaderCount;
@@ -348,7 +349,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     public long retirementSafeSegmentCount;
     public long retirementReclaimBatchCount;
     public long retirementOldestSafeWaitNanos;
-    public long mailboxHeadUnpublishedCount;
     public long retirementAllocatedSegments;
     public long retirementReusedSegments;
     public long retirementTrimmedSegments;
@@ -380,7 +380,6 @@ public class OHCMaxSizeAdmissionBenchmark {
       newKeyAttempted = 0L;
       newKeyAccepted = 0L;
       newKeyRejected = 0L;
-      maintenanceQueueDepth = 0L;
       nativeAllocationFailures = 0L;
       retirementQueueDepth = 0L;
       maintenancePassWorkNanos = 0L;
@@ -393,7 +392,6 @@ public class OHCMaxSizeAdmissionBenchmark {
       retirementSealRecordsTotal = 0L;
       retirementReclaimRecordsTotal = 0L;
       retirementSealScannedLanesTotal = 0L;
-      retirementSealHeadOfLineStops = 0L;
       retirementReclaimBlockedCount = 0L;
       retirementReclaimBlockedNanos = 0L;
       activeReaderCount = 0L;
@@ -411,7 +409,6 @@ public class OHCMaxSizeAdmissionBenchmark {
       retirementSafeSegmentCount = 0L;
       retirementReclaimBatchCount = 0L;
       retirementOldestSafeWaitNanos = 0L;
-      mailboxHeadUnpublishedCount = 0L;
       retirementAllocatedSegments = 0L;
       retirementReusedSegments = 0L;
       retirementTrimmedSegments = 0L;
@@ -473,5 +470,4 @@ public class OHCMaxSizeAdmissionBenchmark {
       throw new AssertionError("cannot inspect allocator fallback counter", failure);
     }
   }
-
 }

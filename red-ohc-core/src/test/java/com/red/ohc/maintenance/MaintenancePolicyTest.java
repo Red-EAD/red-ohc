@@ -14,6 +14,7 @@ import org.testng.annotations.Test;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
+import com.red.ohc.cache.CacheTestSupport;
 import com.red.ohc.cache.OHCacheBuilder;
 import com.red.ohc.index.Entry;
 import com.red.ohc.index.EntryTestSupport;
@@ -96,27 +97,35 @@ public class MaintenancePolicyTest {
 
   @Test
   public void tinyLfuEvictsForAThirdEntryWhenLogicalCapacityIsFull() {
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(11_000L)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .eviction(Eviction.W_TINY_LFU)
-            .build()) {
-      String value = "x".repeat(5 * 1024);
-      cache.put("one", value);
-      cache.flushAsync().join();
-      cache.put("two", value);
-      cache.flushAsync().join();
-      cache.put("three", value);
-      cache.flushAsync().join();
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(11_000L)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .eviction(Eviction.W_TINY_LFU)
+              .build();
+      Throwable cacheFailure1 = null;
+      try {
+        String value = "x".repeat(5 * 1024);
+        cache.put("one", value);
+        cache.flushAsync().join();
+        cache.put("two", value);
+        cache.flushAsync().join();
+        cache.put("three", value);
+        cache.flushAsync().join();
 
-      assertEquals(cache.size(), 2L);
-      assertTrue(
-          cache.get("one") == null
-              || cache.get("two") == null
-              || cache.get("three") == null,
-          "the actor may choose any cold victim once the relaxed target is exceeded");
+        assertEquals(cache.size(), 2L);
+        assertTrue(
+            cache.get("one") == null || cache.get("two") == null || cache.get("three") == null,
+            "the actor may choose any cold victim once the relaxed target is exceeded");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 
@@ -387,8 +396,7 @@ public class MaintenancePolicyTest {
     policy.remove(entry, true);
 
     assertTrue(
-        policy.ghostNativeBytes() > 0L,
-        "S3 ghost state must report native hash and FIFO storage");
+        policy.ghostNativeBytes() > 0L, "S3 ghost state must report native hash and FIFO storage");
   }
 
   @Test
@@ -517,8 +525,7 @@ public class MaintenancePolicyTest {
       entry.valueAddress = value;
       bytePolicy.add(entry);
 
-      long expected =
-          keyBytes + ValueBlock.allocationLength(32);
+      long expected = keyBytes + ValueBlock.allocationLength(32);
       assertEquals(entry.policyByteWeight(), expected);
       assertEquals(bytePolicy.usedBytes(), expected);
       assertEquals(bytePolicy.usedWeight(), expected);

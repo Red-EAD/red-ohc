@@ -56,7 +56,7 @@ public final class ActorAdmissionModelTest {
           "safe reclaim must not use a Runnable submitted to another executor");
       assertFalse(
           field.getName().equals("asyncSubmissionLock"),
-          "mailbox fences must not require the common-pool submission lock");
+          "flush watermarks must not require the common-pool submission lock");
     }
     assertFalse(
         hasDeclaredNestedClass("SafeSegmentReclaimTask"),

@@ -12,40 +12,38 @@ import java.util.function.Function;
  * A weakly-consistent off-heap cache with synchronous data-plane writes and asynchronous target
  * maintenance.
  *
- * <p>The CHM is the authoritative Java index. Values and keys are serialized into native memory,
- * so reads and callbacks return deserialized heap snapshots rather than preserving Java object
+ * <p>The CHM is the authoritative Java index. Values and keys are serialized into native memory, so
+ * reads and callbacks return deserialized heap snapshots rather than preserving Java object
  * identity. Key matching uses the key serializer's bytes; value matching for conditional methods
  * uses {@link java.util.Objects#equals(Object, Object)} on deserialized values.
  *
  * <p>TTL expiry is logical first and physical later. An expired mapping is absent from reads,
  * conditional operations, views, and bulk callbacks, but can remain in the CHM-backed physical
- * index until the maintenance actor retires it. {@link #size()}, {@link #isEmpty()}, and view
- * sizes use the logical mapping count; {@link #mappingCount()} exposes the constant-time physical
- * CHM count and may temporarily include expired entries. Logical expiry is observed by reads or
- * maintenance, so these weakly-consistent counts can lag an unobserved clock transition. Closing
- * makes reads and views empty; writes, including writes through views, reject the operation with
- * {@link IllegalStateException}.
+ * index until the maintenance actor retires it. {@link #size()}, {@link #isEmpty()}, and view sizes
+ * use the logical mapping count; {@link #mappingCount()} exposes the constant-time physical CHM
+ * count and may temporarily include expired entries. Logical expiry is observed by reads or
+ * maintenance, so these weakly-consistent counts can lag an unobserved clock transition.
  *
  * <p>{@link #capacity()} is the steady-state byte target and {@code maxSize} is the corresponding
  * entry-count target. Neither target synchronously limits a write: logical occupancy and native
- * usage can temporarily grow while the actor evicts asynchronously. If maintenance remains
- * behind the write rate, native allocation can eventually fail with an {@link OutOfMemoryError};
- * that failure makes the cache terminal.
+ * usage can temporarily grow while the actor evicts asynchronously. If maintenance remains behind
+ * the write rate, native allocation can eventually fail with an {@link OutOfMemoryError}; that
+ * failure makes the cache terminal.
  */
-public interface OHCache<K, V> extends AutoCloseable {
+public interface OHCache<K, V> {
   /**
    * Publishes the serialized entry synchronously. {@link #capacity()} is an asynchronous eviction
    * target rather than a write admission limit, so the logical mapping count and live weight may
-   * temporarily exceed it while the maintenance actor catches up. Listener delivery, policy
-   * repair, and native reclamation remain asynchronous. The method is intentionally void: an
-   * unconditional write does not materialize or expose the previous value.
+   * temporarily exceed it while the maintenance actor catches up. Listener delivery, policy repair,
+   * and native reclamation remain asynchronous. The method is intentionally void: an unconditional
+   * write does not materialize or expose the previous value.
    */
   void put(K key, V value);
 
   /**
    * Publishes an entry with an absolute wall-clock expiry time. The method is intentionally void:
-   * an unconditional write does not materialize or expose the previous value. A non-positive
-   * expiry has the same permanent-entry meaning as the existing OHC TTL API.
+   * an unconditional write does not materialize or expose the previous value. A non-positive expiry
+   * has the same permanent-entry meaning as the existing OHC TTL API.
    */
   void put(K key, V value, long expireAtMillis);
 
@@ -91,8 +89,8 @@ public interface OHCache<K, V> extends AutoCloseable {
   void putAll(Map<? extends K, ? extends V> entries);
 
   /**
-   * Removes the live mapping for a key if present. Missing keys are a no-op and the method does
-   * not materialize or expose the removed value.
+   * Removes the live mapping for a key if present. Missing keys are a no-op and the method does not
+   * materialize or expose the removed value.
    */
   void remove(Object key);
 
@@ -118,12 +116,12 @@ public interface OHCache<K, V> extends AutoCloseable {
 
   V computeIfAbsent(K key, Function<? super K, ? extends V> function);
 
-  V computeIfPresent(
-      K key, BiFunction<? super K, ? super V, ? extends V> function);
+  V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> function);
 
   V compute(K key, BiFunction<? super K, ? super V, ? extends V> function);
 
   V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> function);
+
   Map<K, V> getAll(Collection<? extends K> keys);
 
   int removeAll(Collection<? extends K> keys);
@@ -136,24 +134,28 @@ public interface OHCache<K, V> extends AutoCloseable {
   boolean getDirect(K key, DirectValueConsumer consumer);
 
   /**
-   * Reads live values without deserialization and invokes the consumer synchronously on the
-   * calling thread once per unique hit. Each callback-scoped {@link ValueView} and direct buffer
-   * must not escape its callback.
+   * Reads live values without deserialization and invokes the consumer synchronously on the calling
+   * thread once per unique hit. Each callback-scoped {@link ValueView} and direct buffer must not
+   * escape its callback.
    */
   int getDirectAll(Collection<? extends K> keys, DirectEntryConsumer<K> consumer);
 
   /**
-   * Completes after async tasks queued before the call and their maintenance work are drained. The
-   * capacity/maxSize target is included: when the logical occupancy is over target, completion
-   * waits for the actor to bring it back to target. Concurrent writes after the FIFO fence may
-   * leave later occupancy outside this guarantee.
+   * Completes maintenance through lifecycle and retirement watermarks captured by this call. The
+   * capacity/maxSize target is included: when occupancy applied through the captured lifecycle
+   * boundary is over target, completion waits for the actor to bring it back to target. Concurrent
+   * writes after the captured watermarks may leave later occupancy outside this guarantee.
+   *
+   * <p>Reservations captured by this call must commit or cancel and be consumed before completion.
+   * Later reservations and newly created lifecycle lanes do not expand this boundary. Retirements
+   * created by the actor while applying captured work are included in the completion watermark.
    */
   CompletableFuture<Void> flushAsync();
 
   /**
    * Returns the configured logical serialized-entry byte target. It is not a synchronous write
-   * admission limit; a cache can temporarily exceed it and can grow until native allocation
-   * fails if maintenance cannot keep up.
+   * admission limit; a cache can temporarily exceed it and can grow until native allocation fails
+   * if maintenance cannot keep up.
    */
   long capacity();
 
@@ -161,6 +163,4 @@ public interface OHCache<K, V> extends AutoCloseable {
   long totalAllocatedBytes();
 
   OHCacheStats stats();
-
-  void close();
 }

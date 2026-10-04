@@ -27,9 +27,7 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
 
-/**
- * Stable 120%-working-set insertion churn using non-blocking producer admission.
- */
+/** Stable 120%-working-set insertion churn using non-blocking producer admission. */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Warmup(iterations = 10, time = 10)
@@ -42,7 +40,6 @@ public class OHCEvictionChurnBenchmark {
   private static final int CAPACITY_ENTRIES = 1 << 15;
   private static final int WORKING_SET = CAPACITY_ENTRIES * 6 / 5;
   private static final int BATCH_SIZE = 1 << 6;
-
 
   @Param({"LRU", "W_TINY_LFU", "S3_FIFO"})
   public Eviction eviction;
@@ -59,64 +56,75 @@ public class OHCEvictionChurnBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new byte[WORKING_SET][];
-    values = new byte[WORKING_SET][];
-    long capacity = nativeCapacityFor(CAPACITY_ENTRIES);
-    cache =
-        (OffHeapCache<byte[], byte[]>)
-            OHCacheBuilder.<byte[], byte[]>newBuilder()
-                .capacity(capacity)
-                .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.byteArraySerializer)
-                .eviction(eviction)
-                .build();
-    for (int index = 0; index < WORKING_SET; index++) {
-      keys[index] = OHCWriteAdmissionBenchmark.bytes(keyBytes, index);
-      values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
-      if (index < CAPACITY_ENTRIES) {
-        cache.put(keys[index], values[index]);
+    try {
+      keys = new byte[WORKING_SET][];
+      values = new byte[WORKING_SET][];
+      long capacity = nativeCapacityFor(CAPACITY_ENTRIES);
+      cache =
+          (OffHeapCache<byte[], byte[]>)
+              OHCacheBuilder.<byte[], byte[]>newBuilder()
+                  .capacity(capacity)
+                  .keySerializer(Utils.byteArraySerializer)
+                  .valueSerializer(Utils.byteArraySerializer)
+                  .eviction(eviction)
+                  .build();
+      for (int index = 0; index < WORKING_SET; index++) {
+        keys[index] = OHCWriteAdmissionBenchmark.bytes(keyBytes, index);
+        values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
+        if (index < CAPACITY_ENTRIES) {
+          cache.put(keys[index], values[index]);
+        }
       }
+      cache.flushAsync().join();
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      cache = null;
+      throw failure;
     }
-    cache.flushAsync().join();
   }
 
   @TearDown(Level.Trial)
   public void tearDown() {
-    cache.flushAsync().join();
+    Throwable failure = null;
     try {
-      OHCacheStats stats = cache.stats();
-      if (stats.maintenanceUnhealthy()
-          || stats.maintenanceQueueDepth() != 0L
-          || stats.evictionCount() == 0L
-          || stats.liveWeight() > cache.capacity()) {
-        throw new IllegalStateException(
-            "invalid OHC eviction churn: evictions="
-                + stats.evictionCount()
-                + ", queue="
-                + stats.maintenanceQueueDepth()
-                + ", live="
-                + stats.liveWeight()
-                + ", capacity="
-                + cache.capacity());
+      cache.flushAsync().join();
+      {
+        OHCacheStats stats = cache.stats();
+        if (stats.maintenanceUnhealthy()
+            || stats.lifecycleJournalLagRecords() != 0L
+            || stats.evictionCount() == 0L
+            || stats.liveWeight() > cache.capacity()) {
+          throw new IllegalStateException(
+              "invalid OHC eviction churn: evictions="
+                  + stats.evictionCount()
+                  + ", queue="
+                  + stats.lifecycleJournalLagRecords()
+                  + ", live="
+                  + stats.liveWeight()
+                  + ", capacity="
+                  + cache.capacity());
+        }
       }
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
     } finally {
-      cache.close();
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
     }
   }
 
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(
-      Cursor cursor, WriteResults results, BenchmarkWindowResults window) {
+  public void oneThread(Cursor cursor, WriteResults results, BenchmarkWindowResults window) {
     churn(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(
-      Cursor cursor, WriteResults results, BenchmarkWindowResults window) {
+  public void cpuThreads(Cursor cursor, WriteResults results, BenchmarkWindowResults window) {
     churn(cursor, results);
   }
 

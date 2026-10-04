@@ -14,7 +14,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -80,21 +79,31 @@ public class OffHeapCacheTest {
 
   @Test(timeOut = 2_000L)
   public void writerRegistrationBindsMaintenanceForLaterReads() {
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("registered", "value");
-      for (int index = 0; index < 1_024; index++) {
-        assertEquals(cache.get("registered"), "value");
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure13 = null;
+      try {
+        cache.put("registered", "value");
+        for (int index = 0; index < 1_024; index++) {
+          assertEquals(cache.get("registered"), "value");
+        }
+        cache.flushAsync().join();
+        assertEquals(
+            cache.stats().hitCount(),
+            1_024L,
+            "a thread registered by put must still publish later get statistics");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure13 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure13);
       }
-      cache.flushAsync().join();
-      assertEquals(
-          cache.stats().hitCount(),
-          1_024L,
-          "a thread registered by put must still publish later get statistics");
     }
   }
 
@@ -102,65 +111,95 @@ public class OffHeapCacheTest {
   public void replacementOfARemovedMappingIsCountedExactlyOnce() {
     // put -> remove leaves the CHM entry logically absent; the replacement must republish with
     // the absence tag carried so the ledger counts the new mapping exactly once.
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("key", "first");
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      cache.remove("key");
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 0L);
-      cache.put("key", "second");
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.get("key"), "second");
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure12 = null;
+      try {
+        cache.put("key", "first");
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        cache.remove("key");
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 0L);
+        cache.put("key", "second");
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertEquals(cache.get("key"), "second");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure12 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure12);
+      }
     }
   }
 
   @Test
   public void statsExposeWeaklyPublishedRequestRates() {
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("hit", "value");
-      assertEquals(cache.get("hit"), "value");
-      assertEquals(cache.get("miss"), null);
-      cache.flushAsync().join();
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure11 = null;
+      try {
+        cache.put("hit", "value");
+        assertEquals(cache.get("hit"), "value");
+        assertEquals(cache.get("miss"), null);
+        cache.flushAsync().join();
 
-      assertEquals(cache.stats().hitCount(), 1L);
-      assertEquals(cache.stats().missCount(), 1L);
-      assertEquals(cache.stats().requestCount(), 2L);
-      assertEquals(cache.stats().hitRate(), 0.5d, 0.0d);
-      assertEquals(cache.stats().missRate(), 0.5d, 0.0d);
+        assertEquals(cache.stats().hitCount(), 1L);
+        assertEquals(cache.stats().missCount(), 1L);
+        assertEquals(cache.stats().requestCount(), 2L);
+        assertEquals(cache.stats().hitRate(), 0.5d, 0.0d);
+        assertEquals(cache.stats().missRate(), 0.5d, 0.0d);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure11 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure11);
+      }
     }
   }
 
   @Test
   public void statsExposeNativeAllocationCounters() {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      cache.put("large", "x".repeat(33_000));
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure10 = null;
+      try {
+        cache.put("large", "x".repeat(33_000));
+        cache.flushAsync().join();
 
-      OHCacheStats first = cache.stats();
-      assertTrue(first.directEntryAllocationCount() > 0L);
-      assertEquals(first.smallAllocationFallbackCount(), 0L);
+        OHCacheStats first = cache.stats();
+        assertTrue(first.directEntryAllocationCount() > 0L);
+        assertEquals(first.smallAllocationFallbackCount(), 0L);
 
-      OHCacheStats second = cache.stats();
-      assertTrue(
-          second.directEntryAllocationCount() >= first.directEntryAllocationCount(),
-          "allocation counters must be monotonic across weakly consistent snapshots");
+        OHCacheStats second = cache.stats();
+        assertTrue(
+            second.directEntryAllocationCount() >= first.directEntryAllocationCount(),
+            "allocation counters must be monotonic across weakly consistent snapshots");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure10 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure10);
+      }
     }
   }
 
@@ -171,38 +210,49 @@ public class OffHeapCacheTest {
     int valueBytes = 5 * 1024;
     long entryWeight =
         CacheMath.logicalEntryBytes(
-            Entry.keyAllocationLengthForKeyLength(keyBytes), ValueBlock.allocationLength(valueBytes));
+            Entry.keyAllocationLengthForKeyLength(keyBytes),
+            ValueBlock.allocationLength(valueBytes));
     byte[][] keys = new byte[residentEntries][];
     byte[] value = new byte[valueBytes];
     long capacity = entryWeight * residentEntries;
-    try (OffHeapCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(capacity)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .eviction(Eviction.S3_FIFO)
-            .buildTyped()) {
-      for (int index = 0; index < residentEntries; index++) {
-        keys[index] = new byte[keyBytes];
-        ByteBuffer.wrap(keys[index]).putInt(index);
-        cache.put(keys[index], value);
-      }
-      cache.flushAsync().join();
+    {
+      OffHeapCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(capacity)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .eviction(Eviction.S3_FIFO)
+              .buildTyped();
+      Throwable cacheFailure9 = null;
+      try {
+        for (int index = 0; index < residentEntries; index++) {
+          keys[index] = new byte[keyBytes];
+          ByteBuffer.wrap(keys[index]).putInt(index);
+          cache.put(keys[index], value);
+        }
+        cache.flushAsync().join();
 
-      int attempts = 1_000_000;
-      int accepted = attempts;
-      for (int index = 0; index < attempts; index++) {
-        cache.put(keys[index & (residentEntries - 1)], value);
-      }
-      cache.flushAsync().join();
+        int attempts = 1_000_000;
+        int accepted = attempts;
+        for (int index = 0; index < attempts; index++) {
+          cache.put(keys[index & (residentEntries - 1)], value);
+        }
+        cache.flushAsync().join();
 
-      OHCacheStats stats = cache.stats();
-      assertTrue(accepted > 0, "replacement pressure must make progress");
-      assertFalse(stats.maintenanceUnhealthy());
-      assertEquals(stats.maintenanceQueueDepth(), 0L);
-      // A full retirement ring or native pool is bounded backpressure after the separate resident
-      // cache-wide gate is removed. The important invariant is that the failed replacement does
-      // not leave native ownership or maintenance state stuck.
+        OHCacheStats stats = cache.stats();
+        assertTrue(accepted > 0, "replacement pressure must make progress");
+        assertFalse(stats.maintenanceUnhealthy());
+        assertEquals(stats.lifecycleJournalLagRecords(), 0L);
+        // A full retirement ring or native pool is bounded backpressure after the separate resident
+        // cache-wide gate is removed. The important invariant is that the failed replacement does
+        // not leave native ownership or maintenance state stuck.
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure9 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure9);
+      }
     }
   }
 
@@ -216,30 +266,39 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      cache.put("key", "value");
-      cache.flushAsync().join();
-      pauseMaintenance(cache, actorPaused, releaseActor);
+    {
+      Throwable explicitCacheFailure14 = null;
+      try {
 
-      MaintenanceEventLoop worker = worker(cache);
-      RetirementJournal retirements = worker.retirementJournal();
-      for (int record = 0; record < RetirementJournal.SEGMENT_CAPACITY * 6; record++) {
-        retirements.append(0L, 0L);
+        cache.put("key", "value");
+        cache.flushAsync().join();
+        pauseMaintenance(cache, actorPaused, releaseActor);
+
+        MaintenanceEventLoop worker = worker(cache);
+        RetirementJournal retirements = worker.retirementJournal();
+        for (int record = 0; record < RetirementJournal.SEGMENT_CAPACITY * 6; record++) {
+          retirements.append(0L, 0L);
+        }
+        retirements.cutAllProducersAtWatermark();
+        retirements.sealReadySegments();
+        retirements.publishSafe(true, true);
+        long safeSegmentsBefore = retirements.safeSegmentDebt();
+
+        cache.put("key", "replacement");
+
+        assertEquals(
+            retirements.safeSegmentDebt(),
+            safeSegmentsBefore,
+            "normal replacement must leave already-safe work to maintenance");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure14 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        releaseActor.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure14);
       }
-      retirements.cutAllProducersAtWatermark();
-      retirements.sealReadySegments(1L);
-      retirements.publishSafe(true, true);
-      long safeSegmentsBefore = retirements.safeSegmentDebt();
-
-      cache.put("key", "replacement");
-
-      assertEquals(
-          retirements.safeSegmentDebt(),
-          safeSegmentsBefore,
-          "normal replacement must leave already-safe work to maintenance");
-    } finally {
-      releaseActor.countDown();
-      cache.close();
     }
   }
 
@@ -249,41 +308,50 @@ public class OffHeapCacheTest {
     OffHeapCache<String, String> cache = newTestCache();
     Entry entry = null;
     boolean writerHeld = false;
-    try {
-      cache.put("key", "old");
-      cache.flushAsync().join();
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      entry = cache.data.values().iterator().next();
-      assertTrue(entry.claimWriter());
-      writerHeld = true;
-      assertTrue(entry.requestMutationRetry(Entry.PENDING_UPDATE));
-
-      Future<?> replacement = executor.submit(() -> cache.put("key", "new"));
+    {
+      Throwable explicitCacheFailure13 = null;
       try {
-        replacement.get(100L, TimeUnit.MILLISECONDS);
-        throw new AssertionError("the replacement must wait for the current writer");
-      } catch (TimeoutException expected) {
-        // The writer must publish only after the protected entry is released.
-      }
 
-      entry.finishWriter();
-      writerHeld = false;
-      replacement.get(1L, TimeUnit.SECONDS);
+        cache.put("key", "old");
+        cache.flushAsync().join();
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        entry = cache.data.values().iterator().next();
+        assertTrue(entry.claimWriter());
+        writerHeld = true;
+        assertTrue(entry.requestMutationRetry(Entry.PENDING_UPDATE));
 
-      assertFalse(
-          entry.isMutationRetryRequested(),
-          "the replacement writer must claim the actor's retry marker before releasing the entry");
-      assertTrue(
-          publishedLifecycleRecords(cache) - lifecycleBefore > 0,
-          "the retry handoff must publish one durable lifecycle mutation record");
-      cache.flushAsync().join();
-      assertEquals(cache.get("key"), "new");
-    } finally {
-      if (writerHeld) {
+        Future<?> replacement = executor.submit(() -> cache.put("key", "new"));
+        try {
+          replacement.get(100L, TimeUnit.MILLISECONDS);
+          throw new AssertionError("the replacement must wait for the current writer");
+        } catch (TimeoutException expected) {
+          // The writer must publish only after the protected entry is released.
+        }
+
         entry.finishWriter();
+        writerHeld = false;
+        replacement.get(1L, TimeUnit.SECONDS);
+
+        assertFalse(
+            entry.isMutationRetryRequested(),
+            "the replacement writer must claim the actor's retry marker before releasing the"
+                + " entry");
+        assertTrue(
+            publishedLifecycleRecords(cache) - lifecycleBefore > 0,
+            "the retry handoff must publish one durable lifecycle mutation record");
+        cache.flushAsync().join();
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure13 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        if (writerHeld) {
+          entry.finishWriter();
+        }
+        CacheTestSupport.stop(cache, explicitCacheFailure13, executor);
       }
-      executor.shutdownNow();
-      cache.close();
     }
   }
 
@@ -294,74 +362,122 @@ public class OffHeapCacheTest {
     LogicalAdmission admission = logicalAdmission(cache);
     CountDownLatch reserved = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    try {
-      Future<?> writer =
-          executor.submit(
-              () -> {
-                admission.tryChargeDelta(1L);
-                reserved.countDown();
-                try {
-                  release.await();
-                } catch (InterruptedException interrupted) {
-                  Thread.currentThread().interrupt();
-                  throw new AssertionError(interrupted);
-                } finally {
-                  admission.rollbackUnpublishedDelta(1L);
-                }
-              });
-      assertTrue(reserved.await(1L, TimeUnit.SECONDS));
+    {
+      Throwable explicitCacheFailure12 = null;
+      try {
 
-      // flushAsync is a maintenance FIFO barrier, not a global writer-quiescence barrier. An
-      // in-flight logical reservation must not turn its completion into an exceptional future.
-      cache.flushAsync().join();
+        Future<?> writer =
+            executor.submit(
+                () -> {
+                  admission.tryChargeDelta(1L);
+                  reserved.countDown();
+                  try {
+                    release.await();
+                  } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(interrupted);
+                  } finally {
+                    admission.rollbackUnpublishedDelta(1L);
+                  }
+                });
+        assertTrue(reserved.await(1L, TimeUnit.SECONDS));
 
-      release.countDown();
-      writer.get(1L, TimeUnit.SECONDS);
-    } finally {
-      release.countDown();
-      executor.shutdownNow();
-      cache.close();
+        // A logical admission reservation without a lifecycle record is outside the captured
+        // maintenance watermarks and must not make this flush fail.
+        cache.flushAsync().join();
+
+        release.countDown();
+        writer.get(1L, TimeUnit.SECONDS);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure12 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure12, executor);
+      }
     }
   }
 
   @Test
   public void builderConstructsTheOffHeapEntryPoint() {
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      assertEquals(cache.getClass().getName(), "com.red.ohc.cache.OffHeapCache");
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure8 = null;
+      try {
+        assertEquals(cache.getClass().getName(), "com.red.ohc.cache.OffHeapCache");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure8 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure8);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void postChargeFailureAfterLedgerCommitTerminatesNewKeyInsert() throws Exception {
-    try (OffHeapCache<String, String> cache = newTestCache()) {
-      cache.setPostChargeFailurePointForTest(
-          OffHeapCache.PostChargeFailurePoint.AFTER_LEDGER_COMMIT);
-      assertPostChargeFailureTerminatesCache(cache, () -> cache.put("insert", "value"));
+    {
+      OffHeapCache<String, String> cache = newTestCache();
+      Throwable cacheFailure7 = null;
+      try {
+        cache.setPostChargeFailurePointForTest(
+            OffHeapCache.PostChargeFailurePoint.AFTER_LEDGER_COMMIT);
+        assertPostChargeFailureTerminatesCache(cache, () -> cache.put("insert", "value"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure7 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure7);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void postChargeFailureBeforeRetirementCommitTerminatesReplacement() throws Exception {
-    try (OffHeapCache<String, String> cache = newTestCache()) {
-      cache.put("replace", "old");
-      cache.setPostChargeFailurePointForTest(
-          OffHeapCache.PostChargeFailurePoint.BEFORE_RETIREMENT_COMMIT);
-      assertPostChargeFailureTerminatesCache(cache, () -> cache.put("replace", "new-value"));
+    {
+      OffHeapCache<String, String> cache = newTestCache();
+      Throwable cacheFailure6 = null;
+      try {
+        cache.put("replace", "old");
+        cache.setPostChargeFailurePointForTest(
+            OffHeapCache.PostChargeFailurePoint.BEFORE_RETIREMENT_COMMIT);
+        assertPostChargeFailureTerminatesCache(cache, () -> cache.put("replace", "new-value"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure6 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure6);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void postChargeFailureBeforeWriterReleaseTerminatesComputedInsert() throws Exception {
-    try (OffHeapCache<String, String> cache = newTestCache()) {
-      cache.setPostChargeFailurePointForTest(
-          OffHeapCache.PostChargeFailurePoint.BEFORE_WRITER_RELEASE);
-      assertPostChargeFailureTerminatesCache(
-          cache, () -> cache.computeIfAbsent("compute", ignored -> "value"));
+    {
+      OffHeapCache<String, String> cache = newTestCache();
+      Throwable cacheFailure5 = null;
+      try {
+        cache.setPostChargeFailurePointForTest(
+            OffHeapCache.PostChargeFailurePoint.BEFORE_WRITER_RELEASE);
+        assertPostChargeFailureTerminatesCache(
+            cache, () -> cache.computeIfAbsent("compute", ignored -> "value"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure5 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure5);
+      }
     }
   }
 
@@ -378,48 +494,66 @@ public class OffHeapCacheTest {
   @Test
   public void permanentSameShapeReplacementIgnoresTheUnusedNativeDeadline() throws Exception {
     OffHeapCache<String, String> cache = newTestCache();
-    try {
-      cache.put("key", "old");
-      cache.flushAsync().join();
-      Entry entry = cache.dataForTest().values().iterator().next();
-      long oldTaggedValue = entry.valueAddress;
-      assertFalse(Entry.hasTtl(oldTaggedValue));
-      NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
+    {
+      Throwable explicitCacheFailure11 = null;
+      try {
 
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      cache.put("key", "new");
+        cache.put("key", "old");
+        cache.flushAsync().join();
+        Entry entry = cache.dataForTest().values().iterator().next();
+        long oldTaggedValue = entry.valueAddress;
+        assertFalse(Entry.hasTtl(oldTaggedValue));
+        NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
 
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          0,
-          "a permanent same-shape replacement must not inspect or maintain timer metadata");
-      assertEquals(cache.get("key"), "new");
-    } finally {
-      cache.close();
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        cache.put("key", "new");
+
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            0,
+            "a permanent same-shape replacement must not inspect or maintain timer metadata");
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure11 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure11);
+      }
     }
   }
 
   @Test
   public void permanentComputeReplacementIgnoresTheUnusedNativeDeadline() throws Exception {
     OffHeapCache<String, String> cache = newTestCache();
-    try {
-      cache.put("key", "old");
-      cache.flushAsync().join();
-      Entry entry = cache.dataForTest().values().iterator().next();
-      long oldTaggedValue = entry.valueAddress;
-      assertFalse(Entry.hasTtl(oldTaggedValue));
-      NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
+    {
+      Throwable explicitCacheFailure10 = null;
+      try {
 
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      cache.compute("key", (key, value) -> "new");
+        cache.put("key", "old");
+        cache.flushAsync().join();
+        Entry entry = cache.dataForTest().values().iterator().next();
+        long oldTaggedValue = entry.valueAddress;
+        assertFalse(Entry.hasTtl(oldTaggedValue));
+        NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
 
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          0,
-          "a permanent compute replacement must not inspect or maintain timer metadata");
-      assertEquals(cache.get("key"), "new");
-    } finally {
-      cache.close();
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        cache.compute("key", (key, value) -> "new");
+
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            0,
+            "a permanent compute replacement must not inspect or maintain timer metadata");
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure10 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure10);
+      }
     }
   }
 
@@ -433,44 +567,62 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      cache.put("key", "old", 0L);
-      cache.flushAsync().join();
-      Entry entry = cache.dataForTest().values().iterator().next();
-      long oldTaggedValue = entry.valueAddress;
-      assertFalse(Entry.hasTtl(oldTaggedValue));
-      NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
+    {
+      Throwable explicitCacheFailure9 = null;
+      try {
 
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      cache.put("key", "new", 0L);
+        cache.put("key", "old", 0L);
+        cache.flushAsync().join();
+        Entry entry = cache.dataForTest().values().iterator().next();
+        long oldTaggedValue = entry.valueAddress;
+        assertFalse(Entry.hasTtl(oldTaggedValue));
+        NativeMemory.putLong(Entry.rawValueAddress(oldTaggedValue), 1L);
 
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          0,
-          "an explicit permanent replacement must skip timer metadata despite default TTL");
-      assertEquals(cache.get("key"), "new");
-    } finally {
-      cache.close();
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        cache.put("key", "new", 0L);
+
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            0,
+            "an explicit permanent replacement must skip timer metadata despite default TTL");
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure9 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure9);
+      }
     }
   }
 
   @Test
   public void explicitTtlToPermanentReplacementStillMaintainsTheTimer() throws Exception {
     OffHeapCache<String, String> cache = newTestCache();
-    try {
-      cache.put("key", "old", Long.MAX_VALUE);
-      cache.flushAsync().join();
+    {
+      Throwable explicitCacheFailure8 = null;
+      try {
 
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      cache.put("key", "new");
+        cache.put("key", "old", Long.MAX_VALUE);
+        cache.flushAsync().join();
 
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          1,
-          "an explicit TTL must still be removed when default TTL is disabled");
-      assertEquals(cache.get("key"), "new");
-    } finally {
-      cache.close();
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        cache.put("key", "new");
+
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            1,
+            "an explicit TTL must still be removed when default TTL is disabled");
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure8 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure8);
+      }
     }
   }
 
@@ -497,30 +649,39 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      cache.put("key", "old", 10_000L);
-      cache.flushAsync().join();
+    {
+      Throwable explicitCacheFailure7 = null;
+      try {
 
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      wallMillis.set(1_001L);
-      nowNanos.set(1_000_000L);
-      cache.put("key", "new", 10_010L);
+        cache.put("key", "old", 10_000L);
+        cache.flushAsync().join();
 
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          0,
-          "an extension in the installed timer slot must not enqueue a mutation");
-      assertEquals(cache.get("key"), "new");
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        wallMillis.set(1_001L);
+        nowNanos.set(1_000_000L);
+        cache.put("key", "new", 10_010L);
 
-      wallMillis.set(1_002L);
-      nowNanos.set(2_000_000L);
-      cache.put("key", "newer", 10_100L);
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          0,
-          "a pure extension into another timer slot self-heals in the wheel, no mutation");
-    } finally {
-      cache.close();
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            0,
+            "an extension in the installed timer slot must not enqueue a mutation");
+        assertEquals(cache.get("key"), "new");
+
+        wallMillis.set(1_002L);
+        nowNanos.set(2_000_000L);
+        cache.put("key", "newer", 10_100L);
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            0,
+            "a pure extension into another timer slot self-heals in the wheel, no mutation");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure7 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure7);
+      }
     }
   }
 
@@ -548,21 +709,30 @@ public class OffHeapCacheTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      cache.put("key", "old");
-      cache.flushAsync().join();
+    {
+      Throwable explicitCacheFailure6 = null;
+      try {
 
-      long lifecycleBefore = publishedLifecycleRecords(cache);
-      wallMillis.set(1_001L);
-      nowNanos.set(1_000_000L);
-      assertEquals(cache.compute("key", (key, value) -> "new"), "new");
+        cache.put("key", "old");
+        cache.flushAsync().join();
 
-      assertEquals(
-          publishedLifecycleRecords(cache) - lifecycleBefore,
-          0,
-          "compute must share the same timer-slot merge as put");
-    } finally {
-      cache.close();
+        long lifecycleBefore = publishedLifecycleRecords(cache);
+        wallMillis.set(1_001L);
+        nowNanos.set(1_000_000L);
+        assertEquals(cache.compute("key", (key, value) -> "new"), "new");
+
+        assertEquals(
+            publishedLifecycleRecords(cache) - lifecycleBefore,
+            0,
+            "compute must share the same timer-slot merge as put");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure6 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure6);
+      }
     }
   }
 
@@ -594,93 +764,116 @@ public class OffHeapCacheTest {
     CountDownLatch releaseActor = new CountDownLatch(1);
     AtomicBoolean hookCalled = new AtomicBoolean();
     AtomicReference<Throwable> readFailure = new AtomicReference<>();
-    try {
-      pauseMaintenance(cache, actorPaused, releaseActor);
-      MaintenanceEventLoop worker = worker(cache);
-      lifecycle(cache)
-          .bindReadySignal(
-              () -> {
-                if (!hookCalled.compareAndSet(false, true)) {
-                  return;
-                }
-                nowNanos.set(2_000_000L);
-                Future<?> read =
-                    reader.submit(
-                        () -> {
-                          try {
-                            assertEquals(cache.get("key"), null);
-                          } catch (Throwable failure) {
-                            readFailure.set(failure);
-                          }
-                        });
-                try {
-                  read.get(2L, TimeUnit.SECONDS);
-                } catch (Throwable failure) {
-                  readFailure.set(failure);
-                }
-              });
+    {
+      Throwable explicitCacheFailure5 = null;
+      try {
 
-      if (putIfAbsent) {
-        assertEquals(cache.putIfAbsent("key", "value"), null);
-      } else {
-        cache.put("key", "value");
+        pauseMaintenance(cache, actorPaused, releaseActor);
+        MaintenanceEventLoop worker = worker(cache);
+        lifecycle(cache)
+            .bindReadySignal(
+                () -> {
+                  if (!hookCalled.compareAndSet(false, true)) {
+                    return;
+                  }
+                  nowNanos.set(2_000_000L);
+                  Future<?> read =
+                      reader.submit(
+                          () -> {
+                            try {
+                              assertEquals(cache.get("key"), null);
+                            } catch (Throwable failure) {
+                              readFailure.set(failure);
+                            }
+                          });
+                  try {
+                    read.get(2L, TimeUnit.SECONDS);
+                  } catch (Throwable failure) {
+                    readFailure.set(failure);
+                  }
+                });
+
+        if (putIfAbsent) {
+          assertEquals(cache.putIfAbsent("key", "value"), null);
+        } else {
+          cache.put("key", "value");
+        }
+        assertTrue(hookCalled.get(), "the test must observe the post-handoff lifecycle offer");
+        assertEquals(readFailure.get(), null);
+        assertFalse(
+            worker.snapshot().unhealthy,
+            "an expired read must not make a successfully handed-off insertion unhealthy");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure5 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        lifecycle(cache).bindReadySignal(() -> {});
+        releaseActor.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure5, reader);
       }
-      assertTrue(hookCalled.get(), "the test must observe the post-handoff lifecycle offer");
-      assertEquals(readFailure.get(), null);
-      assertFalse(
-          worker.snapshot().unhealthy,
-          "an expired read must not make a successfully handed-off insertion unhealthy");
-    } finally {
-      lifecycle(cache).bindReadySignal(() -> {});
-      releaseActor.countDown();
-      reader.shutdownNow();
-      cache.close();
     }
   }
 
   @Test(timeOut = 10_000L)
   public void committedComputeRemovalSurvivesAReadySignalPublicationFailure() throws Exception {
-    try (OffHeapCache<String, String> cache = newTestCache()) {
-      cache.put("remove", "value");
-      cache.flushAsync().join();
-      MaintenanceEventLoop worker = worker(cache);
-      AtomicBoolean injected = new AtomicBoolean();
-      Method recordFailure =
-          MaintenanceEventLoop.class.getDeclaredMethod("recordTerminalFailure", Throwable.class);
-      recordFailure.setAccessible(true);
-      lifecycle(cache)
-          .bindReadySignal(
-              () -> {
-                if (injected.compareAndSet(false, true)) {
-                  throw new IllegalStateException("injected ready signal failure");
-                }
-              },
-              failure -> {
-                try {
-                  recordFailure.invoke(worker, failure);
-                } catch (Exception invocationFailure) {
-                  throw new IllegalStateException(invocationFailure);
-                }
-              });
-
-      boolean failed = false;
+    {
+      OffHeapCache<String, String> cache = newTestCache();
+      Throwable cacheFailure4 = null;
       try {
-        cache.computeIfPresent("remove", (key, value) -> null);
-      } catch (Throwable expected) {
-        failed = true;
-      }
-      assertTrue(injected.get(), "the ready signal must run during the removal publication");
-      assertTrue(failed, "the terminal failure must reach the writer before compute returns");
-      assertTrue(worker.snapshot().unhealthy, "the signal failure must reach the terminal path");
+        cache.put("remove", "value");
+        cache.flushAsync().join();
+        MaintenanceEventLoop worker = worker(cache);
+        AtomicBoolean injected = new AtomicBoolean();
+        Method recordFailure =
+            MaintenanceEventLoop.class.getDeclaredMethod("recordTerminalFailure", Throwable.class);
+        recordFailure.setAccessible(true);
+        lifecycle(cache)
+            .bindReadySignal(
+                () -> {
+                  if (injected.compareAndSet(false, true)) {
+                    throw new IllegalStateException("injected ready signal failure");
+                  }
+                },
+                failure -> {
+                  try {
+                    recordFailure.invoke(worker, failure);
+                  } catch (Exception invocationFailure) {
+                    throw new IllegalStateException(invocationFailure);
+                  }
+                });
 
-      WriterLifecycleJournal lifecycle = lifecycle(cache);
-      WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
-      assertTrue(lifecycle.lane(0).poll(record));
-      assertEquals(
-          record.operation,
-          WriterLifecycleLane.REMOVE,
-          "a committed compute removal must remain durable for terminal cleanup");
-      lifecycle.lane(0).release(record);
+        boolean failed = false;
+        try {
+          cache.computeIfPresent("remove", (key, value) -> null);
+        } catch (Throwable expected) {
+          failed = true;
+        }
+        assertTrue(injected.get(), "the ready signal must run during the removal publication");
+        assertTrue(failed, "the terminal failure must reach the writer before compute returns");
+        assertTrue(worker.snapshot().unhealthy, "the signal failure must reach the terminal path");
+
+        Field contextsField = OffHeapCache.class.getDeclaredField("contexts");
+        contextsField.setAccessible(true);
+        com.red.ohc.runtime.ThreadContext context =
+            (com.red.ohc.runtime.ThreadContext)
+                ((ThreadLocal<?>) contextsField.get(cache)).get();
+        WriterLifecycleLane lane = context.lifecycleLane();
+        WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
+        assertTrue(lane.poll(record));
+        assertEquals(
+            record.operation,
+            WriterLifecycleLane.REMOVE,
+            "a committed compute removal must remain durable for terminal cleanup");
+        lane.release(record);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
@@ -705,14 +898,24 @@ public class OffHeapCacheTest {
             return STRING.serializedSize(value);
           }
         };
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(countingSerializer)
-            .buildTyped()) {
-      cache.put("key", "value");
-      assertEquals(serializedSizeCalls.get(), 1L);
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(countingSerializer)
+              .buildTyped();
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put("key", "value");
+        assertEquals(serializedSizeCalls.get(), 1L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
@@ -766,89 +969,117 @@ public class OffHeapCacheTest {
             .buildTyped();
     Entry entry = null;
     boolean writerHeld = false;
-    try {
-      cache.put("key", "old", 2_000L);
-      cache.flushAsync().join();
-      entry = cache.data.values().iterator().next();
-      assertTrue(entry.claimWriter());
-      writerHeld = true;
-
-      Future<?> replacement =
-          executor.submit(
-              () -> {
-                replacementThread.set(Thread.currentThread());
-                cache.put("key", "new", 5_000L);
-              });
-      assertTrue(replacementDeadlineSampled.await(1L, TimeUnit.SECONDS));
-      // The ticker has captured the original wall time in a local value. serializedSize runs
-      // before that sample, so its completion cannot be used as the clock-change barrier.
-      // Recomputing expiry on retry would now make the replacement immediately expired.
-      wallMillis.set(9_000L);
+    {
+      Throwable explicitCacheFailure4 = null;
       try {
-        replacement.get(100L, TimeUnit.MILLISECONDS);
-        throw new AssertionError("the replacement must wait for the current writer");
-      } catch (TimeoutException expected) {
-        // The put has already computed its deterministic metadata and is waiting on the writer.
-      }
 
-      entry.finishWriter();
-      writerHeld = false;
-      replacement.get(1L, TimeUnit.SECONDS);
+        cache.put("key", "old", 2_000L);
+        cache.flushAsync().join();
+        entry = cache.data.values().iterator().next();
+        assertTrue(entry.claimWriter());
+        writerHeld = true;
 
-      assertEquals(serializedSizeCalls.get(), 2L);
-      assertEquals(cache.get("key"), "new");
-      long taggedValue = cache.data.get(entry).valueAddress;
-      long valueAddress = Entry.rawValueAddress(taggedValue);
-      assertTrue(Entry.hasTtl(taggedValue));
-      assertEquals(ValueBlock.deadlineNanos(valueAddress), 4_000_000_000L);
-    } finally {
-      if (writerHeld) {
+        Future<?> replacement =
+            executor.submit(
+                () -> {
+                  replacementThread.set(Thread.currentThread());
+                  cache.put("key", "new", 5_000L);
+                });
+        assertTrue(replacementDeadlineSampled.await(1L, TimeUnit.SECONDS));
+        // The ticker has captured the original wall time in a local value. serializedSize runs
+        // before that sample, so its completion cannot be used as the clock-change barrier.
+        // Recomputing expiry on retry would now make the replacement immediately expired.
+        wallMillis.set(9_000L);
+        try {
+          replacement.get(100L, TimeUnit.MILLISECONDS);
+          throw new AssertionError("the replacement must wait for the current writer");
+        } catch (TimeoutException expected) {
+          // The put has already computed its deterministic metadata and is waiting on the writer.
+        }
+
         entry.finishWriter();
+        writerHeld = false;
+        replacement.get(1L, TimeUnit.SECONDS);
+
+        assertEquals(serializedSizeCalls.get(), 2L);
+        assertEquals(cache.get("key"), "new");
+        long taggedValue = cache.data.get(entry).valueAddress;
+        long valueAddress = Entry.rawValueAddress(taggedValue);
+        assertTrue(Entry.hasTtl(taggedValue));
+        assertEquals(ValueBlock.deadlineNanos(valueAddress), 4_000_000_000L);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure4 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        if (writerHeld) {
+          entry.finishWriter();
+        }
+        CacheTestSupport.stop(cache, explicitCacheFailure4, executor);
       }
-      executor.shutdownNow();
-      cache.close();
     }
   }
 
   @Test
   public void putBecomesVisibleAfterFlushAndSupportsDirectValue() {
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("key", "value");
-      cache.flushAsync().join();
-      assertEquals(readEventually(cache, "key"), "value");
-      assertTrue(directEventually(cache));
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put("key", "value");
+        cache.flushAsync().join();
+        assertEquals(readEventually(cache, "key"), "value");
+        assertTrue(directEventually(cache));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
   @Test(timeOut = 1_000L)
   public void writerClaimDoesNotWaitForAnEntryThatWasAlreadyRetired() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>)
-            OHCacheBuilder.<String, String>newBuilder()
-                .capacity(1 << 20)
-                .keySerializer(STRING)
-                .valueSerializer(STRING)
-                .build()) {
-      Entry entry = EntryTestSupport.entry(0, 0, 0L);
-      assertTrue(entry.claimWriter());
-      entry.markRetired();
-      entry.finishWriter();
+    {
+      OffHeapCache<String, String> cache =
+          (OffHeapCache<String, String>)
+              OHCacheBuilder.<String, String>newBuilder()
+                  .capacity(1 << 20)
+                  .keySerializer(STRING)
+                  .valueSerializer(STRING)
+                  .build();
+      Throwable cacheFailure1 = null;
+      try {
+        Entry entry = EntryTestSupport.entry(0, 0, 0L);
+        assertTrue(entry.claimWriter());
+        entry.markRetired();
+        entry.finishWriter();
 
-      Method claimWriter = OffHeapCache.class.getDeclaredMethod("claimWriter", Entry.class);
-      claimWriter.setAccessible(true);
-      assertFalse(
-          (Boolean) claimWriter.invoke(cache, entry),
-          "a stale CHM read must retry rather than park forever on a retired entry");
+        Method claimWriter = OffHeapCache.class.getDeclaredMethod("claimWriter", Entry.class);
+        claimWriter.setAccessible(true);
+        assertFalse(
+            (Boolean) claimWriter.invoke(cache, entry),
+            "a stale CHM read must retry rather than park forever on a retired entry");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 
   @Test(timeOut = 5_000L)
-  public void expiredEntryWriterContentionRetriesInsteadOfReportingClosed() throws Exception {
+  public void expiredEntryWriterContentionRetriesUntilWriterRelease() throws Exception {
     AtomicLong nowNanos = new AtomicLong();
     AtomicLong nowMillis = new AtomicLong(1_000L);
     CountDownLatch candidateSerialized = new CountDownLatch(1);
@@ -896,37 +1127,45 @@ public class OffHeapCacheTest {
     ExecutorService executor = Executors.newSingleThreadExecutor();
     Entry expiredEntry = null;
     boolean writerHeld = false;
-    try {
-      cache.put("expired", "old", 2_000L);
-      cache.flushAsync().join();
-      expiredEntry = cache.data.values().iterator().next();
-      long oldValue = Entry.rawValueAddress(expiredEntry.valueAddress);
-      ValueBlock.initialize(oldValue, 1L, ValueBlock.length(oldValue), 1L);
-      nowNanos.set(2L);
-      nowMillis.set(3_000L);
-
-      assertTrue(expiredEntry.claimWriter());
-      writerHeld = true;
-      Future<String> result = executor.submit(() -> cache.putIfAbsent("expired", "new"));
-
-      assertTrue(candidateSerialized.await(1L, TimeUnit.SECONDS));
+    {
+      Throwable explicitCacheFailure3 = null;
       try {
-        result.get(100L, TimeUnit.MILLISECONDS);
-        throw new AssertionError("expired-entry writer contention must not complete early");
-      } catch (TimeoutException expected) {
-        // The operation must wait for the current writer instead of reporting cache closed.
-      }
 
-      expiredEntry.finishWriter();
-      writerHeld = false;
-      assertEquals(result.get(1L, TimeUnit.SECONDS), null);
-      assertEquals(cache.get("expired"), "new");
-    } finally {
-      if (writerHeld) {
+        cache.put("expired", "old", 2_000L);
+        cache.flushAsync().join();
+        expiredEntry = cache.data.values().iterator().next();
+        long oldValue = Entry.rawValueAddress(expiredEntry.valueAddress);
+        ValueBlock.initialize(oldValue, 1L, ValueBlock.length(oldValue), 1L);
+        nowNanos.set(2L);
+        nowMillis.set(3_000L);
+
+        assertTrue(expiredEntry.claimWriter());
+        writerHeld = true;
+        Future<String> result = executor.submit(() -> cache.putIfAbsent("expired", "new"));
+
+        assertTrue(candidateSerialized.await(1L, TimeUnit.SECONDS));
+        try {
+          result.get(100L, TimeUnit.MILLISECONDS);
+          throw new AssertionError("expired-entry writer contention must not complete early");
+        } catch (TimeoutException expected) {
+          // The operation must wait for the current writer instead of reporting cache closed.
+        }
+
         expiredEntry.finishWriter();
+        writerHeld = false;
+        assertEquals(result.get(1L, TimeUnit.SECONDS), null);
+        assertEquals(cache.get("expired"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure3 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        if (writerHeld) {
+          expiredEntry.finishWriter();
+        }
+        CacheTestSupport.stop(cache, explicitCacheFailure3, executor);
       }
-      executor.shutdownNow();
-      cache.close();
     }
   }
 
@@ -947,21 +1186,29 @@ public class OffHeapCacheTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .buildTyped();
-    try {
-      cache.put(firstKey, largeValue);
-      cache.flushAsync().join();
-      pauseMaintenance(cache, actorPaused, releaseActor);
+    {
+      Throwable explicitCacheFailure2 = null;
+      try {
 
-      Future<?> replacement = executor.submit(() -> cache.put(firstKey, smallValue));
-      replacement.get(1L, TimeUnit.SECONDS);
-      assertEquals(cache.get(firstKey), smallValue);
-      assertTrue(
-          worker(cache).retiredBytes() >= WriterArena.allocationWeight(largeAllocation),
-          "the old native block must be queued even while the actor is paused");
-    } finally {
-      releaseActor.countDown();
-      executor.shutdownNow();
-      cache.close();
+        cache.put(firstKey, largeValue);
+        cache.flushAsync().join();
+        pauseMaintenance(cache, actorPaused, releaseActor);
+
+        Future<?> replacement = executor.submit(() -> cache.put(firstKey, smallValue));
+        replacement.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.get(firstKey), smallValue);
+        assertTrue(
+            worker(cache).retiredBytes() >= WriterArena.allocationWeight(largeAllocation),
+            "the old native block must be queued even while the actor is paused");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure2 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        releaseActor.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure2, executor);
+      }
     }
   }
 
@@ -970,8 +1217,7 @@ public class OffHeapCacheTest {
     byte[] key = new byte[] {1};
     byte[] original = new byte[1];
     byte[] replacement = new byte[1_024];
-    long debtBudget =
-        WriterArena.allocationWeight(ValueBlock.allocationLength(original.length));
+    long debtBudget = WriterArena.allocationWeight(ValueBlock.allocationLength(original.length));
     OffHeapCache<byte[], byte[]> cache =
         OHCacheBuilder.<byte[], byte[]>newBuilder()
             .capacity(1 << 20)
@@ -982,31 +1228,40 @@ public class OffHeapCacheTest {
     AtomicLong nextPageId = nextPageId(cache);
     long savedNextPageId = 0L;
     boolean pageIdsOverridden = false;
-    try {
-      cache.put(key, original);
-      cache.flushAsync().join();
-      assertEquals(worker(cache).nativeDebtHeadroomBytes(), debtBudget);
-
-      savedNextPageId = nextPageId.getAndSet(1L << 32);
-      pageIdsOverridden = true;
-      boolean failed = false;
+    {
+      Throwable explicitCacheFailure1 = null;
       try {
-        cache.put(key, replacement);
-      } catch (IllegalStateException expected) {
-        failed = true;
-        assertTrue(expected.getMessage().contains("native allocation failed"));
-      }
 
-      assertTrue(failed, "page-id exhaustion must fail the replacement allocation");
-      assertEquals(
-          worker(cache).nativeDebtHeadroomBytes(),
-          debtBudget,
-          "failed allocation must not create a retirement record");
-    } finally {
-      if (pageIdsOverridden) {
-        nextPageId.set(savedNextPageId);
+        cache.put(key, original);
+        cache.flushAsync().join();
+        assertEquals(worker(cache).nativeDebtHeadroomBytes(), debtBudget);
+
+        savedNextPageId = nextPageId.getAndSet(1L << 32);
+        pageIdsOverridden = true;
+        boolean failed = false;
+        try {
+          cache.put(key, replacement);
+        } catch (IllegalStateException expected) {
+          failed = true;
+          assertTrue(expected.getMessage().contains("native allocation failed"));
+        }
+
+        assertTrue(failed, "page-id exhaustion must fail the replacement allocation");
+        assertEquals(
+            worker(cache).nativeDebtHeadroomBytes(),
+            debtBudget,
+            "failed allocation must not create a retirement record");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        if (pageIdsOverridden) {
+          nextPageId.set(savedNextPageId);
+        }
+        CacheTestSupport.stop(cache, explicitCacheFailure1);
       }
-      cache.close();
     }
   }
 
@@ -1059,12 +1314,11 @@ public class OffHeapCacheTest {
   }
 
   private static OffHeapCache<String, String> newTestCache() {
-    return
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
+    return OHCacheBuilder.<String, String>newBuilder()
+        .capacity(1 << 20)
+        .keySerializer(STRING)
+        .valueSerializer(STRING)
+        .buildTyped();
   }
 
   private static void assertPostChargeFailureTerminatesCache(
@@ -1084,7 +1338,8 @@ public class OffHeapCacheTest {
       rejected = true;
     }
     assertTrue(rejected, "a cache with a post-charge failure must reject later puts");
-    assertTrue(worker(cache).snapshot().unhealthy, "post-charge failure must publish terminal state");
+    assertTrue(
+        worker(cache).snapshot().unhealthy, "post-charge failure must publish terminal state");
   }
 
   private static AtomicLong nextPageId(OffHeapCache<?, ?> cache) throws Exception {
@@ -1096,23 +1351,65 @@ public class OffHeapCacheTest {
     return (AtomicLong) nextPageIdField.get(memory);
   }
 
+  @Test(timeOut = 10_000L)
+  public void postCutBytePressureDoesNotBlockAnEmptyFlush() throws Exception {
+    assertPostCutCapacityDoesNotBlockFlush(false);
+  }
+
+  @Test(timeOut = 10_000L)
+  public void postCutCountPressureDoesNotBlockAnEmptyFlush() throws Exception {
+    assertPostCutCapacityDoesNotBlockFlush(true);
+  }
+
+  private static void assertPostCutCapacityDoesNotBlockFlush(boolean countBounded)
+      throws Exception {
+    OHCacheBuilder<String, String> builder =
+        OHCacheBuilder.<String, String>newBuilder().keySerializer(STRING).valueSerializer(STRING);
+    if (countBounded) {
+      builder.maxSize(1L);
+    } else {
+      builder.capacity(128L);
+    }
+    OffHeapCache<String, String> cache = builder.buildTyped();
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    Throwable failure = null;
+    try {
+      pauseMaintenance(cache, paused, release);
+      java.util.concurrent.CompletableFuture<Void> earlier = cache.flushAsync();
+      for (int i = 0; i < 10; i++) {
+        cache.put("key" + i, "value");
+      }
+      release.countDown();
+      earlier.get(2L, TimeUnit.SECONDS);
+      cache.flushAsync().get(2L, TimeUnit.SECONDS);
+      assertFalse(logicalAdmission(cache).isOverTarget());
+    } catch (Throwable error) {
+      failure = error;
+      throw error;
+    } finally {
+      release.countDown();
+      CacheTestSupport.stop(cache, failure);
+    }
+  }
+
   private static void pauseMaintenance(
       OffHeapCache<?, ?> cache, CountDownLatch paused, CountDownLatch release) throws Exception {
     assertTrue(
-        worker(cache).submitActorTaskForTest(
-            () -> {
-              paused.countDown();
-              try {
-                release.await();
-              } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError(interrupted);
-              }
-            },
-            failure -> {
-              throw new AssertionError(failure);
-            }));
+        worker(cache)
+            .submitActorTaskForTest(
+                () -> {
+                  paused.countDown();
+                  try {
+                    release.await();
+                  } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(interrupted);
+                  }
+                },
+                failure -> {
+                  throw new AssertionError(failure);
+                }));
     assertTrue(paused.await(2L, TimeUnit.SECONDS), "maintenance actor did not pause");
   }
-
 }

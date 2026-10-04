@@ -38,7 +38,6 @@ public class OHCWriteSustainedBenchmark {
   private static final int KEY_MASK = KEY_COUNT - 1;
   private static final int BATCH_SIZE = 1 << 6;
 
-
   @Param({"16", "64"})
   public int keyBytes;
 
@@ -51,49 +50,60 @@ public class OHCWriteSustainedBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new byte[KEY_COUNT][];
-    values = new byte[KEY_COUNT][];
-    long payloadCapacity = (long) KEY_COUNT * (keyBytes + valueBytes) * 2L;
-    cache =
-        (OffHeapCache<byte[], byte[]>)
-            OHCacheBuilder.<byte[], byte[]>newBuilder()
-                .capacity(payloadCapacity)
-                .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.byteArraySerializer)
-                .eviction(Eviction.S3_FIFO)
-                .build();
-    for (int i = 0; i < KEY_COUNT; i++) {
-      keys[i] = OHCWriteAdmissionBenchmark.bytes(keyBytes, i);
-      values[i] = OHCWriteAdmissionBenchmark.bytes(valueBytes, i * 31 + 7);
-      cache.put(keys[i], values[i]);
+    try {
+      keys = new byte[KEY_COUNT][];
+      values = new byte[KEY_COUNT][];
+      long payloadCapacity = (long) KEY_COUNT * (keyBytes + valueBytes) * 2L;
+      cache =
+          (OffHeapCache<byte[], byte[]>)
+              OHCacheBuilder.<byte[], byte[]>newBuilder()
+                  .capacity(payloadCapacity)
+                  .keySerializer(Utils.byteArraySerializer)
+                  .valueSerializer(Utils.byteArraySerializer)
+                  .eviction(Eviction.S3_FIFO)
+                  .build();
+      for (int i = 0; i < KEY_COUNT; i++) {
+        keys[i] = OHCWriteAdmissionBenchmark.bytes(keyBytes, i);
+        values[i] = OHCWriteAdmissionBenchmark.bytes(valueBytes, i * 31 + 7);
+        cache.put(keys[i], values[i]);
+      }
+      cache.flushAsync().join();
+      assertHealthyAndDrained();
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      cache = null;
+      throw failure;
     }
-    cache.flushAsync().join();
-    assertHealthyAndDrained();
   }
 
   @TearDown(Level.Trial)
   public void tearDown() {
-    cache.flushAsync().join();
+    Throwable failure = null;
     try {
-      assertHealthyAndDrained();
+      cache.flushAsync().join();
+      {
+        assertHealthyAndDrained();
+      }
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
     } finally {
-      cache.close();
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
     }
   }
 
   @Benchmark
   @Threads(1)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void oneThread(
-      WriteCursor cursor, WriteResults results, BenchmarkWindowResults window) {
+  public void oneThread(WriteCursor cursor, WriteResults results, BenchmarkWindowResults window) {
     write(cursor, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   @OperationsPerInvocation(BATCH_SIZE)
-  public void cpuThreads(
-      WriteCursor cursor, WriteResults results, BenchmarkWindowResults window) {
+  public void cpuThreads(WriteCursor cursor, WriteResults results, BenchmarkWindowResults window) {
     write(cursor, results);
   }
 
@@ -113,7 +123,7 @@ public class OHCWriteSustainedBenchmark {
 
   private void assertHealthyAndDrained() {
     OHCacheStats stats = cache.stats();
-    if (stats.maintenanceUnhealthy() || stats.maintenanceQueueDepth() != 0L) {
+    if (stats.maintenanceUnhealthy() || stats.lifecycleJournalLagRecords() != 0L) {
       throw new IllegalStateException("invalid OHC sustained write measurement");
     }
   }

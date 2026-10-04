@@ -31,8 +31,7 @@ public final class ConcurrentLifecycleFuzzTest {
   private static final CacheSerializer<Integer> VALUE = fixedInteger(240);
 
   @Test(timeOut = 30_000L)
-  public void fullCpuPutRemoveAndTtlFuzzLeavesNoUnhealthyActorOrNativeLeak()
-      throws Exception {
+  public void fullCpuPutRemoveAndTtlFuzzLeavesNoUnhealthyActorOrNativeLeak() throws Exception {
     OffHeapCache<Integer, Integer> cache =
         OHCacheBuilder.<Integer, Integer>newBuilder()
             // Full-CPU writers each keep partial 64KiB pages for the key and value classes.
@@ -47,78 +46,89 @@ public final class ConcurrentLifecycleFuzzTest {
     int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
     ExecutorService callers = Executors.newFixedThreadPool(threads);
     CountDownLatch start = new CountDownLatch(1);
-    try {
-      Future<?>[] tasks = new Future<?>[threads];
-      for (int thread = 0; thread < threads; thread++) {
-        final int worker = thread;
-        tasks[thread] =
-            callers.submit(
-                () -> {
-                  await(start);
-                  SplittableRandom random = new SplittableRandom(0x5eedL + worker);
-                  for (int operation = 0; operation < OPERATIONS_PER_THREAD; operation++) {
-                    int key = random.nextInt(KEYS);
-                    switch (random.nextInt(4)) {
-                      case 0:
-                        putBestEffort(cache, key, random.nextInt(), 0L);
-                        break;
-                      case 1:
-                        putBestEffort(
-                            cache, key, random.nextInt(), System.currentTimeMillis() + 64L);
-                        break;
-                      case 2:
-                        cache.remove(key);
-                        break;
-                      default:
-                        cache.get(key);
-                        break;
-                    }
-                  }
-                });
-      }
-      start.countDown();
-      for (Future<?> task : tasks) {
-        task.get(20L, TimeUnit.SECONDS);
-      }
+    {
+      Throwable explicitCacheFailure2 = null;
+      try {
 
-      awaitQuiescence(cache);
-      OHCacheStats stats = cache.stats();
-      assertFalse(stats.maintenanceUnhealthy());
-      assertEquals(
-          stats.maintenanceQueueDepth(),
-          0L,
-          "queue="
-              + stats.maintenanceQueueDepth()
-              + ", size="
-              + cache.size()
-              + ", liveWeight="
-              + stats.liveWeight()
-              + ", ttl="
-              + stats.ttlBacklog()
-              + ", retirement="
-              + stats.retirementQueueDepth());
-      assertTrue(
-          stats.liveWeight() <= cache.capacity(),
-          "liveWeight="
-              + stats.liveWeight()
-              + ", capacity="
-              + cache.capacity()
-              + ", evictions="
-              + stats.evictionCount()
-              + ", size="
-              + cache.size()
-              + ", queue="
-              + stats.maintenanceQueueDepth());
-    } finally {
-      callers.shutdownNow();
-      cache.close();
-      assertEquals(cache.totalAllocatedBytes(), 0L);
+        Future<?>[] tasks = new Future<?>[threads];
+        for (int thread = 0; thread < threads; thread++) {
+          final int worker = thread;
+          tasks[thread] =
+              callers.submit(
+                  () -> {
+                    await(start);
+                    SplittableRandom random = new SplittableRandom(0x5eedL + worker);
+                    for (int operation = 0;
+                        operation < OPERATIONS_PER_THREAD
+                            && !Thread.currentThread().isInterrupted();
+                        operation++) {
+                      int key = random.nextInt(KEYS);
+                      switch (random.nextInt(4)) {
+                        case 0:
+                          putBestEffort(cache, key, random.nextInt(), 0L);
+                          break;
+                        case 1:
+                          putBestEffort(
+                              cache, key, random.nextInt(), System.currentTimeMillis() + 64L);
+                          break;
+                        case 2:
+                          cache.remove(key);
+                          break;
+                        default:
+                          cache.get(key);
+                          break;
+                      }
+                    }
+                  });
+        }
+        start.countDown();
+        for (Future<?> task : tasks) {
+          task.get(20L, TimeUnit.SECONDS);
+        }
+
+        awaitQuiescence(cache);
+        OHCacheStats stats = cache.stats();
+        assertFalse(stats.maintenanceUnhealthy());
+        assertEquals(
+            stats.lifecycleJournalLagRecords(),
+            0L,
+            "queue="
+                + stats.lifecycleJournalLagRecords()
+                + ", size="
+                + cache.size()
+                + ", liveWeight="
+                + stats.liveWeight()
+                + ", ttl="
+                + stats.ttlBacklog()
+                + ", retirement="
+                + stats.retirementQueueDepth());
+        assertTrue(
+            stats.liveWeight() <= cache.capacity(),
+            "liveWeight="
+                + stats.liveWeight()
+                + ", capacity="
+                + cache.capacity()
+                + ", evictions="
+                + stats.evictionCount()
+                + ", size="
+                + cache.size()
+                + ", queue="
+                + stats.lifecycleJournalLagRecords());
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure2 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        start.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure2, callers);
+        assertEquals(cache.totalAllocatedBytes(), 0L);
+      }
     }
   }
 
   @Test(timeOut = 30_000L)
-  public void fullCpuMixedReadAndConditionalWriteFuzzConverges()
-      throws Exception {
+  public void fullCpuMixedReadAndConditionalWriteFuzzConverges() throws Exception {
     OffHeapCache<Integer, Integer> cache =
         OHCacheBuilder.<Integer, Integer>newBuilder()
             .capacity(1L << 20)
@@ -130,73 +140,84 @@ public final class ConcurrentLifecycleFuzzTest {
     int operationsPerThread = 1_000;
     ExecutorService callers = Executors.newFixedThreadPool(threads);
     CountDownLatch start = new CountDownLatch(1);
-    try {
-      Future<?>[] tasks = new Future<?>[threads];
-      for (int thread = 0; thread < threads; thread++) {
-        final int worker = thread;
-        tasks[thread] =
-            callers.submit(
-                () -> {
-                  await(start);
-                  SplittableRandom random = new SplittableRandom(0x6eedL + worker);
-                  for (int operation = 0; operation < operationsPerThread; operation++) {
-                    int key = random.nextInt(KEYS);
-                    switch (random.nextInt(8)) {
-                      case 0:
-                        putBestEffort(cache, key, random.nextInt(), 0L);
-                        break;
-                      case 1:
-                        putBestEffort(
-                            cache, key, random.nextInt(), System.currentTimeMillis() + 64L);
-                        break;
-                      case 2:
-                        runBestEffort(() -> cache.putIfAbsent(key, random.nextInt(), 0L));
-                        break;
-                      case 3:
-                        runBestEffort(
-                            () -> cache.replace(key, random.nextInt(), random.nextInt(), 0L));
-                        break;
-                      case 4:
-                        cache.remove(key);
-                        break;
-                      case 5:
-                        cache.get(key);
-                        break;
-                      case 6:
-                        cache.containsKey(key);
-                        break;
-                      default:
-                        cache.getDirect(key, value -> value.getLong(0));
-                        break;
-                    }
-                  }
-                });
-      }
-      start.countDown();
-      for (Future<?> task : tasks) {
-        task.get(20L, TimeUnit.SECONDS);
-      }
+    {
+      Throwable explicitCacheFailure1 = null;
+      try {
 
-      awaitQuiescence(cache);
-      OHCacheStats stats = cache.stats();
-      assertFalse(stats.maintenanceUnhealthy());
-      assertEquals(
-          stats.maintenanceQueueDepth(),
-          0L,
-          "queue="
-              + stats.maintenanceQueueDepth()
-              + ", size="
-              + cache.size()
-              + ", liveWeight="
-              + stats.liveWeight()
-              + ", ttl="
-              + stats.ttlBacklog()
-              + ", retirement="
-              + stats.retirementQueueDepth());
-    } finally {
-      callers.shutdownNow();
-      cache.close();
-      assertEquals(cache.totalAllocatedBytes(), 0L);
+        Future<?>[] tasks = new Future<?>[threads];
+        for (int thread = 0; thread < threads; thread++) {
+          final int worker = thread;
+          tasks[thread] =
+              callers.submit(
+                  () -> {
+                    await(start);
+                    SplittableRandom random = new SplittableRandom(0x6eedL + worker);
+                    for (int operation = 0;
+                        operation < operationsPerThread && !Thread.currentThread().isInterrupted();
+                        operation++) {
+                      int key = random.nextInt(KEYS);
+                      switch (random.nextInt(8)) {
+                        case 0:
+                          putBestEffort(cache, key, random.nextInt(), 0L);
+                          break;
+                        case 1:
+                          putBestEffort(
+                              cache, key, random.nextInt(), System.currentTimeMillis() + 64L);
+                          break;
+                        case 2:
+                          runBestEffort(() -> cache.putIfAbsent(key, random.nextInt(), 0L));
+                          break;
+                        case 3:
+                          runBestEffort(
+                              () -> cache.replace(key, random.nextInt(), random.nextInt(), 0L));
+                          break;
+                        case 4:
+                          cache.remove(key);
+                          break;
+                        case 5:
+                          cache.get(key);
+                          break;
+                        case 6:
+                          cache.containsKey(key);
+                          break;
+                        default:
+                          cache.getDirect(key, value -> value.getLong(0));
+                          break;
+                      }
+                    }
+                  });
+        }
+        start.countDown();
+        for (Future<?> task : tasks) {
+          task.get(20L, TimeUnit.SECONDS);
+        }
+
+        awaitQuiescence(cache);
+        OHCacheStats stats = cache.stats();
+        assertFalse(stats.maintenanceUnhealthy());
+        assertEquals(
+            stats.lifecycleJournalLagRecords(),
+            0L,
+            "queue="
+                + stats.lifecycleJournalLagRecords()
+                + ", size="
+                + cache.size()
+                + ", liveWeight="
+                + stats.liveWeight()
+                + ", ttl="
+                + stats.ttlBacklog()
+                + ", retirement="
+                + stats.retirementQueueDepth());
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        start.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure1, callers);
+        assertEquals(cache.totalAllocatedBytes(), 0L);
+      }
     }
   }
 
@@ -213,7 +234,7 @@ public final class ConcurrentLifecycleFuzzTest {
     // Concurrent stats snapshots must never traverse the actor-owned retirement compact set.
     OHCacheStats stats = cache.stats();
     if (stats.maintenanceUnhealthy()) {
-            throw new AssertionError("maintenance actor became unhealthy during concurrent write");
+      throw new AssertionError("maintenance actor became unhealthy during concurrent write");
     }
   }
 
@@ -226,14 +247,13 @@ public final class ConcurrentLifecycleFuzzTest {
     while (System.nanoTime() < deadline) {
       cache.flushAsync().join();
       OHCacheStats stats = cache.stats();
-      if (stats.maintenanceQueueDepth() == 0L) {
+      if (stats.lifecycleJournalLagRecords() == 0L) {
         return;
       }
       Thread.yield();
     }
     throw new AssertionError(
-        "maintenance did not quiesce: queue="
-            + cache.stats().maintenanceQueueDepth());
+        "maintenance did not quiesce: queue=" + cache.stats().lifecycleJournalLagRecords());
   }
 
   private static void await(CountDownLatch latch) {

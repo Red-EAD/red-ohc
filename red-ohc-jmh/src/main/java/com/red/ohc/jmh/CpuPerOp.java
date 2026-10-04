@@ -78,7 +78,8 @@ public final class CpuPerOp {
     if (comm.startsWith("red-ohc-mainten")) {
       return "actor";
     }
-    if (comm.startsWith("C2 Compiler") || comm.startsWith("C1 Compiler")
+    if (comm.startsWith("C2 Compiler")
+        || comm.startsWith("C1 Compiler")
         || comm.startsWith("Nmethod Sw")) {
       return "compiler";
     }
@@ -196,88 +197,112 @@ public final class CpuPerOp {
                 .eviction(Eviction.S3_FIFO)
                 .defaultTTLmillis(600_000L)
                 .build();
-    for (int i = 0; i < workingSet; i++) {
-      cache.put(keys[i], values[i]);
-      if ((i & 1023) == 1023) {
-        cache.flushAsync().join();
-      }
-    }
-    cache.flushAsync().join();
-
-    int[] seq = zipf(workingSet);
-
-    Thread procSampler =
-        new Thread(
-            () -> {
-              while (SAMPLING) {
-                sampleProcOnce();
-                try {
-                  Thread.sleep(20);
-                } catch (InterruptedException failure) {
-                  return;
-                }
-              }
-            },
-            "proc-sampler");
-    SAMPLING = true;
-    procSampler.start();
-    List<double[]> results = new ArrayList<>();
-    for (int rep = 0; rep < reps + 2; rep++) {
-      boolean warmup = rep < 2;
-      Map<Long, long[]> before = snapshot();
-      WORKER_CPU.set(0);
-      PROC_GROUP.clear();
-      long t0 = System.nanoTime();
-      runOps(cache, mode, threads, opsPerRep, keys, values, seq);
-      cache.flushAsync().join();
-      long wall = System.nanoTime() - t0;
-      Map<String, Long> d = delta(before);
-      d.put("workers", WORKER_CPU.get());
-      if (warmup) {
-        continue;
-      }
-      for (Map.Entry<String, long[]> entry : PROC_GROUP.entrySet()) {
-        long[] v = entry.getValue();
-        if (v[0] + v[1] > 0) {
-          System.out.printf(
-              "  proc/%-10s rep %d: user %8.1f ns/op  sys %8.1f ns/op%n",
-              entry.getKey(), rep - 1, (double) v[0] * 10_000_000L / opsPerRep,
-              (double) v[1] * 10_000_000L / opsPerRep);
+    Thread procSampler = null;
+    Throwable failure = null;
+    try {
+      for (int i = 0; i < workingSet; i++) {
+        cache.put(keys[i], values[i]);
+        if ((i & 1023) == 1023) {
+          cache.flushAsync().join();
         }
       }
-      long total = d.values().stream().mapToLong(Long::longValue).sum();
-      long nonJvm = total - d.getOrDefault("jvm", 0L);
-      results.add(
-          new double[] {
-            (double) d.getOrDefault("workers", 0L) / opsPerRep,
-            (double) d.getOrDefault("actor", 0L) / opsPerRep,
-            (double) d.getOrDefault("commonPool", 0L) / opsPerRep,
-            (double) d.getOrDefault("other", 0L) / opsPerRep,
-            (double) nonJvm / opsPerRep,
-            opsPerRep * 1e9 / wall
-          });
-    }
-    String[] names = {"workers", "actor", "commonPool", "other", "TOTAL(non-jvm)", "ops/s"};
-    System.out.printf("%n=== %s, %d thread(s), %,d ops x %d reps ===%n", mode, threads, opsPerRep, reps);
-    System.out.println("CPU nanoseconds per operation (exact, ThreadMXBean):");
-    for (int c = 0; c < names.length; c++) {
-      final int col = c;
-      double[] v = results.stream().mapToDouble(r -> r[col]).sorted().toArray();
-      double med = v[v.length / 2];
+      cache.flushAsync().join();
+
+      int[] seq = zipf(workingSet);
+
+      procSampler =
+          new Thread(
+              () -> {
+                while (SAMPLING) {
+                  sampleProcOnce();
+                  try {
+                    Thread.sleep(20);
+                  } catch (InterruptedException interruption) {
+                    return;
+                  }
+                }
+              },
+              "proc-sampler");
+      SAMPLING = true;
+      procSampler.start();
+      List<double[]> results = new ArrayList<>();
+      for (int rep = 0; rep < reps + 2; rep++) {
+        boolean warmup = rep < 2;
+        Map<Long, long[]> before = snapshot();
+        WORKER_CPU.set(0);
+        PROC_GROUP.clear();
+        long t0 = System.nanoTime();
+        runOps(cache, mode, threads, opsPerRep, keys, values, seq);
+        cache.flushAsync().join();
+        long wall = System.nanoTime() - t0;
+        Map<String, Long> d = delta(before);
+        d.put("workers", WORKER_CPU.get());
+        if (warmup) {
+          continue;
+        }
+        for (Map.Entry<String, long[]> entry : PROC_GROUP.entrySet()) {
+          long[] v = entry.getValue();
+          if (v[0] + v[1] > 0) {
+            System.out.printf(
+                "  proc/%-10s rep %d: user %8.1f ns/op  sys %8.1f ns/op%n",
+                entry.getKey(),
+                rep - 1,
+                (double) v[0] * 10_000_000L / opsPerRep,
+                (double) v[1] * 10_000_000L / opsPerRep);
+          }
+        }
+        long total = d.values().stream().mapToLong(Long::longValue).sum();
+        long nonJvm = total - d.getOrDefault("jvm", 0L);
+        results.add(
+            new double[] {
+              (double) d.getOrDefault("workers", 0L) / opsPerRep,
+              (double) d.getOrDefault("actor", 0L) / opsPerRep,
+              (double) d.getOrDefault("commonPool", 0L) / opsPerRep,
+              (double) d.getOrDefault("other", 0L) / opsPerRep,
+              (double) nonJvm / opsPerRep,
+              opsPerRep * 1e9 / wall
+            });
+      }
+      String[] names = {"workers", "actor", "commonPool", "other", "TOTAL(non-jvm)", "ops/s"};
       System.out.printf(
-          "  %-16s median %10.1f   min %10.1f   max %10.1f   spread %5.1f%%%n",
-          names[c], med, v[0], v[v.length - 1], med == 0 ? 0 : 100 * (v[v.length - 1] - v[0]) / med);
+          "%n=== %s, %d thread(s), %,d ops x %d reps ===%n", mode, threads, opsPerRep, reps);
+      System.out.println("CPU nanoseconds per operation (exact, ThreadMXBean):");
+      for (int c = 0; c < names.length; c++) {
+        final int col = c;
+        double[] v = results.stream().mapToDouble(r -> r[col]).sorted().toArray();
+        double med = v[v.length / 2];
+        System.out.printf(
+            "  %-16s median %10.1f   min %10.1f   max %10.1f   spread %5.1f%%%n",
+            names[c],
+            med,
+            v[0],
+            v[v.length - 1],
+            med == 0 ? 0 : 100 * (v[v.length - 1] - v[0]) / med);
+      }
+
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
+    } finally {
+      SAMPLING = false;
+      if (procSampler != null) {
+        procSampler.interrupt();
+      }
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
     }
-    SAMPLING = false;
-    procSampler.join(1_000L);
-    cache.close();
   }
 
   static final AtomicLong WORKER_CPU = new AtomicLong();
 
   static void runOps(
-      OffHeapCache<byte[], byte[]> cache, String mode, int threads, long ops,
-      byte[][] keys, byte[][] values, int[] seq) throws Exception {
+      OffHeapCache<byte[], byte[]> cache,
+      String mode,
+      int threads,
+      long ops,
+      byte[][] keys,
+      byte[][] values,
+      int[] seq)
+      throws Exception {
     CountDownLatch start = new CountDownLatch(1);
     Thread[] ts = new Thread[threads];
     long per = ops / threads;
@@ -310,8 +335,19 @@ public final class CpuPerOp {
       ts[t].start();
     }
     start.countDown();
+    boolean interrupted = false;
     for (Thread t : ts) {
-      t.join();
+      while (t.isAlive()) {
+        try {
+          t.join();
+        } catch (InterruptedException interruption) {
+          interrupted = true;
+        }
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+      throw new InterruptedException("interrupted while awaiting probe workers");
     }
   }
 

@@ -17,33 +17,53 @@ public final class ByteBufferCacheTest {
   @Test
   public void ownedByteBufferValuesRoundTrip() {
     ByteBuffer value = ByteBuffer.wrap(new byte[] {1, 2, 3});
-    try (OHCache<String, ByteBuffer> cache =
-        OHCacheBuilder.<String, ByteBuffer>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(BYTE_BUFFER)
-            .build()) {
-      cache.put("key", value);
+    {
+      OHCache<String, ByteBuffer> cache =
+          OHCacheBuilder.<String, ByteBuffer>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(BYTE_BUFFER)
+              .build();
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put("key", value);
 
-      ByteBuffer loaded = cache.get("key");
-      assertEquals(loaded.remaining(), 3);
-      assertEquals(loaded.get(), (byte) 1);
-      assertEquals(loaded.get(), (byte) 2);
-      assertEquals(loaded.get(), (byte) 3);
+        ByteBuffer loaded = cache.get("key");
+        assertEquals(loaded.remaining(), 3);
+        assertEquals(loaded.get(), (byte) 1);
+        assertEquals(loaded.get(), (byte) 2);
+        assertEquals(loaded.get(), (byte) 3);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
   @Test
   public void byteBufferKeysRoundTrip() {
-    try (OHCache<ByteBuffer, String> cache =
-        OHCacheBuilder.<ByteBuffer, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(BYTE_BUFFER)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put(ByteBuffer.wrap(new byte[] {4, 5}), "value");
+    {
+      OHCache<ByteBuffer, String> cache =
+          OHCacheBuilder.<ByteBuffer, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(BYTE_BUFFER)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure1 = null;
+      try {
+        cache.put(ByteBuffer.wrap(new byte[] {4, 5}), "value");
 
-      assertEquals(cache.get(ByteBuffer.wrap(new byte[] {4, 5})), "value");
+        assertEquals(cache.get(ByteBuffer.wrap(new byte[] {4, 5})), "value");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 

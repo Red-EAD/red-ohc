@@ -122,12 +122,13 @@ public final class LifecycleJournalTest {
     lane.commit(second);
     assertEquals(signals.get(), 1);
 
-    assertFalse(journal.probeUnmanagedReadyRecords());
+    lane.finishReadyDrain();
+    assertFalse(journal.hasReadyRecords());
     assertEquals(signals.get(), 1, "probing a hole clears the stale marker without a wake");
 
     lane.writeRemoval(first, null, 1L, 1L, 0L, null);
     lane.commit(first);
-    assertTrue(journal.probeUnmanagedReadyRecords());
+    assertTrue(journal.hasReadyRecords());
     assertEquals(signals.get(), 2, "the later head commit must not be swallowed by coalescing");
   }
 
@@ -153,7 +154,7 @@ public final class LifecycleJournalTest {
   }
 
   @Test
-  public void probeVisitsAllLanesAndSupportsRepeatedReadyCycles() {
+  public void readyPublicationSupportsAllLanesAndRepeatedCycles() {
     WriterLifecycleJournal journal = new WriterLifecycleJournal(2);
     WriterLifecycleLane.Record record = new WriterLifecycleLane.Record();
     AtomicInteger signals = new AtomicInteger();
@@ -165,7 +166,7 @@ public final class LifecycleJournalTest {
       lane.writeRemoval(sequence, null, index + 1L, 1L, 0L, null);
       lane.commit(sequence);
     }
-    assertTrue(journal.probeUnmanagedReadyRecords());
+    assertTrue(journal.hasReadyRecords());
     assertEquals(signals.get(), 2);
 
     for (int index = 0; index < journal.laneCount(); index++) {
@@ -174,13 +175,13 @@ public final class LifecycleJournalTest {
       lane.release(record);
       lane.finishReadyDrain();
     }
-    assertFalse(journal.probeUnmanagedReadyRecords());
+    assertFalse(journal.hasReadyRecords());
 
     WriterLifecycleLane lane = journal.lane(1);
     long sequence = lane.reserve();
     lane.writeRemoval(sequence, null, 3L, 1L, 0L, null);
     lane.commit(sequence);
-    assertTrue(journal.probeUnmanagedReadyRecords());
+    assertTrue(journal.hasReadyRecords());
     assertEquals(signals.get(), 3);
     assertTrue(lane.poll(record));
     lane.release(record);
@@ -209,7 +210,6 @@ public final class LifecycleJournalTest {
     lane.release(record);
     assertEquals(lane.reservedRecords(), 0L);
   }
-
 
   @Test
   public void readyLaneCountTracksOneQueuedMarkerPerReadyCycle() {
@@ -278,8 +278,7 @@ public final class LifecycleJournalTest {
     WriterLifecycleLane polled = journal.pollReadyLane();
     assertTrue(polled == lane);
     polled.finishReadyDrain();
-    assertFalse(
-        journal.hasPendingReadyLanes(), "a reservation hole must not keep the lane dirty");
+    assertFalse(journal.hasPendingReadyLanes(), "a reservation hole must not keep the lane dirty");
 
     lane.writeRemoval(first, null, 1L, 1L, 0L, null);
     lane.commit(first);

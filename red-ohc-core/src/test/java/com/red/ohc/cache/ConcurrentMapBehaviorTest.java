@@ -29,7 +29,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 
 import org.testng.annotations.Test;
@@ -71,74 +70,104 @@ public final class ConcurrentMapBehaviorTest {
 
   @Test
   public void standardMutationMethodsFollowMapSemantics() {
-    try (OHCache<String, String> cache = newCache()) {
-      cache.put("one", "1");
-      assertEquals(cache.get("one"), "1");
-      cache.put("one", "uno");
-      assertEquals(cache.get("one"), "uno");
-      assertEquals(cache.putIfAbsent("one", "ignored"), "uno");
-      assertEquals(cache.putIfAbsent("two", "2"), null);
+    {
+      OHCache<String, String> cache = newCache();
+      Throwable cacheFailure27 = null;
+      try {
+        cache.put("one", "1");
+        assertEquals(cache.get("one"), "1");
+        cache.put("one", "uno");
+        assertEquals(cache.get("one"), "uno");
+        assertEquals(cache.putIfAbsent("one", "ignored"), "uno");
+        assertEquals(cache.putIfAbsent("two", "2"), null);
 
-      assertTrue(cache.replace("one", "uno", "1a"));
-      assertFalse(cache.replace("one", "uno", "stale"));
-      assertEquals(cache.replace("one", "1"), "1a");
-      assertEquals(cache.replace("missing", "x"), null);
+        assertTrue(cache.replace("one", "uno", "1a"));
+        assertFalse(cache.replace("one", "uno", "stale"));
+        assertEquals(cache.replace("one", "1"), "1a");
+        assertEquals(cache.replace("missing", "x"), null);
 
-      assertTrue(cache.remove("one", "1"));
-      assertFalse(cache.remove("one", "1"));
-      cache.remove("two");
-      assertFalse(cache.containsKey("two"));
-      cache.remove("missing");
-      assertFalse(cache.containsKey("missing"));
+        assertTrue(cache.remove("one", "1"));
+        assertFalse(cache.remove("one", "1"));
+        cache.remove("two");
+        assertFalse(cache.containsKey("two"));
+        cache.remove("missing");
+        assertFalse(cache.containsKey("missing"));
 
-      assertEquals(cache.putIfAbsent("fast", "v"), null);
-      assertEquals(cache.putIfAbsent("fast", "new"), "v");
-      cache.put("fast", "new");
-      assertEquals(cache.get("fast"), "new");
-      cache.remove("fast");
-      assertFalse(cache.containsKey("fast"));
-      cache.remove("fast");
-      assertFalse(cache.containsKey("fast"));
+        assertEquals(cache.putIfAbsent("fast", "v"), null);
+        assertEquals(cache.putIfAbsent("fast", "new"), "v");
+        cache.put("fast", "new");
+        assertEquals(cache.get("fast"), "new");
+        cache.remove("fast");
+        assertFalse(cache.containsKey("fast"));
+        cache.remove("fast");
+        assertFalse(cache.containsKey("fast"));
 
-      Map<String, String> batch = new HashMap<>();
-      batch.put("batch-one", "one");
-      batch.put("batch-two", "two");
-      cache.putAll(batch);
-      cache.replaceAll((key, value) -> value.toUpperCase());
-      assertEquals(cache.get("batch-one"), "ONE");
-      assertEquals(cache.getOrDefault("missing", null), null);
-      cache.clear();
-      assertTrue(cache.isEmpty());
+        Map<String, String> batch = new HashMap<>();
+        batch.put("batch-one", "one");
+        batch.put("batch-two", "two");
+        cache.putAll(batch);
+        cache.replaceAll((key, value) -> value.toUpperCase());
+        assertEquals(cache.get("batch-one"), "ONE");
+        assertEquals(cache.getOrDefault("missing", null), null);
+        cache.clear();
+        assertTrue(cache.isEmpty());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure27 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure27);
+      }
     }
   }
 
   @Test
   public void ordinaryNewPutProbesOnceThenPublishesWithOnePutIfAbsent() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      CountingPutMap countingMap = new CountingPutMap();
-      replaceDataMaps(cache, countingMap);
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure26 = null;
+      try {
+        CountingPutMap countingMap = new CountingPutMap();
+        replaceDataMaps(cache, countingMap);
 
-      cache.put("new-key", "value");
+        cache.put("new-key", "value");
 
-      assertEquals(countingMap.lookupCalls.get(), 1);
-      assertEquals(countingMap.putIfAbsentCalls.get(), 1);
-      assertEquals(cache.get("new-key"), "value");
+        assertEquals(countingMap.lookupCalls.get(), 1);
+        assertEquals(countingMap.putIfAbsentCalls.get(), 1);
+        assertEquals(cache.get("new-key"), "value");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure26 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure26);
+      }
     }
   }
 
   @Test
   public void ordinaryExistingPutReplacesThroughTheProbeWithoutInsertion() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      CountingPutMap countingMap = new CountingPutMap();
-      replaceDataMaps(cache, countingMap);
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure25 = null;
+      try {
+        CountingPutMap countingMap = new CountingPutMap();
+        replaceDataMaps(cache, countingMap);
 
-      cache.put("key", "old");
-      cache.put("key", "new");
+        cache.put("key", "old");
+        cache.put("key", "new");
 
-      assertEquals(countingMap.lookupCalls.get(), 2, "one probe per put");
-      assertEquals(countingMap.putIfAbsentCalls.get(), 1, "only the first put inserts");
-      assertEquals(cache.get("key"), "new");
-      assertEquals(cache.size(), 1);
+        assertEquals(countingMap.lookupCalls.get(), 2, "one probe per put");
+        assertEquals(countingMap.putIfAbsentCalls.get(), 1, "only the first put inserts");
+        assertEquals(cache.get("key"), "new");
+        assertEquals(cache.size(), 1);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure25 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure25);
+      }
     }
   }
 
@@ -154,204 +183,286 @@ public final class ConcurrentMapBehaviorTest {
 
   @Test
   public void ordinaryPutRetiresAStalePutIfAbsentWinnerWithoutUsingItsNativeKey() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      PausedInsertCollisionMap map = new PausedInsertCollisionMap();
-      replaceDataMaps(cache, map);
-
-      // Keep the retired winner's blocks allocated so a regression reads garbage-but-mapped
-      // memory instead of freed native memory.
-      ThreadContext pinned = context(cache);
-      ReaderGuard guard = new ReaderGuard(worker(cache));
-      assertTrue(guard.enter(pinned));
-      ExecutorService executor = Executors.newSingleThreadExecutor();
+    {
+      OffHeapCache<String, String> cache = newCache();
+      ExecutorService executor = null;
+      Throwable cacheFailure24 = null;
       try {
-        // The key is absent, so the put thread's probe misses (and pauses); the main thread
-        // inserts a live mapping in that window, the put thread's insert then collides with
-        // it in putIfAbsent (second pause), and the main thread retires that winner before
-        // the pause lifts — the insert path must observe the stale winner, drop it without
-        // touching its native key, and retry to a fresh mapping.
-        Future<?> put = executor.submit(() -> cache.put("key", "latest"));
-        assertTrue(map.probeObserved.await(5L, TimeUnit.SECONDS));
-        cache.put("key", "interleaved");
-        map.resumeProbe.countDown();
-        assertTrue(map.collisionObserved.await(5L, TimeUnit.SECONDS));
-        cache.remove("key");
-        assertFalse(map.collisionWinner.isAlive());
-        map.resumeCollision.countDown();
-        put.get(5L, TimeUnit.SECONDS);
+        PausedInsertCollisionMap map = new PausedInsertCollisionMap();
+        replaceDataMaps(cache, map);
 
-        assertEquals(cache.get("key"), "latest");
-        assertEquals(cache.size(), 1);
-        assertEquals(
-            map.retiredKeyUses.get(),
-            0,
-            "a retired putIfAbsent winner must not be reused as a native CHM key");
-      } finally {
-        map.resumeProbe.countDown();
-        map.resumeCollision.countDown();
-        executor.shutdown();
+        // Keep the retired winner's blocks allocated so a regression reads garbage-but-mapped
+        // memory instead of freed native memory.
+        ThreadContext pinned = context(cache);
+        ReaderGuard guard = new ReaderGuard(worker(cache));
+        guard.enter(pinned);
+        executor = Executors.newSingleThreadExecutor();
+        Throwable callerFailure = null;
         try {
-          assertTrue(executor.awaitTermination(5L, TimeUnit.SECONDS));
+          // The key is absent, so the put thread's probe misses (and pauses); the main thread
+          // inserts a live mapping in that window, the put thread's insert then collides with
+          // it in putIfAbsent (second pause), and the main thread retires that winner before
+          // the pause lifts — the insert path must observe the stale winner, drop it without
+          // touching its native key, and retry to a fresh mapping.
+          Future<?> put = executor.submit(() -> cache.put("key", "latest"));
+          assertTrue(map.probeObserved.await(5L, TimeUnit.SECONDS));
+          cache.put("key", "interleaved");
+          map.resumeProbe.countDown();
+          assertTrue(map.collisionObserved.await(5L, TimeUnit.SECONDS));
+          cache.remove("key");
+          assertFalse(map.collisionWinner.isAlive());
+          map.resumeCollision.countDown();
+          put.get(5L, TimeUnit.SECONDS);
+
+          assertEquals(cache.get("key"), "latest");
+          assertEquals(cache.size(), 1);
+          assertEquals(
+              map.retiredKeyUses.get(),
+              0,
+              "a retired putIfAbsent winner must not be reused as a native CHM key");
+        } catch (Throwable error) {
+          callerFailure = error;
+          throw error;
         } finally {
-          guard.exit(pinned);
+          map.resumeProbe.countDown();
+          map.resumeCollision.countDown();
+          try {
+            CacheTestSupport.awaitCallers(executor, callerFailure);
+          } finally {
+            guard.exit(pinned);
+          }
         }
+        awaitReclaimedRecords(cache, 2L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure24 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure24, executor);
       }
-      cache.flushAsync().get(5L, TimeUnit.SECONDS);
-      assertTrue(cache.stats().retirementActorReclaimedRecords() >= 2L);
     }
   }
 
   private void assertRemovedProbeWinnerIsRetried(boolean reinsert) throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      PausedProbeMap map = new PausedProbeMap();
-      replaceDataMaps(cache, map);
-      cache.put("key", "old");
-      cache.flushAsync().get(5L, TimeUnit.SECONDS);
-
-      // Keep the retired blocks allocated while observing an invalid key use, so a regression
-      // fails an assertion instead of letting the test JVM read freed native memory.
-      ThreadContext pinned = context(cache);
-      ReaderGuard guard = new ReaderGuard(worker(cache));
-      assertTrue(guard.enter(pinned));
-      ExecutorService executor = Executors.newSingleThreadExecutor();
+    {
+      OffHeapCache<String, String> cache = newCache();
+      ExecutorService executor = null;
+      Throwable cacheFailure23 = null;
       try {
-        Future<?> put = executor.submit(() -> cache.put("key", "latest"));
-        assertTrue(map.probeObserved.await(5L, TimeUnit.SECONDS));
-        // The put thread is parked inside its probe with the live winner in hand; retire that
-        // winner underneath it and (optionally) let a fresh mapping reappear.
-        cache.remove("key");
-        assertFalse(map.probedWinner.isAlive());
-        if (reinsert) {
-          cache.put("key", "interleaved");
-        }
-        map.resumeProbe.countDown();
-        put.get(5L, TimeUnit.SECONDS);
+        PausedProbeMap map = new PausedProbeMap();
+        replaceDataMaps(cache, map);
+        cache.put("key", "old");
+        cache.flushAsync().get(5L, TimeUnit.SECONDS);
 
-        assertEquals(cache.get("key"), "latest");
-        assertEquals(cache.size(), 1);
-        assertEquals(
-            map.retiredKeyUses.get(),
-            0,
-            "a removed probe winner must not be reused as a native CHM key after its guard exits");
-      } finally {
-        map.resumeProbe.countDown();
-        executor.shutdown();
+        // Keep the retired blocks allocated while observing an invalid key use, so a regression
+        // fails an assertion instead of letting the test JVM read freed native memory.
+        ThreadContext pinned = context(cache);
+        ReaderGuard guard = new ReaderGuard(worker(cache));
+        guard.enter(pinned);
+        executor = Executors.newSingleThreadExecutor();
+        Throwable callerFailure = null;
         try {
-          assertTrue(executor.awaitTermination(5L, TimeUnit.SECONDS));
+          Future<?> put = executor.submit(() -> cache.put("key", "latest"));
+          assertTrue(map.probeObserved.await(5L, TimeUnit.SECONDS));
+          // The put thread is parked inside its probe with the live winner in hand; retire that
+          // winner underneath it and (optionally) let a fresh mapping reappear.
+          cache.remove("key");
+          assertFalse(map.probedWinner.isAlive());
+          if (reinsert) {
+            cache.put("key", "interleaved");
+          }
+          map.resumeProbe.countDown();
+          put.get(5L, TimeUnit.SECONDS);
+
+          assertEquals(cache.get("key"), "latest");
+          assertEquals(cache.size(), 1);
+          assertEquals(
+              map.retiredKeyUses.get(),
+              0,
+              "a removed probe winner must not be reused as a native CHM key after its guard"
+                  + " exits");
+        } catch (Throwable error) {
+          callerFailure = error;
+          throw error;
         } finally {
-          guard.exit(pinned);
+          map.resumeProbe.countDown();
+          try {
+            CacheTestSupport.awaitCallers(executor, callerFailure);
+          } finally {
+            guard.exit(pinned);
+          }
         }
+        awaitReclaimedRecords(cache, 2L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure23 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure23, executor);
       }
-      cache.flushAsync().get(5L, TimeUnit.SECONDS);
-      assertTrue(cache.stats().retirementActorReclaimedRecords() >= 2L);
     }
   }
 
   @Test
   public void clearRetriesATemporaryWriterClaim() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      cache.put("key", "value");
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache = newCache();
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      Throwable cacheFailure22 = null;
+      try {
+        cache.put("key", "value");
+        cache.flushAsync().join();
 
-      ClaimedMutationResult<Boolean> result =
-          runWithTemporaryWriterClaim(
-              cache,
-              () -> {
-                cache.clear();
-                return cache.isEmpty();
-              });
+        ClaimedMutationResult<Boolean> result =
+            runWithTemporaryWriterClaim(
+                cache,
+                executor,
+                () -> {
+                  cache.clear();
+                  return cache.isEmpty();
+                });
 
-      assertFalse(result.completedWhileClaimed);
-      assertTrue(result.value);
-      assertTrue(cache.isEmpty());
+        assertFalse(result.completedWhileClaimed);
+        assertTrue(result.value);
+        assertTrue(cache.isEmpty());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure22 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure22, executor);
+      }
     }
   }
 
   @Test
   public void conditionalRemoveRetriesATemporaryWriterClaim() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      cache.put("key", "value");
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache = newCache();
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      Throwable cacheFailure21 = null;
+      try {
+        cache.put("key", "value");
+        cache.flushAsync().join();
 
-      ClaimedMutationResult<Boolean> result =
-          runWithTemporaryWriterClaim(cache, () -> cache.remove("key", "value"));
+        ClaimedMutationResult<Boolean> result =
+            runWithTemporaryWriterClaim(cache, executor, () -> cache.remove("key", "value"));
 
-      assertFalse(result.completedWhileClaimed);
-      assertTrue(result.value);
-      assertFalse(cache.containsKey("key"));
+        assertFalse(result.completedWhileClaimed);
+        assertTrue(result.value);
+        assertFalse(cache.containsKey("key"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure21 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure21, executor);
+      }
     }
   }
 
   @Test
   public void conditionalReplaceRetriesATemporaryWriterClaim() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      cache.put("key", "old");
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache = newCache();
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      Throwable cacheFailure20 = null;
+      try {
+        cache.put("key", "old");
+        cache.flushAsync().join();
 
-      ClaimedMutationResult<Boolean> result =
-          runWithTemporaryWriterClaim(cache, () -> cache.replace("key", "old", "new"));
+        ClaimedMutationResult<Boolean> result =
+            runWithTemporaryWriterClaim(cache, executor, () -> cache.replace("key", "old", "new"));
 
-      assertFalse(result.completedWhileClaimed);
-      assertTrue(result.value);
-      assertEquals(cache.get("key"), "new");
+        assertFalse(result.completedWhileClaimed);
+        assertTrue(result.value);
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure20 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure20, executor);
+      }
     }
   }
 
   @Test
   public void unconditionalReplaceRetriesATemporaryWriterClaim() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      cache.put("key", "old");
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache = newCache();
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      Throwable cacheFailure19 = null;
+      try {
+        cache.put("key", "old");
+        cache.flushAsync().join();
 
-      ClaimedMutationResult<String> result =
-          runWithTemporaryWriterClaim(cache, () -> cache.replace("key", "new"));
+        ClaimedMutationResult<String> result =
+            runWithTemporaryWriterClaim(cache, executor, () -> cache.replace("key", "new"));
 
-      assertFalse(result.completedWhileClaimed);
-      assertEquals(result.value, "old");
-      assertEquals(cache.get("key"), "new");
+        assertFalse(result.completedWhileClaimed);
+        assertEquals(result.value, "old");
+        assertEquals(cache.get("key"), "new");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure19 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure19, executor);
+      }
     }
   }
 
   @Test
   public void computeMethodsAreAtomicAndPreserveMappingsOnFailure() {
-    try (OHCache<String, String> cache = newCache()) {
-      AtomicInteger absentCalls = new AtomicInteger();
-      assertEquals(
-          cache.computeIfAbsent(
-              "key", ignored -> "v" + absentCalls.incrementAndGet()),
-          "v1");
-      assertEquals(
-          cache.computeIfAbsent(
-              "key", ignored -> "v" + absentCalls.incrementAndGet()),
-          "v1");
-      assertEquals(absentCalls.get(), 1);
+    {
+      OHCache<String, String> cache = newCache();
+      Throwable cacheFailure18 = null;
+      try {
+        AtomicInteger absentCalls = new AtomicInteger();
+        assertEquals(
+            cache.computeIfAbsent("key", ignored -> "v" + absentCalls.incrementAndGet()), "v1");
+        assertEquals(
+            cache.computeIfAbsent("key", ignored -> "v" + absentCalls.incrementAndGet()), "v1");
+        assertEquals(absentCalls.get(), 1);
 
-      assertEquals(cache.computeIfPresent("key", (key, value) -> value + "-present"), "v1-present");
-      assertEquals(cache.compute("key", (key, value) -> value + "-compute"), "v1-present-compute");
-      assertEquals(cache.merge("key", "-merge", (left, right) -> left + right), "v1-present-compute-merge");
-      assertEquals(cache.merge("new", "created", (left, right) -> left + right), "created");
+        assertEquals(
+            cache.computeIfPresent("key", (key, value) -> value + "-present"), "v1-present");
+        assertEquals(
+            cache.compute("key", (key, value) -> value + "-compute"), "v1-present-compute");
+        assertEquals(
+            cache.merge("key", "-merge", (left, right) -> left + right),
+            "v1-present-compute-merge");
+        assertEquals(cache.merge("new", "created", (left, right) -> left + right), "created");
 
-      assertEquals(cache.compute("key", (key, value) -> null), null);
-      assertFalse(cache.containsKey("key"));
-      assertEquals(cache.computeIfPresent("key", (key, value) -> "not-called"), null);
+        assertEquals(cache.compute("key", (key, value) -> null), null);
+        assertFalse(cache.containsKey("key"));
+        assertEquals(cache.computeIfPresent("key", (key, value) -> "not-called"), null);
 
-      cache.put("stable", "old");
-      expectThrows(
-          IllegalStateException.class,
-          () ->
-              cache.compute(
-                  "stable",
-                  (key, value) -> {
-                    throw new IllegalStateException("boom");
-                  }));
-      assertEquals(cache.get("stable"), "old");
+        cache.put("stable", "old");
+        expectThrows(
+            IllegalStateException.class,
+            () ->
+                cache.compute(
+                    "stable",
+                    (key, value) -> {
+                      throw new IllegalStateException("boom");
+                    }));
+        assertEquals(cache.get("stable"), "old");
 
-      cache.put("merge", "left");
-      assertEquals(cache.merge("merge", "right", (left, right) -> null), null);
-      assertFalse(cache.containsKey("merge"));
+        cache.put("merge", "left");
+        assertEquals(cache.merge("merge", "right", (left, right) -> null), null);
+        assertFalse(cache.containsKey("merge"));
 
-      assertEquals(cache.computeIfAbsent("null", ignored -> null), null);
-      assertFalse(cache.containsKey("null"));
+        assertEquals(cache.computeIfAbsent("null", ignored -> null), null);
+        assertFalse(cache.containsKey("null"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure18 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure18);
+      }
     }
   }
 
@@ -360,29 +471,39 @@ public final class ConcurrentMapBehaviorTest {
     long entryWeight =
         Entry.keyAllocationLengthForKeyLength("outer".length())
             + ValueBlock.allocationLength("value".length());
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(entryWeight)
-            .eviction(Eviction.LRU)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      assertEquals(
-          cache.computeIfAbsent(
-              "outer",
-              ignored -> {
-                assertEquals(cache.get("nested"), null);
-                return "value";
-              }),
-          "value");
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(entryWeight)
+              .eviction(Eviction.LRU)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure17 = null;
+      try {
+        assertEquals(
+            cache.computeIfAbsent(
+                "outer",
+                ignored -> {
+                  assertEquals(cache.get("nested"), null);
+                  return "value";
+                }),
+            "value");
+        cache.flushAsync().join();
 
-      cache.put("newer", "value");
-      cache.flushAsync().join();
+        cache.put("newer", "value");
+        cache.flushAsync().join();
 
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.get("outer"), null);
-      assertEquals(cache.get("newer"), "value");
+        assertEquals(cache.size(), 1L);
+        assertEquals(cache.get("outer"), null);
+        assertEquals(cache.get("newer"), "value");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure17 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure17);
+      }
     }
   }
 
@@ -390,112 +511,165 @@ public final class ConcurrentMapBehaviorTest {
   public void computeRemappingProtectsNativeValueBeforeTtlAndPayloadReads() throws Exception {
     ReaderStateCheckingSerializer serializer = new ReaderStateCheckingSerializer();
     ReaderStateCheckingTicker ticker = new ReaderStateCheckingTicker();
-    try (OffHeapCache<String, String> cache = newCache(ticker, 1_000L, 30_000L, serializer)) {
-      cache.put("key", "value");
-      ThreadContext context = context(cache);
-      ReaderRegistry readers = readers(cache);
-      ticker.arm(readers, context);
-      serializer.arm(readers, context);
+    {
+      OffHeapCache<String, String> cache = newCache(ticker, 1_000L, serializer);
+      Throwable cacheFailure16 = null;
+      try {
+        cache.put("key", "value");
+        ThreadContext context = context(cache);
+        ReaderRegistry readers = readers(cache);
+        ticker.arm(readers, context);
+        serializer.arm(readers, context);
 
-      assertEquals(cache.computeIfPresent("key", (key, value) -> value + "-updated"), "value-updated");
-      assertTrue(ticker.checkedValueProtection, "TTL header access must be value-protected");
-      assertTrue(serializer.checkedValueProtection, "payload access must be value-protected");
+        assertEquals(
+            cache.computeIfPresent("key", (key, value) -> value + "-updated"), "value-updated");
+        assertTrue(ticker.checkedValueProtection, "TTL header access must be value-protected");
+        assertTrue(serializer.checkedValueProtection, "payload access must be value-protected");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure16 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure16);
+      }
     }
   }
 
   @Test
   public void computeInsertionFailureBeforeChmPublicationDoesNotLeakLogicalCount()
       throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      ThrowAfterNonNullRemapMap failingMap = new ThrowAfterNonNullRemapMap();
-      Field data = OffHeapCache.class.getDeclaredField("data");
-      long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
-      NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure15 = null;
+      try {
+        ThrowAfterNonNullRemapMap failingMap = new ThrowAfterNonNullRemapMap();
+        Field data = OffHeapCache.class.getDeclaredField("data");
+        long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
+        NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
 
-      expectThrows(
-          OutOfMemoryError.class,
-          () -> cache.computeIfAbsent("oom", ignored -> "computed"));
+        expectThrows(
+            OutOfMemoryError.class, () -> cache.computeIfAbsent("oom", ignored -> "computed"));
 
-      assertTrue(failingMap.isEmpty());
-      assertEquals(cache.size(), 0, "an unpublished compute probe must not change logical size");
+        assertTrue(failingMap.isEmpty());
+        assertEquals(cache.size(), 0, "an unpublished compute probe must not change logical size");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure15 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure15);
+      }
     }
   }
 
   @Test
   public void computeInsertionFailureAfterChmPublicationLeavesTheProbeForTerminalCleanup()
       throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      ThrowAfterComputePublicationMap failingMap = new ThrowAfterComputePublicationMap();
-      Field data = OffHeapCache.class.getDeclaredField("data");
-      long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
-      NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure14 = null;
+      try {
+        ThrowAfterComputePublicationMap failingMap = new ThrowAfterComputePublicationMap();
+        Field data = OffHeapCache.class.getDeclaredField("data");
+        long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
+        NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
 
-      expectThrows(
-          IllegalStateException.class,
-          () -> cache.computeIfAbsent("published", ignored -> "computed"));
+        expectThrows(
+            IllegalStateException.class,
+            () -> cache.computeIfAbsent("published", ignored -> "computed"));
 
-      assertFalse(failingMap.isEmpty());
-      assertEquals(cache.size(), 0, "an unpublished probe must not change logical size");
-      assertTrue(worker(cache).snapshot().unhealthy);
+        assertFalse(failingMap.isEmpty());
+        assertEquals(cache.size(), 0, "an unpublished probe must not change logical size");
+        assertTrue(worker(cache).snapshot().unhealthy);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure14 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure14);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void computeHintAfterConcurrentRemovalKeepsLifecycleOwnership() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      ThreadContext pinned = context(cache);
-      ReaderGuard guard = new ReaderGuard(worker(cache));
-      assertTrue(guard.enter(pinned));
-      Field memoryField = OffHeapCache.class.getDeclaredField("memory");
-      memoryField.setAccessible(true);
-      NativeMemory.Memory memory = (NativeMemory.Memory) memoryField.get(cache);
-      Method pageForHandle = NativeMemory.Memory.class.getDeclaredMethod("pageForHandle", long.class);
-      pageForHandle.setAccessible(true);
-      Field freedSlots =
-          Class.forName("com.red.ohc.storage.WriterArena$PageSharedLine")
-              .getDeclaredField("freedSlots");
-      freedSlots.setAccessible(true);
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure13 = null;
       try {
-        cache.computeIfAbsent("computed", ignored -> "value");
-        Entry inserted = cache.dataForTest().values().iterator().next();
-        assertFalse(inserted.isWriterLocked());
-        Object page =
-            pageForHandle.invoke(memory, NativeMemory.getLong(inserted.nativeKeyAddress - Long.BYTES));
-        long initialFreed = freedSlots.getLong(page);
-        assertFalse(cache.dataForTest().isEmpty());
+        ThreadContext pinned = context(cache);
+        ReaderGuard guard = new ReaderGuard(worker(cache));
+        guard.enter(pinned);
+        Field memoryField = OffHeapCache.class.getDeclaredField("memory");
+        memoryField.setAccessible(true);
+        NativeMemory.Memory memory = (NativeMemory.Memory) memoryField.get(cache);
+        Method pageForHandle =
+            NativeMemory.Memory.class.getDeclaredMethod("pageForHandle", long.class);
+        pageForHandle.setAccessible(true);
+        Field freedSlots =
+            Class.forName("com.red.ohc.storage.WriterArena$PageSharedLine")
+                .getDeclaredField("freedSlots");
+        freedSlots.setAccessible(true);
+        try {
+          cache.computeIfAbsent("computed", ignored -> "value");
+          Entry inserted = cache.dataForTest().values().iterator().next();
+          assertFalse(inserted.isWriterLocked());
+          Object page =
+              pageForHandle.invoke(
+                  memory, NativeMemory.getLong(inserted.nativeKeyAddress - Long.BYTES));
+          long initialFreed = freedSlots.getLong(page);
+          assertFalse(cache.dataForTest().isEmpty());
 
-        cache.remove("computed");
-        assertFalse(inserted.isAlive());
-        assertTrue(cache.dataForTest().isEmpty());
-        assertEquals(
-            freedSlots.getLong(page),
-            initialFreed,
-            "the reader-pinned key belongs to retirement, not private compute cleanup");
-        Field ledger = OffHeapCache.class.getDeclaredField("logicalAdmission");
-        ledger.setAccessible(true);
-        LogicalAdmission admission = (LogicalAdmission) ledger.get(cache);
-        assertEquals(admission.logicalCharge(), 0L, "published charge must not be rolled back twice");
-        assertEquals(admission.logicalMappingCount(), 0L);
+          cache.remove("computed");
+          assertFalse(inserted.isAlive());
+          assertTrue(cache.dataForTest().isEmpty());
+          assertEquals(
+              freedSlots.getLong(page),
+              initialFreed,
+              "the reader-pinned key belongs to retirement, not private compute cleanup");
+          Field ledger = OffHeapCache.class.getDeclaredField("logicalAdmission");
+          ledger.setAccessible(true);
+          LogicalAdmission admission = (LogicalAdmission) ledger.get(cache);
+          assertEquals(
+              admission.logicalCharge(), 0L, "published charge must not be rolled back twice");
+          assertEquals(admission.logicalMappingCount(), 0L);
+        } finally {
+          guard.exit(pinned);
+        }
+        // Internal stop drains the durable removal; compute cleanup must not already free its key.
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure13 = cacheOperationFailure;
+        throw cacheOperationFailure;
       } finally {
-        guard.exit(pinned);
+        CacheTestSupport.stop(cache, cacheFailure13);
       }
-      // Closing drains the durable removal: the compute cleanup must not already have freed its key.
     }
   }
 
   @Test
   public void putFailureAfterChmPublicationLeavesTheCandidateForTerminalCleanup() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache()) {
-      ThrowAfterPutIfAbsentMap failingMap = new ThrowAfterPutIfAbsentMap();
-      Field data = OffHeapCache.class.getDeclaredField("data");
-      long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
-      NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure12 = null;
+      try {
+        ThrowAfterPutIfAbsentMap failingMap = new ThrowAfterPutIfAbsentMap();
+        Field data = OffHeapCache.class.getDeclaredField("data");
+        long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
+        NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
 
-      expectThrows(IllegalStateException.class, () -> cache.put("published", "value"));
+        expectThrows(IllegalStateException.class, () -> cache.put("published", "value"));
 
-      assertFalse(failingMap.isEmpty());
-      assertEquals(cache.size(), 0, "an unpublished candidate must not change logical size");
-      assertTrue(worker(cache).snapshot().unhealthy);
+        assertFalse(failingMap.isEmpty());
+        assertEquals(cache.size(), 0, "an unpublished candidate must not change logical size");
+        assertTrue(worker(cache).snapshot().unhealthy);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure12 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure12);
+      }
     }
   }
 
@@ -514,142 +688,127 @@ public final class ConcurrentMapBehaviorTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      cache.put("victim", "old");
-      cache.put("target", "old");
-      cache.flushAsync().join();
-      ThrowAfterVictimRemoveMap failingMap = new ThrowAfterVictimRemoveMap();
-      failingMap.putAll(cache.dataForTest());
-      Field data = OffHeapCache.class.getDeclaredField("data");
-      long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
-      NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
-      Field worker = OffHeapCache.class.getDeclaredField("worker");
-      worker.setAccessible(true);
-      Object eventLoop = worker.get(cache);
-      Field workerData =
-          com.red.ohc.maintenance.MaintenanceEventLoop.class.getDeclaredField("data");
-      long workerDataOffset = NativeMemory.unsafe().objectFieldOffset(workerData);
-      NativeMemory.unsafe().putObjectVolatile(eventLoop, workerDataOffset, failingMap);
+    {
+      Throwable explicitCacheFailure1 = null;
+      try {
 
-      cache.put("target", "x".repeat(64));
+        cache.put("victim", "old");
+        cache.put("target", "old");
+        cache.flushAsync().join();
+        ThrowAfterVictimRemoveMap failingMap = new ThrowAfterVictimRemoveMap();
+        failingMap.putAll(cache.dataForTest());
+        Field data = OffHeapCache.class.getDeclaredField("data");
+        long dataOffset = NativeMemory.unsafe().objectFieldOffset(data);
+        NativeMemory.unsafe().putObjectVolatile(cache, dataOffset, failingMap);
+        Field worker = OffHeapCache.class.getDeclaredField("worker");
+        worker.setAccessible(true);
+        Object eventLoop = worker.get(cache);
+        Field workerData =
+            com.red.ohc.maintenance.MaintenanceEventLoop.class.getDeclaredField("data");
+        long workerDataOffset = NativeMemory.unsafe().objectFieldOffset(workerData);
+        NativeMemory.unsafe().putObjectVolatile(eventLoop, workerDataOffset, failingMap);
 
-      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
-      // The injected map publishes removedEntry before throwing. Wait for the actor to finish
-      // its exception reconciliation and publish terminal failure before checking logical size.
-      while (!((MaintenanceEventLoop) eventLoop).snapshot().unhealthy
-          && System.nanoTime() < deadline) {
-        Thread.yield();
-      }
+        cache.put("target", "x".repeat(64));
 
-      assertTrue(((MaintenanceEventLoop) eventLoop).snapshot().unhealthy);
-      assertTrue(failingMap.removedEntry != null, "the injected victim failure must run");
-      for (Entry entry : failingMap.values()) {
-        if (entry != failingMap.removedEntry) {
-          assertFalse(
-              entry.isWriterLocked(),
-              "a replacement failure after pointer publication must release the Entry writer claim");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+        // The injected map publishes removedEntry before throwing. Wait for the actor to finish
+        // its exception reconciliation and publish terminal failure before checking logical size.
+        while (!((MaintenanceEventLoop) eventLoop).snapshot().unhealthy
+            && System.nanoTime() < deadline) {
+          Thread.yield();
         }
+
+        assertTrue(((MaintenanceEventLoop) eventLoop).snapshot().unhealthy);
+        assertTrue(failingMap.removedEntry != null, "the injected victim failure must run");
+        for (Entry entry : failingMap.values()) {
+          if (entry != failingMap.removedEntry) {
+            assertFalse(
+                entry.isWriterLocked(),
+                "a replacement failure after pointer publication must release the Entry writer"
+                    + " claim");
+          }
+        }
+        assertEquals(failingMap.size(), 1, "the published replacement must remain map-visible");
+        assertEquals(
+            cache.size(),
+            1,
+            "a victim removed before its CHM failure must still be reflected in logical"
+                + " accounting");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure1);
       }
-      assertEquals(failingMap.size(), 1, "the published replacement must remain map-visible");
-      assertEquals(
-          cache.size(),
-          1,
-          "a victim removed before its CHM failure must still be reflected in logical accounting");
-    } finally {
-      cache.close();
     }
   }
 
   @Test
   public void defaultTtlAppliesToAllDefaultMutationOverloads() {
     MutableTicker ticker = new MutableTicker(1_000L);
-    try (OHCache<String, String> cache = newCache(ticker, 1_000L)) {
-      assertEquals(cache.putIfAbsent("if-absent", "value"), null);
+    {
+      OHCache<String, String> cache = newCache(ticker, 1_000L);
+      Throwable cacheFailure11 = null;
+      try {
+        assertEquals(cache.putIfAbsent("if-absent", "value"), null);
 
-      cache.put("replace", "old");
-      assertTrue(cache.replace("replace", "old", "new"));
+        cache.put("replace", "old");
+        assertTrue(cache.replace("replace", "old", "new"));
 
-      cache.put("replace-all", "old");
-      cache.replaceAll((key, value) -> "new");
+        cache.put("replace-all", "old");
+        cache.replaceAll((key, value) -> "new");
 
-      cache.put("entry-set", "old");
-      Map.Entry<String, String> entry = null;
-      for (Map.Entry<String, String> candidate : cache.entrySet()) {
-        if (candidate.getKey().equals("entry-set")) {
-          entry = candidate;
-          break;
+        cache.put("entry-set", "old");
+        Map.Entry<String, String> entry = null;
+        for (Map.Entry<String, String> candidate : cache.entrySet()) {
+          if (candidate.getKey().equals("entry-set")) {
+            entry = candidate;
+            break;
+          }
         }
+        assertTrue(entry != null);
+        assertEquals(entry.setValue("new"), "old");
+
+        ticker.setMillis(2_001L);
+        assertFalse(cache.containsKey("if-absent"));
+        assertFalse(cache.containsKey("replace"));
+        assertFalse(cache.containsKey("replace-all"));
+        assertFalse(cache.containsKey("entry-set"));
+        assertFalse(cache.containsKey("mapped"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure11 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure11);
       }
-      assertTrue(entry != null);
-      assertEquals(entry.setValue("new"), "old");
-
-      ticker.setMillis(2_001L);
-      assertFalse(cache.containsKey("if-absent"));
-      assertFalse(cache.containsKey("replace"));
-      assertFalse(cache.containsKey("replace-all"));
-      assertFalse(cache.containsKey("entry-set"));
-      assertFalse(cache.containsKey("mapped"));
-    }
-  }
-
-  @Test
-  public void closeFromComputeOrBulkCallbackIsRejectedWithoutChangingLifecycle() {
-    try (OffHeapCache<String, String> cache = newCacheWithCloseTimeout(20L)) {
-      expectThrows(
-          IllegalStateException.class,
-          () ->
-              cache.compute(
-                  "compute",
-                  (key, value) -> {
-                    cache.close();
-                    return "unreachable";
-                  }));
-      cache.put("after-compute", "value");
-      assertEquals(cache.get("after-compute"), "value");
-    }
-
-    try (OffHeapCache<String, String> cache = newCacheWithCloseTimeout(20L)) {
-      cache.put("bulk", "value");
-      expectThrows(
-          IllegalStateException.class,
-          () -> cache.forEach((key, value) -> cache.close()));
-      cache.put("after-bulk", "value");
-      assertEquals(cache.get("after-bulk"), "value");
-    }
-
-    try (OffHeapCache<String, String> cache = newCacheWithCloseTimeout(20L)) {
-      for (int index = 0; index < 64; index++) {
-        cache.put("parallel-" + index, "value");
-      }
-      AtomicBoolean callbackSeen = new AtomicBoolean();
-      expectThrows(
-          IllegalStateException.class,
-          () ->
-              cache.forEach(
-                  (key, value) -> {
-                    callbackSeen.set(true);
-                    cache.close();
-                  }));
-      assertTrue(callbackSeen.get());
-      cache.put("after-parallel-bulk", "value");
-      assertEquals(cache.get("after-parallel-bulk"), "value");
     }
   }
 
   @Test(timeOut = 10_000L)
   public void concurrentMergeDoesNotLoseUpdates() throws Exception {
-    try (OHCache<String, String> cache = newCache()) {
+    {
+      OHCache<String, String> cache = newCache();
       int workers = 4;
-      int updatesPerWorker = 100;
       ExecutorService executor = Executors.newFixedThreadPool(workers);
+      Throwable cacheFailure10 = null;
       try {
+        int updatesPerWorker = 100;
+
         List<Future<?>> futures = new ArrayList<>();
         for (int worker = 0; worker < workers; worker++) {
           futures.add(
               executor.submit(
                   () -> {
-                    for (int update = 0; update < updatesPerWorker; update++) {
-                      cache.merge("counter", "1", (left, right) -> Integer.toString(Integer.parseInt(left) + 1));
+                    for (int update = 0;
+                        update < updatesPerWorker && !Thread.currentThread().isInterrupted();
+                        update++) {
+                      cache.merge(
+                          "counter",
+                          "1",
+                          (left, right) -> Integer.toString(Integer.parseInt(left) + 1));
                     }
                   }));
         }
@@ -657,182 +816,269 @@ public final class ConcurrentMapBehaviorTest {
           future.get();
         }
         assertEquals(cache.get("counter"), Integer.toString(workers * updatesPerWorker));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure10 = cacheOperationFailure;
+        throw cacheOperationFailure;
       } finally {
-        executor.shutdownNow();
+        CacheTestSupport.stop(cache, cacheFailure10, executor);
       }
     }
   }
 
   @Test
   public void mapViewsAreLiveAndEntrySnapshotsAreConditionallyMutable() {
-    try (OHCache<String, String> cache = newCache()) {
-      cache.put("a", "1");
-      cache.put("b", "2");
+    {
+      OHCache<String, String> cache = newCache();
+      Throwable cacheFailure9 = null;
+      try {
+        cache.put("a", "1");
+        cache.put("b", "2");
 
-      Set<String> keys = cache.keySet();
-      assertTrue(keys.contains("a"));
-      assertEquals(keys.size(), 2);
-      Iterator<String> keyIterator = keys.iterator();
-      while (keyIterator.hasNext()) {
-        if ("a".equals(keyIterator.next())) {
-          keyIterator.remove();
+        Set<String> keys = cache.keySet();
+        assertTrue(keys.contains("a"));
+        assertEquals(keys.size(), 2);
+        Iterator<String> keyIterator = keys.iterator();
+        while (keyIterator.hasNext()) {
+          if ("a".equals(keyIterator.next())) {
+            keyIterator.remove();
+          }
         }
+        assertFalse(cache.containsKey("a"));
+
+        assertTrue(cache.entrySet().contains(new AbstractMap.SimpleEntry<>("b", "2")));
+        Map.Entry<String, String> snapshot = cache.entrySet().iterator().next();
+        String snapshotKey = snapshot.getKey();
+        String oldValue = snapshot.getValue();
+        assertEquals(snapshot.setValue("updated"), oldValue);
+        assertEquals(cache.get(snapshotKey), "updated");
+
+        Map.Entry<String, String> stale = cache.entrySet().iterator().next();
+        cache.put(stale.getKey(), "concurrent");
+        expectThrows(ConcurrentModificationException.class, () -> stale.setValue("rejected"));
+        assertTrue(
+            cache.entrySet().remove(new AbstractMap.SimpleEntry<>(snapshotKey, "concurrent")));
+        assertFalse(cache.containsKey(snapshotKey));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure9 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure9);
       }
-      assertFalse(cache.containsKey("a"));
-
-      assertTrue(cache.entrySet().contains(new AbstractMap.SimpleEntry<>("b", "2")));
-      Map.Entry<String, String> snapshot = cache.entrySet().iterator().next();
-      String snapshotKey = snapshot.getKey();
-      String oldValue = snapshot.getValue();
-      assertEquals(snapshot.setValue("updated"), oldValue);
-      assertEquals(cache.get(snapshotKey), "updated");
-
-      Map.Entry<String, String> stale = cache.entrySet().iterator().next();
-      cache.put(stale.getKey(), "concurrent");
-      expectThrows(ConcurrentModificationException.class, () -> stale.setValue("rejected"));
-      assertTrue(cache.entrySet().remove(new AbstractMap.SimpleEntry<>(snapshotKey, "concurrent")));
-      assertFalse(cache.containsKey(snapshotKey));
     }
   }
 
   @Test(timeOut = 5_000L)
   public void bulkCallbackCanRemoveThenFlush() throws Exception {
-    try (OHCache<String, String> cache = newCache()) {
-      cache.put("remove-me", "value");
-      cache.flushAsync().join();
-      AtomicInteger callbacks = new AtomicInteger();
-      cache.forEach(
-          (key, value) -> {
-            cache.remove(key);
-            assertFalse(cache.containsKey(key));
-            try {
-              cache.flushAsync().get(1L, TimeUnit.SECONDS);
-            } catch (Exception failure) {
-              throw new RuntimeException(failure);
-            }
-            callbacks.incrementAndGet();
-          });
-      assertEquals(callbacks.get(), 1);
-      assertTrue(cache.isEmpty());
+    {
+      OHCache<String, String> cache = newCache();
+      Throwable cacheFailure8 = null;
+      try {
+        cache.put("remove-me", "value");
+        cache.flushAsync().join();
+        AtomicInteger callbacks = new AtomicInteger();
+        cache.forEach(
+            (key, value) -> {
+              cache.remove(key);
+              assertFalse(cache.containsKey(key));
+              try {
+                cache.flushAsync().get(1L, TimeUnit.SECONDS);
+              } catch (Exception failure) {
+                throw new RuntimeException(failure);
+              }
+              callbacks.incrementAndGet();
+            });
+        assertEquals(callbacks.get(), 1);
+        assertTrue(cache.isEmpty());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure8 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure8);
+      }
     }
   }
 
   @Test
   public void iteratorRemoveUsesTheReturnedKeyAfterAConcurrentReplace() {
-    try (OHCache<String, String> cache = newCache()) {
-      cache.put("key", "old");
-      Iterator<String> iterator = cache.keySet().iterator();
-      assertEquals(iterator.next(), "key");
-      cache.put("key", "new");
-      iterator.remove();
-      assertFalse(cache.containsKey("key"));
+    {
+      OHCache<String, String> cache = newCache();
+      Throwable cacheFailure7 = null;
+      try {
+        cache.put("key", "old");
+        Iterator<String> iterator = cache.keySet().iterator();
+        assertEquals(iterator.next(), "key");
+        cache.put("key", "new");
+        iterator.remove();
+        assertFalse(cache.containsKey("key"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure7 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure7);
+      }
     }
   }
 
   @Test
   public void expiredEntriesRemainInPhysicalCountButDisappearFromLogicalOperations() {
     MutableTicker ticker = new MutableTicker(1_000L);
-    try (OHCache<String, String> cache = newCache(ticker)) {
-      cache.put("expired", "value", 2_000L);
-      ticker.setMillis(3_000L);
+    {
+      OHCache<String, String> cache = newCache(ticker);
+      Throwable cacheFailure6 = null;
+      try {
+        cache.put("expired", "value", 2_000L);
+        ticker.setMillis(3_000L);
 
-      Map<String, String> liveMap = new HashMap<>();
-      liveMap.put("expired", "value");
-      assertFalse(cache.equals(liveMap));
-      assertFalse(cache.containsKey("expired"));
-      assertEquals(cache.size(), 0);
-      assertTrue(cache.isEmpty());
-      assertEquals(cache.keySet().size(), 0);
-      assertEquals(cache.values().size(), 0);
-      assertEquals(cache.entrySet().size(), 0);
-      assertFalse(cache.keySet().contains("expired"));
-      assertFalse(cache.containsValue("value"));
-      assertFalse(cache.entrySet().iterator().hasNext());
-      cache.remove("expired");
-      assertFalse(cache.containsKey("expired"));
-      AtomicInteger callbacks = new AtomicInteger();
-      cache.forEach((key, value) -> callbacks.incrementAndGet());
-      assertEquals(callbacks.get(), 0);
+        Map<String, String> liveMap = new HashMap<>();
+        liveMap.put("expired", "value");
+        assertFalse(cache.equals(liveMap));
+        assertFalse(cache.containsKey("expired"));
+        assertEquals(cache.size(), 0);
+        assertTrue(cache.isEmpty());
+        assertEquals(cache.keySet().size(), 0);
+        assertEquals(cache.values().size(), 0);
+        assertEquals(cache.entrySet().size(), 0);
+        assertFalse(cache.keySet().contains("expired"));
+        assertFalse(cache.containsValue("value"));
+        assertFalse(cache.entrySet().iterator().hasNext());
+        cache.remove("expired");
+        assertFalse(cache.containsKey("expired"));
+        AtomicInteger callbacks = new AtomicInteger();
+        cache.forEach((key, value) -> callbacks.incrementAndGet());
+        assertEquals(callbacks.get(), 0);
 
-      assertFalse(cache.replace("expired", "value", "new"));
-      assertFalse(cache.remove("expired", "value"));
+        assertFalse(cache.replace("expired", "value", "new"));
+        assertFalse(cache.remove("expired", "value"));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure6 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure6);
+      }
     }
   }
 
   @Test
   public void expiryReaderDoesNotChangeLogicalCountWhileAWriterOwnsTheEntry() {
     MutableTicker ticker = new MutableTicker(1_000L);
-    try (OffHeapCache<String, String> cache = newCache(ticker)) {
-      cache.put("key", "old", 2_000L);
-      Entry entry = cache.dataForTest().values().iterator().next();
-      ticker.setMillis(3_000L);
-
-      assertTrue(entry.claimWriter());
+    {
+      OffHeapCache<String, String> cache = newCache(ticker);
+      Throwable cacheFailure5 = null;
       try {
-        assertFalse(cache.containsKey("key"));
-        assertEquals(
-            cache.size(),
-            1,
-            "a reader that cannot establish version ownership must not change logical size");
-      } finally {
-        entry.finishWriter();
-      }
+        cache.put("key", "old", 2_000L);
+        Entry entry = cache.dataForTest().values().iterator().next();
+        ticker.setMillis(3_000L);
 
-      assertFalse(cache.containsKey("key"));
-      assertEquals(cache.size(), 0, "a later uncontended expiry read must publish absence");
+        assertTrue(entry.claimWriter());
+        try {
+          assertFalse(cache.containsKey("key"));
+          assertEquals(
+              cache.size(),
+              1,
+              "a reader that cannot establish version ownership must not change logical size");
+        } finally {
+          entry.finishWriter();
+        }
+
+        assertFalse(cache.containsKey("key"));
+        assertEquals(cache.size(), 0, "a later uncontended expiry read must publish absence");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure5 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure5);
+      }
     }
   }
 
   @Test
   public void expiredRemovePublishesLogicalAbsenceWhileHoldingTheWriterClaim() {
     MutableTicker ticker = new MutableTicker(1_000L);
-    try (OHCache<String, String> cache = newCache(ticker)) {
-      cache.put("key", "value", 2_000L);
-      ticker.setMillis(3_000L);
+    {
+      OHCache<String, String> cache = newCache(ticker);
+      Throwable cacheFailure4 = null;
+      try {
+        cache.put("key", "value", 2_000L);
+        ticker.setMillis(3_000L);
 
-      cache.remove("key");
-      assertEquals(cache.size(), 0);
-      assertTrue(cache.isEmpty());
+        cache.remove("key");
+        assertEquals(cache.size(), 0);
+        assertTrue(cache.isEmpty());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
   @Test
   public void mapViewPropagatesNoSuchElementExceptionFromUserDeserialization() {
     ThrowingDeserializeSerializer serializer = new ThrowingDeserializeSerializer();
-    try (OHCache<String, String> cache = newCache(serializer)) {
-      cache.put("key", "value");
-      serializer.failDeserialization = true;
+    {
+      OHCache<String, String> cache = newCache(serializer);
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put("key", "value");
+        serializer.failDeserialization = true;
 
-      expectThrows(NoSuchElementException.class, () -> cache.entrySet().iterator().hasNext());
+        expectThrows(NoSuchElementException.class, () -> cache.entrySet().iterator().hasNext());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
   @Test
-  public void mapIdentityMethodsAndCloseViewsFollowMapContract() {
-    try (OffHeapCache<String, String> cache = newCache();
-        OffHeapCache<String, String> equalCache = newCache()) {
-      cache.put("one", "1");
-      cache.put("two", "2");
-      equalCache.put("one", "1");
-      equalCache.put("two", "2");
-      Map<String, String> expected = new HashMap<>();
-      expected.put("one", "1");
-      expected.put("two", "2");
-      assertTrue(cache.equals(equalCache));
-      assertTrue(equalCache.equals(cache));
-      assertFalse(cache.equals(expected));
-      assertFalse(expected.equals(cache));
-      assertEquals(cache.hashCode(), equalCache.hashCode());
-      assertTrue(cache.toString().contains("one=1"));
-    }
+  public void mapIdentityMethodsFollowMapContract() {
+    {
+      OffHeapCache<String, String> cache = newCache();
+      Throwable cacheFailure2 = null;
+      try {
+        {
+          OffHeapCache<String, String> equalCache = newCache();
+          Throwable cacheFailure1 = null;
+          try {
+            cache.put("one", "1");
+            cache.put("two", "2");
+            equalCache.put("one", "1");
+            equalCache.put("two", "2");
+            Map<String, String> expected = new HashMap<>();
+            expected.put("one", "1");
+            expected.put("two", "2");
+            assertTrue(cache.equals(equalCache));
+            assertTrue(equalCache.equals(cache));
+            assertFalse(cache.equals(expected));
+            assertFalse(expected.equals(cache));
+            assertEquals(cache.hashCode(), equalCache.hashCode());
+            assertTrue(cache.toString().contains("one=1"));
 
-    OffHeapCache<String, String> closed = newCache();
-    closed.close();
-    assertTrue(closed.keySet().isEmpty());
-    assertTrue(closed.values().isEmpty());
-    assertTrue(closed.entrySet().isEmpty());
-    assertEquals(closed.size(), 0);
-    expectThrows(IllegalStateException.class, () -> closed.put("closed", "value"));
+          } catch (Throwable cacheOperationFailure) {
+            cacheFailure1 = cacheOperationFailure;
+            throw cacheOperationFailure;
+          } finally {
+            CacheTestSupport.stop(equalCache, cacheFailure1);
+          }
+        }
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
+    }
   }
 
   private static OffHeapCache<String, String> newCache() {
@@ -874,35 +1120,22 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static OffHeapCache<String, String> newCache(Ticker ticker) {
-    return newCache(ticker, 0L, 30_000L);
+    return newCache(ticker, 0L);
   }
 
   private static OffHeapCache<String, String> newCache(Ticker ticker, long defaultTtlMillis) {
-    return newCache(ticker, defaultTtlMillis, 30_000L);
-  }
-
-  private static OffHeapCache<String, String> newCacheWithCloseTimeout(long timeoutMillis) {
-    return newCache(Ticker.DEFAULT, 0L, timeoutMillis);
-  }
-
-  private static OffHeapCache<String, String> newCache(
-      Ticker ticker, long defaultTtlMillis, long closeTimeoutMillis) {
-    return newCache(ticker, defaultTtlMillis, closeTimeoutMillis, STRING);
+    return newCache(ticker, defaultTtlMillis, STRING);
   }
 
   private static OffHeapCache<String, String> newCache(CacheSerializer<String> serializer) {
-    return newCache(Ticker.DEFAULT, 0L, 30_000L, serializer);
+    return newCache(Ticker.DEFAULT, 0L, serializer);
   }
 
   private static OffHeapCache<String, String> newCache(
-      Ticker ticker,
-      long defaultTtlMillis,
-      long closeTimeoutMillis,
-      CacheSerializer<String> serializer) {
+      Ticker ticker, long defaultTtlMillis, CacheSerializer<String> serializer) {
     return OHCacheBuilder.<String, String>newBuilder()
         .capacity(1 << 20)
         .defaultTTLmillis(defaultTtlMillis)
-        .closeTimeoutMillis(closeTimeoutMillis)
         .ticker(ticker)
         .keySerializer(serializer)
         .valueSerializer(serializer)
@@ -910,19 +1143,20 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static <T> ClaimedMutationResult<T> runWithTemporaryWriterClaim(
-      OffHeapCache<String, String> cache, Callable<T> mutation) throws Exception {
+      OffHeapCache<String, String> cache, ExecutorService executor, Callable<T> mutation)
+      throws Exception {
     Entry entry = cache.dataForTest().values().iterator().next();
     assertTrue(entry.claimWriter());
-    ExecutorService executor = Executors.newSingleThreadExecutor();
     CountDownLatch started = new CountDownLatch(1);
-    Future<T> future =
-        executor.submit(
-            () -> {
-              started.countDown();
-              return mutation.call();
-            });
     boolean writerHeld = true;
+    Throwable callerFailure = null;
     try {
+      Future<T> future =
+          executor.submit(
+              () -> {
+                started.countDown();
+                return mutation.call();
+              });
       assertTrue(started.await(2L, TimeUnit.SECONDS));
       T value = null;
       boolean completedWhileClaimed;
@@ -939,12 +1173,28 @@ public final class ConcurrentMapBehaviorTest {
         value = future.get(2L, TimeUnit.SECONDS);
       }
       return new ClaimedMutationResult<>(value, completedWhileClaimed);
+    } catch (Throwable error) {
+      callerFailure = error;
+      throw error;
     } finally {
       if (writerHeld) {
         entry.finishWriter();
       }
-      executor.shutdownNow();
+      CacheTestSupport.awaitCallers(executor, callerFailure);
     }
+  }
+
+  private static void awaitReclaimedRecords(OffHeapCache<?, ?> cache, long minimum)
+      throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+    do {
+      cache.flushAsync().get(5L, TimeUnit.SECONDS);
+      if (cache.stats().retirementActorReclaimedRecords() >= minimum) {
+        return;
+      }
+      Thread.yield();
+    } while (System.nanoTime() < deadline);
+    assertTrue(cache.stats().retirementActorReclaimedRecords() >= minimum);
   }
 
   private static final class ClaimedMutationResult<T> {
@@ -958,8 +1208,7 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static final class ThrowAfterNonNullRemapMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     @Override
     public com.red.ohc.index.Entry compute(
         com.red.ohc.index.Entry key,
@@ -980,8 +1229,7 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static final class ThrowAfterComputePublicationMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     @Override
     public com.red.ohc.index.Entry compute(
         com.red.ohc.index.Entry key,
@@ -999,20 +1247,17 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static final class ThrowAfterPutIfAbsentMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     @Override
     public com.red.ohc.index.Entry putIfAbsent(
-        com.red.ohc.index.Entry key,
-        com.red.ohc.index.Entry value) {
+        com.red.ohc.index.Entry key, com.red.ohc.index.Entry value) {
       com.red.ohc.index.Entry result = super.putIfAbsent(key, value);
       throw new IllegalStateException("injected after putIfAbsent CHM publication");
     }
   }
 
   private static final class PausedInsertCollisionMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     private final CountDownLatch probeObserved = new CountDownLatch(1);
     private final CountDownLatch resumeProbe = new CountDownLatch(1);
     private final CountDownLatch collisionObserved = new CountDownLatch(1);
@@ -1040,8 +1285,7 @@ public final class ConcurrentMapBehaviorTest {
 
     @Override
     public com.red.ohc.index.Entry putIfAbsent(
-        com.red.ohc.index.Entry key,
-        com.red.ohc.index.Entry value) {
+        com.red.ohc.index.Entry key, com.red.ohc.index.Entry value) {
       com.red.ohc.index.Entry winner = super.putIfAbsent(key, value);
       if (winner != null && collisionClaimed.compareAndSet(false, true)) {
         collisionWinner = winner;
@@ -1073,8 +1317,7 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static final class PausedProbeMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     private final CountDownLatch probeObserved = new CountDownLatch(1);
     private final CountDownLatch resumeProbe = new CountDownLatch(1);
     private final AtomicBoolean pauseClaimed = new AtomicBoolean();
@@ -1115,8 +1358,7 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   private static final class CountingPutMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     private final AtomicInteger lookupCalls = new AtomicInteger();
     private final AtomicInteger putIfAbsentCalls = new AtomicInteger();
 
@@ -1128,16 +1370,14 @@ public final class ConcurrentMapBehaviorTest {
 
     @Override
     public com.red.ohc.index.Entry putIfAbsent(
-        com.red.ohc.index.Entry key,
-        com.red.ohc.index.Entry value) {
+        com.red.ohc.index.Entry key, com.red.ohc.index.Entry value) {
       putIfAbsentCalls.incrementAndGet();
       return super.putIfAbsent(key, value);
     }
   }
 
   private static final class ThrowAfterVictimRemoveMap
-      extends ConcurrentHashMap<
-          com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
     private final AtomicBoolean failAfterRemoval = new AtomicBoolean(true);
     private volatile com.red.ohc.index.Entry removedEntry;
 
@@ -1152,8 +1392,7 @@ public final class ConcurrentMapBehaviorTest {
     }
   }
 
-  private static final class ThrowingDeserializeSerializer
-      implements CacheSerializer<String> {
+  private static final class ThrowingDeserializeSerializer implements CacheSerializer<String> {
     private volatile boolean failDeserialization;
 
     @Override
@@ -1218,7 +1457,6 @@ public final class ConcurrentMapBehaviorTest {
       checkedValueProtection = true;
       armed = false;
     }
-
   }
 
   private static final class ReaderStateCheckingTicker implements Ticker {
@@ -1252,7 +1490,6 @@ public final class ConcurrentMapBehaviorTest {
     public long currentTimeMillis() {
       return System.currentTimeMillis();
     }
-
   }
 
   private static final class MutableTicker implements Ticker {

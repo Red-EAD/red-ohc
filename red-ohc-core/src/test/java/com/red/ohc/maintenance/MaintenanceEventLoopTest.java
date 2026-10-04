@@ -23,7 +23,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
-import org.jctools.queues.MpscUnboundedArrayQueue;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
@@ -90,7 +89,8 @@ public class MaintenanceEventLoopTest {
 
   @Test
   public void constructorsRequireAnExplicitNativeDebtBudget() {
-    for (java.lang.reflect.Constructor<?> constructor : MaintenanceEventLoop.class.getConstructors()) {
+    for (java.lang.reflect.Constructor<?> constructor :
+        MaintenanceEventLoop.class.getConstructors()) {
       Class<?>[] parameterTypes = constructor.getParameterTypes();
       assertTrue(
           java.util.Arrays.stream(parameterTypes).anyMatch(type -> type == long.class),
@@ -99,13 +99,18 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void lifecycleTurnDrainsOnlyRecordsReservedBeforeItsPerLaneWatermark()
-      throws Exception {
+  public void lifecycleTurnDrainsOnlyRecordsReservedBeforeItsPerLaneWatermark() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(2);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
       WriterLifecycleLane first = lifecycle.lane(0);
@@ -194,7 +199,8 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       assertMissingField(MaintenanceEventLoop.class, "maintenanceBatchFactor");
       assertMissingField(MaintenanceEventLoop.class, "maintenancePressurePermille");
@@ -302,17 +308,13 @@ public class MaintenanceEventLoopTest {
       schedule.setAccessible(true);
       schedule.invoke(loop);
       assertEquals(getLongField(loop, "reclaimRetryNanos"), 1_000_000L);
-      assertEquals(
-          getLongField(loop, "reclaimRetryBackoffNanos"),
-          1_000_000L * 2L);
+      assertEquals(getLongField(loop, "reclaimRetryBackoffNanos"), 1_000_000L * 2L);
 
       readers.register(new ReaderSlot());
       Method finish = MaintenanceEventLoop.class.getDeclaredMethod("finishReaderLifecycleSweep");
       finish.setAccessible(true);
       finish.invoke(loop);
-      assertEquals(
-          getLongField(loop, "nextReaderLifecycleCheckNanos"),
-          1_000_000_000L);
+      assertEquals(getLongField(loop, "nextReaderLifecycleCheckNanos"), 1_000_000_000L);
     } finally {
       journal.close();
       links.close();
@@ -330,7 +332,8 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       MaintenanceEventLoop.Snapshot snapshot = loop.snapshot();
       assertEquals(snapshot.maintenanceActiveNanosTotal, 0L);
@@ -358,7 +361,8 @@ public class MaintenanceEventLoopTest {
             1 << 20,
             Eviction.LRU,
             newReaderRegistry(memory),
-            journal, Long.MAX_VALUE);
+            journal,
+            Long.MAX_VALUE);
     ThreadContext context = writerContext(memory, journal);
     try {
       appendRetirements(context.retirementLane(), RetirementSegment.CAPACITY);
@@ -397,11 +401,11 @@ public class MaintenanceEventLoopTest {
       appendRetirements(journal.actorLane(), RetirementSegment.CAPACITY);
       journal.cutAllProducersAtWatermark();
       assertEquals(
-          journal.sealReadySegments(1L),
+          journal.sealReadySegments(),
           RetirementSegment.CAPACITY,
           "the test must publish one complete sealed segment");
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       started = true;
       loop.requestMaintenance();
 
@@ -427,8 +431,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 10_000L)
-  public void actorReclaimDrainsSafeSegmentsWithoutWriterAssistance()
-      throws Exception {
+  public void actorReclaimDrainsSafeSegmentsWithoutWriterAssistance() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
     int segmentCount = 8;
@@ -452,23 +455,25 @@ public class MaintenanceEventLoopTest {
         journal.append(value, allocation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(
-          journal.sealReadySegments(1L), RetirementSegment.CAPACITY * segmentCount);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY * segmentCount);
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       started = true;
       assertTrue(
           awaitCompletedRecords(journal, RetirementSegment.CAPACITY * segmentCount, 3_000L),
           "every published SAFE segment must eventually be reclaimed by the actor");
       assertEquals(
-          journal.actorReclaimedRecordsTotal(),
-          (long) RetirementSegment.CAPACITY * segmentCount);
+          journal.actorReclaimedRecordsTotal(), (long) RetirementSegment.CAPACITY * segmentCount);
       assertEquals(journal.safeSegmentDebt(), 0L);
       long queueDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
-      while (loop.queueDepth() != 0L && System.nanoTime() < queueDeadline) {
+      while (MaintenanceTestSupport.lifecycle(loop).queuedRecords() != 0L
+          && System.nanoTime() < queueDeadline) {
         Thread.yield();
       }
-      assertEquals(loop.queueDepth(), 0L, "the actor mailbox must be empty after SAFE reclaim drains");
+      assertEquals(
+          MaintenanceTestSupport.lifecycle(loop).queuedRecords(),
+          0L,
+          "the lifecycle journal must be empty after SAFE reclaim drains");
     } finally {
       if (started) {
         loop.stop();
@@ -494,7 +499,7 @@ public class MaintenanceEventLoopTest {
       loop.retirementJournal().append(0L, 0L);
       assertTrue(loop.retirementJournal().consumeReadyHint());
       loop.retirementJournal().cutAllProducersAtWatermark();
-      assertEquals(loop.retirementJournal().sealReadySegments(1L), 1);
+      assertEquals(loop.retirementJournal().sealReadySegments(), 1);
       assertTrue(loop.retirementJournal().hasPendingReclaim());
       loop.retirementJournal().finishReadyDrains();
       ((AtomicInteger) getField(loop, "requestedWork")).set(0);
@@ -510,8 +515,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void blockedRetirementExposesRetryDeadlineWhileReaderIsActive()
-      throws Exception {
+  public void blockedRetirementExposesRetryDeadlineWhileReaderIsActive() throws Exception {
     AtomicLong nowNanos = new AtomicLong();
     Ticker ticker =
         new Ticker() {
@@ -531,7 +535,8 @@ public class MaintenanceEventLoopTest {
     readers.register(activeReader);
     readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+        new MaintenanceEventLoop(
+            index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     try {
       retireOne(loop, memory);
       invokeMaintenancePass(loop);
@@ -598,7 +603,7 @@ public class MaintenanceEventLoopTest {
       readers.beginOpForTest(readerIndex, true);
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       journal.finishReadyDrains();
       setLongField(loop, "reclaimRetryNanos", 1L);
 
@@ -614,8 +619,7 @@ public class MaintenanceEventLoopTest {
       int retirementState = decisionRetirementState.getInt(decision);
       int runnableWork = intField(MaintenanceEventLoop.class, "RUNNABLE_CHECK_WORK");
       int readersChecked = intField(MaintenanceEventLoop.class, "RUNNABLE_CHECK_READERS");
-      int activeReaders =
-          intField(MaintenanceEventLoop.class, "RUNNABLE_CHECK_ACTIVE_READERS");
+      int activeReaders = intField(MaintenanceEventLoop.class, "RUNNABLE_CHECK_ACTIVE_READERS");
       assertEquals(check & runnableWork, 0);
       assertTrue((check & readersChecked) != 0);
       assertTrue((check & activeReaders) != 0);
@@ -651,7 +655,7 @@ public class MaintenanceEventLoopTest {
     try {
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       journal.finishReadyDrains();
       setBooleanField(loop, "reclaimBlocked", true);
       setLongField(loop, "reclaimRetryNanos", Long.MAX_VALUE - 1L);
@@ -666,8 +670,7 @@ public class MaintenanceEventLoopTest {
       Field decisionRunnableCheck = decision.getClass().getDeclaredField("runnableCheck");
       decisionRunnableCheck.setAccessible(true);
       int check = decisionRunnableCheck.getInt(decision);
-      assertTrue(
-          (check & intField(MaintenanceEventLoop.class, "RUNNABLE_CHECK_WORK")) != 0);
+      assertTrue((check & intField(MaintenanceEventLoop.class, "RUNNABLE_CHECK_WORK")) != 0);
 
       Field planField = decision.getClass().getDeclaredField("plan");
       planField.setAccessible(true);
@@ -697,18 +700,12 @@ public class MaintenanceEventLoopTest {
       loop.retirementJournal().append(0L, 0L);
       CompletableFuture<Void> flush = loop.flush();
       invokeMaintenancePassWork(loop);
-      Class<?> decisionClass =
-          Class.forName(
-              "com.red.ohc.maintenance.MaintenanceEventLoop$WorkDecision");
-      Method method =
-          MaintenanceEventLoop.class.getDeclaredMethod("flushWorkDue", int.class, decisionClass);
-      method.setAccessible(true);
       assertFalse(
-          (Boolean) method.invoke(loop, loop.retirementJournal().workState(), null),
+          invokeBooleanMethod(loop, "hasRunnableWork"),
           "a flush must park behind a pinned reader instead of spinning");
 
       readers.endOpForTest(activeReader);
-      assertTrue((Boolean) method.invoke(loop, loop.retirementJournal().workState(), null));
+      assertTrue(invokeBooleanMethod(loop, "hasRunnableWork"));
       flush.cancel(false);
     } finally {
       readers.endOpForTest(activeReader);
@@ -718,13 +715,131 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
+  public void postCutReadyRetirementsDoNotKeepReaderBlockedFlushRunnable() throws Exception {
+    assertPostCutRetirementsPark(32);
+  }
+
+  @Test
+  public void postCutPartialRetirementDoesNotKeepReaderBlockedFlushRunnable() throws Exception {
+    assertPostCutRetirementsPark(1);
+  }
+
+  private void assertPostCutRetirementsPark(int postCutRecords) throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ReaderRegistry readers = newReaderRegistry(memory);
+    ReaderSlot activeReader = new ReaderSlot();
+    readers.register(activeReader);
+    readers.beginOpForTest(activeReader, true);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+    RetirementJournal journal = loop.retirementJournal();
+    Throwable primary = null;
+    try {
+      MaintenanceTestSupport.lifecycle(loop);
+      RetirementJournal.Lane writer = journal.createLane();
+      journal.append(0L, 0L);
+      CompletableFuture<Void> flush = loop.flush();
+      invokeMaintenancePassWork(loop);
+      assertFalse(flush.isDone(), "the captured retirement must remain reader-pinned");
+
+      appendRetirements(writer, postCutRecords);
+      assertFalse(
+          invokeBooleanMethod(loop, "hasRunnableWork"),
+          "post-cut retirement readiness cannot make a reader-blocked flush runnable");
+      Method idleCut =
+          MaintenanceEventLoop.class.getDeclaredMethod("cutIdleRetirementRecords", int.class);
+      idleCut.setAccessible(true);
+      assertFalse(
+          (Boolean) idleCut.invoke(loop, journal.workState()),
+          "idle cutting must leave post-cut producers outside the blocked flush");
+
+      MaintenanceTestSupport.start(loop);
+      CompletableFuture<Void> task = new CompletableFuture<>();
+      assertTrue(
+          loop.submitActorTaskForTest(() -> task.complete(null), task::completeExceptionally));
+      task.get(3L, TimeUnit.SECONDS);
+      waitUntilParked(loop);
+      assertFalse(flush.isDone());
+
+      readers.endOpForTest(activeReader);
+      loop.readerQuiescent(activeReader);
+      flush.get(3L, TimeUnit.SECONDS);
+      loop.flush().get(3L, TimeUnit.SECONDS);
+      assertEquals(journal.completedRecordsTotal(), postCutRecords + 1L);
+    } catch (Throwable failure) {
+      primary = failure;
+      throw failure;
+    } finally {
+      readers.endOpForTest(activeReader);
+      loop.stop();
+      try {
+        loop.join(30_000L);
+        assertFalse(loop.isAlive(), "actor must exit before native fixture cleanup");
+        journal.close();
+        memory.closeArenas();
+      } catch (Throwable cleanup) {
+        if (primary != null) {
+          primary.addSuppressed(cleanup);
+        } else {
+          throw cleanup;
+        }
+      }
+    }
+  }
+
+  @Test
+  public void capturedUncommittedRetirementParksUntilCommitOrCancel() throws Exception {
+    for (boolean cancel : new boolean[] {false, true}) {
+      NativeMemory.Memory memory = new NativeMemory.Memory();
+      MaintenanceEventLoop loop =
+          new MaintenanceEventLoop(
+              index(),
+              memory,
+              Ticker.DEFAULT,
+              1 << 20,
+              Eviction.LRU,
+              newReaderRegistry(memory),
+              Long.MAX_VALUE);
+      RetirementJournal journal = loop.retirementJournal();
+      RetirementJournal.Lane writer = journal.createLane();
+      RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
+      try {
+        MaintenanceTestSupport.lifecycle(loop);
+        assertTrue(writer.reserve(reservation));
+        writer.write(reservation, 0L, 0L);
+        CompletableFuture<Void> flush = loop.flush();
+        invokeMaintenancePassWork(loop);
+        assertFalse(flush.isDone());
+        assertFalse(
+            invokeBooleanMethod(loop, "hasRunnableWork"),
+            "an unpublished captured reservation must wait for its producer");
+        if (cancel) {
+          writer.cancel(reservation);
+        } else {
+          writer.commit(reservation);
+        }
+        assertTrue(invokeBooleanMethod(loop, "hasRunnableWork"));
+        invokeMaintenancePassWork(loop);
+        assertTrue(flush.isDone(), "commit/cancel must release the captured fence");
+        flush.get(3L, TimeUnit.SECONDS);
+      } finally {
+        if (reservation.segment() != null) {
+          writer.cancel(reservation);
+        }
+        journal.close();
+        memory.closeArenas();
+      }
+    }
+  }
+
+  @Test
   public void closingFlushKeepsAccessInMaintenancePlan() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot slot = new ReaderSlot();
     slot.access = new AccessRing();
-    slot.access.offer(
-        EntryTestSupport.entry(memory, 0, 92, 0L), 1L, 0L, Entry.POLICY_NONE);
+    slot.access.offer(EntryTestSupport.entry(memory, 0, 92, 0L), 1L, 0L, Entry.POLICY_NONE);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
@@ -821,8 +936,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void readerAdmittedAfterRetirementCutDoesNotArmAReclaimNotification()
-      throws Exception {
+  public void readerAdmittedAfterRetirementCutDoesNotArmAReclaimNotification() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     ReaderSlot oldReader = new ReaderSlot();
@@ -836,9 +950,9 @@ public class MaintenanceEventLoopTest {
     try {
       retireOne(loop, memory);
       invokeMaintenancePassWork(loop);
-      assertEquals(loop.epoch(), 2L);
+      assertTrue(loop.retirementJournal().hasSealedSegments());
 
-      assertTrue(guard.enter(newReader));
+      guard.enter(newReader);
       AtomicInteger requestedWork = (AtomicInteger) getField(loop, "requestedWork");
       requestedWork.set(0);
       loop.requestMaintenance();
@@ -886,8 +1000,7 @@ public class MaintenanceEventLoopTest {
       CompletableFuture<Void> flush = loop.flush();
       invokeCompleteFlushIfIdle(loop);
 
-      assertFalse(
-          flush.isDone(), "the fast completion path must not skip the dead-reader sweep");
+      assertFalse(flush.isDone(), "the fast completion path must not skip the dead-reader sweep");
 
       invokeMaintenancePassWork(loop);
 
@@ -898,9 +1011,6 @@ public class MaintenanceEventLoopTest {
       memory.closeArenas();
     }
   }
-
-
-
 
   @Test(timeOut = 10_000L)
   public void concurrentFlushCannotLoseActorRetirementWatermark() throws Exception {
@@ -1012,7 +1122,7 @@ public class MaintenanceEventLoopTest {
             Long.MAX_VALUE);
     ExecutorService callers = Executors.newFixedThreadPool(12);
     try {
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       for (int round = 0; round < 40; round++) {
         CountDownLatch ready = new CountDownLatch(12);
         CountDownLatch start = new CountDownLatch(1);
@@ -1053,7 +1163,14 @@ public class MaintenanceEventLoopTest {
     RetirementJournal journal = new RetirementJournal(memory, 4);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), journal, Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            journal,
+            Long.MAX_VALUE);
     try {
       RetirementJournal.Lane fullLane = journal.lane(0);
       for (int index = 0; index < 2_048; index++) {
@@ -1068,7 +1185,7 @@ public class MaintenanceEventLoopTest {
       partialLane.write(reservation, 0L, 0L);
       partialLane.commit(reservation);
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       loop.flush().get(3L, TimeUnit.SECONDS);
     } finally {
       loop.stop();
@@ -1083,7 +1200,14 @@ public class MaintenanceEventLoopTest {
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), journal, Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            journal,
+            Long.MAX_VALUE);
     RetirementSegment.Reservation postFlush = new RetirementSegment.Reservation();
     try {
       RetirementJournal.Lane lane = journal.lane(0);
@@ -1098,7 +1222,7 @@ public class MaintenanceEventLoopTest {
       // uncommitted. It must not strand the already captured watermark.
       assertTrue(lane.reserve(postFlush));
       lane.write(postFlush, 0L, 0L);
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       flush.get(3L, TimeUnit.SECONDS);
       assertFalse(flush.isCompletedExceptionally());
 
@@ -1124,13 +1248,14 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
       CompletableFuture<Void> flush = loop.flush();
       long postFlushSequence = lifecycle.lane(0).reserve();
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       flush.get(3L, TimeUnit.SECONDS);
 
       assertTrue(flush.isDone());
@@ -1138,6 +1263,96 @@ public class MaintenanceEventLoopTest {
     } finally {
       loop.stop();
       loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void postCutCommittedRemovalDoesNotExpandFlush() throws Exception {
+    assertPostCutRemovalDoesNotExpandFlush(false);
+  }
+
+  @Test
+  public void postCutNewLaneRemovalDoesNotExpandFlush() throws Exception {
+    assertPostCutRemovalDoesNotExpandFlush(true);
+  }
+
+  private void assertPostCutRemovalDoesNotExpandFlush(boolean newLane) throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ReaderRegistry readers = newReaderRegistry(memory);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+    WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
+    loop.bindWriterLifecycleJournal(lifecycle);
+    WriterLifecycleLane before = lifecycle.createLane();
+    com.red.ohc.runtime.ReaderGuard guard =
+        new com.red.ohc.runtime.ReaderGuard(loop);
+    ThreadContext pinned = new ThreadContext(null);
+    guard.enter(pinned);
+    try {
+      CompletableFuture<Void> flush = loop.flush();
+      WriterLifecycleLane after = newLane ? lifecycle.createLane() : before;
+      Entry entry = EntryTestSupport.entry(memory, 0, 23, 0L);
+      entry.markDead();
+      long sequence = after.reserve();
+      after.writeRemoval(sequence, entry, 0L, 0L, 0L, null);
+      after.commit(sequence);
+      invokeMaintenancePass(loop);
+      assertTrue(flush.isDone(), "post-cut removal retirement must not pin an older flush");
+      assertEquals(
+          after.completedRecordsTotal(),
+          0L,
+          "post-cut committed records remain outside the active flush cut");
+    } finally {
+      guard.exit(pinned);
+      invokeMaintenancePass(loop);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 5_000L)
+  public void flushDoesNotExpandToANewLaneCreatedAfterItsCut() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
+    loop.bindWriterLifecycleJournal(lifecycle);
+    WriterLifecycleLane before = lifecycle.createLane();
+    long beforeSequence = before.reserve();
+    boolean committed = false;
+    CompletableFuture<Void> flush = loop.flush();
+    WriterLifecycleLane after = lifecycle.createLane();
+    long afterSequence = after.reserve();
+    try {
+      MaintenanceTestSupport.start(loop);
+      CompletableFuture<Void> actorObserved = new CompletableFuture<>();
+      assertTrue(
+          loop.submitActorTaskForTest(
+              () -> actorObserved.complete(null), actorObserved::completeExceptionally));
+      actorObserved.get(2L, TimeUnit.SECONDS);
+      assertFalse(flush.isDone(), "the captured uncommitted record must block completion");
+      before.writeRemoval(beforeSequence, null, 0L, 0L, 0L, null);
+      before.commit(beforeSequence);
+      committed = true;
+      flush.get(2L, TimeUnit.SECONDS);
+      assertFalse(
+          after.watermarkComplete(after.reservationWatermark()),
+          "the post-cut reservation must remain outside this flush boundary");
+    } finally {
+      after.cancel(afterSequence);
+      if (!committed) {
+        before.cancel(beforeSequence);
+      }
+      loop.stop();
+      loop.join(30_000L);
       memory.closeArenas();
     }
   }
@@ -1153,14 +1368,15 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     long preFlushSequence = -1L;
     try {
       loop.bindWriterLifecycleJournal(lifecycle);
       preFlushSequence = lifecycle.lane(0).reserve();
       CompletableFuture<Void> flush = loop.flush();
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       Thread.sleep(100L);
       assertFalse(flush.isDone(), "flush must wait for a lifecycle reservation in its watermark");
 
@@ -1183,7 +1399,14 @@ public class MaintenanceEventLoopTest {
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), journal, Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            journal,
+            Long.MAX_VALUE);
     try {
       RetirementJournal.Lane lane = journal.lane(0);
       RetirementSegment.Reservation first = new RetirementSegment.Reservation();
@@ -1205,9 +1428,6 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-
-
-
   @Test(timeOut = 5_000L)
   public void idleWorkerStopsWithoutWaitingForAWorkWindow() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
@@ -1218,9 +1438,10 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       waitUntilParked(loop);
 
       loop.stop();
@@ -1235,17 +1456,6 @@ public class MaintenanceEventLoopTest {
       memory.closeArenas();
     }
   }
-
-
-
-
-
-
-
-
-
-
-
 
   @Test
   public void removalNotificationObservesValueBeforeNativeRetirement() throws Exception {
@@ -1263,7 +1473,8 @@ public class MaintenanceEventLoopTest {
             (entry, address, cause) ->
                 observedPayload.set(
                     NativeMemory.getByte(ValueBlock.payloadAddress(address)) & 0xff),
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(8);
     long valueAllocation = ValueBlock.allocationLength(8);
     try {
@@ -1271,11 +1482,7 @@ public class MaintenanceEventLoopTest {
       long valueAddress = arena.allocate(valueAllocation);
       ValueBlock.initialize(valueAddress, TimerWheel.TICK_NANOS, 8, 0L);
       NativeMemory.putByte(ValueBlock.payloadAddress(valueAddress), (byte) 0x11);
-      Entry entry =
-          new Entry(
-              keyAddress,
-              8,
-              Entry.tagValueAddress(valueAddress, true));
+      Entry entry = new Entry(keyAddress, 8, Entry.tagValueAddress(valueAddress, true));
       entry.initializeNativeMetadata();
       data.put(entry, entry);
 
@@ -1300,8 +1507,8 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  @Test
-  public void actorTransportUsesOneGrowableQueueWithoutRescanState() throws Exception {
+  @Test(timeOut = 5_000L)
+  public void growableMutationTransportAcceptsMoreThanTheLegacyQueueCapacity() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1310,39 +1517,19 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
-    try {
-      Field queue = MaintenanceEventLoop.class.getDeclaredField("mailbox");
-      queue.setAccessible(true);
-      assertTrue(
-          queue.get(loop) instanceof MpscUnboundedArrayQueue,
-          "all actor messages must use a growable segmented queue");
-      assertMissingField(MaintenanceEventLoop.class, "rescanRequired");
-      assertMissingField(MaintenanceEventLoop.class, "rescanGeneration");
-      assertMissingField(MaintenanceEventLoop.class, "rescanIterator");
-    } finally {
-      memory.closeArenas();
-    }
-  }
-
-  @Test(timeOut = 5_000L)
-  public void growableMutationTransportAcceptsMoreThanTheLegacyQueueCapacity() throws Exception {
-    NativeMemory.Memory memory = new NativeMemory.Memory();
-    MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     List<Entry> entries = new ArrayList<>(4_097);
     try {
       for (int index = 0; index < 4_097; index++) {
         Entry entry = EntryTestSupport.entry(memory, 0, index + 1, 0L);
         entries.add(entry);
-        loop.publishMutation(entry, Entry.PENDING_ADD);
+        MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_ADD);
       }
-      assertEquals(loop.queueDepth(), 4_097L);
-      loop.start();
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 4_097L);
+      MaintenanceTestSupport.start(loop);
       loop.flush().join();
-      assertEquals(loop.queueDepth(), 0L);
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 0L);
       for (Entry entry : entries) {
         assertEquals(entry.pendingFlags(), 0);
       }
@@ -1375,8 +1562,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1_000L, Eviction.S3_FIFO,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1_000L,
+            Eviction.S3_FIFO,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 90, 0L);
     ((MaintenancePolicy) getField(loop, "policy")).add(entry);
     try {
@@ -1402,8 +1594,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 4_000L, Eviction.S3_FIFO,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            4_000L,
+            Eviction.S3_FIFO,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 91, 0L);
     MaintenancePolicy policy = (MaintenancePolicy) getField(loop, "policy");
     policy.add(entry);
@@ -1467,8 +1664,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       loop.registerReader(new ReaderSlot());
       Field requestedWork = MaintenanceEventLoop.class.getDeclaredField("requestedWork");
@@ -1485,7 +1687,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       Field workMutation = MaintenanceEventLoop.class.getDeclaredField("WORK_MUTATION");
       workMutation.setAccessible(true);
@@ -1505,7 +1713,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       AtomicInteger requestedWork = (AtomicInteger) getField(loop, "requestedWork");
       requestedWork.set(intField(MaintenanceEventLoop.class, "WORK_ACCESS_SCAN"));
@@ -1533,11 +1747,10 @@ public class MaintenanceEventLoopTest {
     for (int index = 0; index < 2_048; index++) {
       assertTrue(slot.access.offer(entry, 1L, 1L, Entry.POLICY_NONE));
     }
-    loop.start();
+    MaintenanceTestSupport.start(loop);
     try {
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
-      while ((!slot.access.isEmpty()
-              || loop.snapshot().maintenanceImmediateContinuationCount == 0L)
+      while ((!slot.access.isEmpty() || loop.snapshot().maintenanceImmediateContinuationCount == 0L)
           && System.nanoTime() < deadline) {
         Thread.yield();
       }
@@ -1562,7 +1775,8 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       ReaderSlot slot = new ReaderSlot();
       loop.registerReader(slot);
@@ -1585,7 +1799,8 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     ReaderSlot slot = new ReaderSlot();
     try {
       loop.registerReader(slot);
@@ -1651,9 +1866,7 @@ public class MaintenanceEventLoopTest {
       assertTrue((Boolean) probe.invoke(loop, entry));
       assertEquals(data.getCalls.get(), 1);
       assertEquals(
-          data.valuesCalls.get(),
-          0,
-          "map ownership confirmation must not scan every mapped value");
+          data.valuesCalls.get(), 0, "map ownership confirmation must not scan every mapped value");
     } finally {
       loop.stop();
       memory.closeArenas();
@@ -1665,7 +1878,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     ThreadContext context = new ThreadContext(null);
     try {
       loop.registerReader(context.slot);
@@ -1690,7 +1909,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     ThreadContext context = new ThreadContext(null);
     try {
       loop.registerReader(context.slot);
@@ -1721,9 +1946,10 @@ public class MaintenanceEventLoopTest {
             ticker,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     int constructorCalls = ticker.calls();
-    loop.start();
+    MaintenanceTestSupport.start(loop);
     try {
       waitUntilParked(loop);
       Thread.sleep(20L);
@@ -1796,8 +2022,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, TimerWheel.TICK_NANOS, 1, 0L);
-    Entry entry =
-        EntryTestSupport.entry(memory, 0, 94, 0L, Entry.tagValueAddress(value, true));
+    Entry entry = EntryTestSupport.entry(memory, 0, 94, 0L, Entry.tagValueAddress(value, true));
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1837,7 +2062,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            ticker,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       for (int pass = 0; pass < 17; pass++) {
         invokeMaintenancePass(loop);
@@ -1877,8 +2108,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
     ValueBlock.initialize(value, TimerWheel.TICK_NANOS, 1, 0L);
-    Entry entry =
-        EntryTestSupport.entry(memory, 0, 93, 0L, Entry.tagValueAddress(value, true));
+    Entry entry = EntryTestSupport.entry(memory, 0, 93, 0L, Entry.tagValueAddress(value, true));
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -1886,7 +2116,7 @@ public class MaintenanceEventLoopTest {
     try {
       invokeApplyEntry(loop, entry);
       monotonicCalls.set(0);
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       waitUntilParked(loop);
 
       assertTrue(
@@ -1896,12 +2126,11 @@ public class MaintenanceEventLoopTest {
           monotonicCalls.get() <= 12,
           "a future TTL must not drive tight maintenance passes: " + monotonicCalls.get());
       assertEquals(
-          wallCalls.get(),
-          1,
-          "TTL scheduling must not resample the wall clock after construction");
+          wallCalls.get(), 1, "TTL scheduling must not resample the wall clock after construction");
       assertTrue(
           data.containsKey(entry),
-          "physical TTL cleanup must not remove an entry before the semantic ticker reaches expiry");
+          "physical TTL cleanup must not remove an entry before the semantic ticker reaches"
+              + " expiry");
     } finally {
       loop.stop();
       loop.join(1_000L);
@@ -1944,21 +2173,22 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     Entry[] entries = new Entry[4];
     try {
       for (int i = 0; i < entries.length; i++) {
         entries[i] = EntryTestSupport.entry(memory, 0, i + 1, 0L);
-        loop.publishMutation(entries[i], Entry.PENDING_ADD);
+        MaintenanceTestSupport.publishMutation(loop, entries[i], Entry.PENDING_ADD);
         loop.requestMutationMaintenance();
       }
-      assertEquals(loop.queueDepth(), 4L);
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 4L);
       assertEquals(
           loop.snapshot().unhealthy,
           false,
           "a visible mutation must not make maintenance unhealthy");
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       loop.flush().join();
       for (Entry entry : entries) {
         assertEquals(entry.pendingFlags(), 0);
@@ -1979,7 +2209,7 @@ public class MaintenanceEventLoopTest {
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     ThreadContext context = new ThreadContext(null);
     loop.registerReader(context.slot);
-    loop.start();
+    MaintenanceTestSupport.start(loop);
     try {
       Entry entry = EntryTestSupport.entry(memory, 0, 91, 0L);
       for (int i = 0; i < 1_024; i++) {
@@ -2040,7 +2270,7 @@ public class MaintenanceEventLoopTest {
     }
     loop.registerReader(first);
     loop.registerReader(second);
-    loop.start();
+    MaintenanceTestSupport.start(loop);
     try {
       loop.flush().join();
       assertTrue(first.access.isEmpty(), "flush must drain the first reader ring");
@@ -2053,7 +2283,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void closeFinalDrainConsumesPublishedReaderRingData() throws Exception {
+  public void internalStopFinalDrainConsumesPublishedReaderRingData() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
@@ -2066,11 +2296,12 @@ public class MaintenanceEventLoopTest {
       assertTrue(slot.access.offer(entry, 1L, 0L, Entry.POLICY_NONE));
     }
     loop.registerReader(slot);
-    loop.start();
+    MaintenanceTestSupport.start(loop);
     try {
       loop.stop();
       loop.join(1_000L);
-      assertTrue(slot.access.isEmpty(), "close must final-drain already-published access data");
+      assertTrue(
+          slot.access.isEmpty(), "internal stop must final-drain already-published access data");
     } finally {
       memory.closeArenas();
     }
@@ -2096,9 +2327,10 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
-      loop.publishMutation(entry, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
       // This is the deterministic version of the interleaving: the actor has taken the
       // old transport item while a later writer has claimed the Entry but not yet made
       // its new pointer visible.
@@ -2127,9 +2359,10 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
-      loop.publishMutation(entry, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
       assertTrue(entry.claimWriter());
       // The writer publishes the current UPDATE after the old hint was queued, but before it
       // releases the entry. The actor then consumes that coalesced hint while the writer is
@@ -2139,7 +2372,7 @@ public class MaintenanceEventLoopTest {
       assertTrue(entry.isMutationRetryRequested());
 
       entry.finishWriter();
-      loop.enqueueMutationHint(entry, true);
+      MaintenanceTestSupport.enqueueMutationHint(loop, entry, true);
       assertEquals(invokeDrainMutations(loop, 1), 1);
       assertEquals(
           entry.appliedVersion(),
@@ -2177,16 +2410,16 @@ public class MaintenanceEventLoopTest {
             newReaderRegistry(memory),
             Long.MAX_VALUE);
     try {
-      loop.publishMutation(entry, Entry.PENDING_ADD);
-      assertEquals(loop.queueDepth(), 1L);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_ADD);
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 1L);
 
       assertTrue(entry.claimWriter());
       entry.currentValueAllocation(latestAllocation);
       entry.valueAddress = Entry.tagValueAddress(latestValue, true);
       entry.finishWriter();
-      loop.publishMutation(entry, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
       assertEquals(
-          loop.queueDepth(),
+          MaintenanceTestSupport.lifecycle(loop).queuedRecords(),
           1L,
           "an update coalesced into the queued hint must not allocate another lane record");
 
@@ -2198,7 +2431,7 @@ public class MaintenanceEventLoopTest {
       assertEquals(entry.policyByteWeight(), expectedBytes);
       assertEquals(loop.snapshot().ttlBacklog, 1L);
       assertEquals(entry.appliedVersion(), entry.mutationVersion());
-      assertEquals(loop.queueDepth(), 0L);
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 0L);
     } finally {
       loop.stop();
       memory.closeArenas();
@@ -2233,7 +2466,13 @@ public class MaintenanceEventLoopTest {
     data.put(entry, entry);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            data,
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     WriterLifecycleJournal journal = new WriterLifecycleJournal();
     WriterLifecycleLane lane = journal.createLane();
     loop.bindWriterLifecycleJournal(journal);
@@ -2258,7 +2497,7 @@ public class MaintenanceEventLoopTest {
       assertEquals(entry.policyByteWeight(), expected);
       assertEquals(entry.mutationVersion(), saturated ? 0L : version + 1L);
       assertEquals(entry.appliedVersion(), entry.mutationVersion());
-      assertEquals(loop.queueDepth(), 0L);
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 0L);
     } finally {
       if (entry.isWriterLocked()) {
         entry.finishWriter();
@@ -2278,12 +2517,13 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     WriterArena arena = memory.newWriterArena();
     Entry stale = EntryTestSupport.entry(arena, 0, 177, 0L);
     long allocation = stale.nativeKeyAllocationLength();
     try {
-      loop.publishMutation(stale, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.publishMutation(loop, stale, Entry.PENDING_UPDATE);
       assertTrue(stale.claimWriter());
       stale.markRetired();
       stale.finishWriter();
@@ -2300,8 +2540,7 @@ public class MaintenanceEventLoopTest {
 
         assertEquals(invokeDrainMutations(loop, 1), 1);
         assertEquals(
-            NativeMemory.getLong(
-                reused.nativeKeyAddress - Entry.NATIVE_METADATA_BYTES + 16L),
+            NativeMemory.getLong(reused.nativeKeyAddress - Entry.NATIVE_METADATA_BYTES + 16L),
             sentinel,
             "a retired queue item must not access a reused native metadata block");
       } finally {
@@ -2328,17 +2567,18 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
-      loop.publishMutation(entry, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
       assertTrue(entry.claimWriter());
       invokeProcessEntry(loop, entry);
       assertTrue(entry.isMutationRetryRequested());
 
       entry.valueAddress = Entry.tagValueAddress(value, true);
       entry.finishWriter();
-      loop.publishMutation(entry, Entry.PENDING_UPDATE);
-      loop.start();
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.start(loop);
       loop.flush().join();
 
       assertEquals(
@@ -2357,8 +2597,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void actorLeavesRetryMarkerBeforeTheConcurrentWriterPublishes()
-      throws Exception {
+  public void actorLeavesRetryMarkerBeforeTheConcurrentWriterPublishes() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
     long allocation = ValueBlock.allocationLength(1);
@@ -2373,7 +2612,8 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     CountDownLatch writerClaimed = new CountDownLatch(1);
     CountDownLatch allowPublication = new CountDownLatch(1);
     AtomicReference<Throwable> writerFailure = new AtomicReference<>();
@@ -2386,14 +2626,14 @@ public class MaintenanceEventLoopTest {
                 assertTrue(allowPublication.await(1L, TimeUnit.SECONDS));
                 entry.valueAddress = Entry.tagValueAddress(value, true);
                 entry.finishWriter();
-                loop.publishMutation(entry, Entry.PENDING_UPDATE);
+                MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
               } catch (Throwable failure) {
                 writerFailure.set(failure);
               }
             },
             "pending-publication-writer");
     try {
-      loop.publishMutation(entry, Entry.PENDING_UPDATE);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_UPDATE);
       writer.start();
       assertTrue(writerClaimed.await(1L, TimeUnit.SECONDS));
 
@@ -2408,7 +2648,7 @@ public class MaintenanceEventLoopTest {
       writer.join(1_000L);
       assertFalse(writer.isAlive(), "the writer did not publish its protected update");
       assertEquals(writerFailure.get(), null);
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       loop.flush().join();
 
       assertEquals(
@@ -2458,16 +2698,21 @@ public class MaintenanceEventLoopTest {
     data.put(two, two);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, new FrozenTicker(), logicalWeight, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            data,
+            memory,
+            new FrozenTicker(),
+            logicalWeight,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
-      loop.publishMutation(one, Entry.PENDING_ADD);
-      loop.publishMutation(two, Entry.PENDING_ADD);
+      MaintenanceTestSupport.publishMutation(loop, one, Entry.PENDING_ADD);
+      MaintenanceTestSupport.publishMutation(loop, two, Entry.PENDING_ADD);
 
-      invokeDrainMailboxTasks(loop, 2);
+      invokeDrainLifecycle(loop, 2);
 
       assertEquals(data.size(), 2, "logical capacity admission belongs to the writer path");
-      assertEquals(
-          ((MaintenancePolicy) getField(loop, "policy")).usedWeight(), logicalWeight * 2L);
+      assertEquals(((MaintenancePolicy) getField(loop, "policy")).usedWeight(), logicalWeight * 2L);
     } finally {
       loop.stop();
       loop.join(1_000L);
@@ -2530,7 +2775,13 @@ public class MaintenanceEventLoopTest {
     data.put(two, two);
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, new FrozenTicker(), 0L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            data,
+            memory,
+            new FrozenTicker(),
+            0L,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       invokeApplyEntry(loop, one);
       invokeApplyEntry(loop, two);
@@ -2549,7 +2800,13 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, new FrozenTicker(), 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            data,
+            memory,
+            new FrozenTicker(),
+            1L,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       invokeMaintenancePass(loop);
       assertEquals(data.size(), 0);
@@ -2564,7 +2821,13 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data, memory, Ticker.DEFAULT, 1 << 20, Eviction.S3_FIFO, newReaderRegistry(memory), Long.MAX_VALUE);
+            data,
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.S3_FIFO,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     long valueAllocation = ValueBlock.allocationLength(1);
     long valueAddress = memory.newWriterArena().allocate(valueAllocation);
     ValueBlock.initialize(valueAddress, 0L, 1, 0L);
@@ -2609,7 +2872,13 @@ public class MaintenanceEventLoopTest {
           };
       MaintenanceEventLoop loop =
           new MaintenanceEventLoop(
-              data, memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+              data,
+              memory,
+              Ticker.DEFAULT,
+              1 << 20,
+              Eviction.LRU,
+              newReaderRegistry(memory),
+              Long.MAX_VALUE);
       long allocation = ValueBlock.allocationLength(1);
       long weight =
           countBounded
@@ -2650,10 +2919,12 @@ public class MaintenanceEventLoopTest {
         Field quota = planType.getDeclaredField("capacityQuota");
         quota.setAccessible(true);
         quota.setInt(plan, 8);
-        Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainCapacityPressure", planType);
+        Method drain =
+            MaintenanceEventLoop.class.getDeclaredMethod("drainCapacityPressure", planType);
         drain.setAccessible(true);
 
-        assertEquals(drain.invoke(loop, plan), 1, "completed writer removals must stop excess eviction");
+        assertEquals(
+            drain.invoke(loop, plan), 1, "completed writer removals must stop excess eviction");
         assertEquals(data.size(), 2);
         assertEquals(admission.logicalCharge(), 2L * weight);
         assertFalse(admission.isOverTarget());
@@ -2669,7 +2940,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1L,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     LogicalAdmission admission = new LogicalAdmission(1L, false);
     assertTrue(admission.tryChargeDelta(2L));
     loop.bindLogicalAdmission(admission);
@@ -2691,7 +2968,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1L,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     Entry blocked = EntryTestSupport.entry(0, 201, 0L);
     Entry unrelated = EntryTestSupport.entry(0, 202, 0L);
     try {
@@ -2728,14 +3011,19 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, new FrozenTicker(), 1L, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            new FrozenTicker(),
+            1L,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     LogicalAdmission admission = new LogicalAdmission(1L, false);
     assertTrue(admission.tryChargeDelta(2L));
     loop.bindLogicalAdmission(admission);
     try {
       Class<?> workPlanType =
-          Class.forName(
-              "com.red.ohc.maintenance.MaintenanceEventLoop$WorkPlan");
+          Class.forName("com.red.ohc.maintenance.MaintenanceEventLoop$WorkPlan");
       java.lang.reflect.Constructor<?> constructor = workPlanType.getDeclaredConstructor();
       constructor.setAccessible(true);
       Object plan = constructor.newInstance();
@@ -2763,31 +3051,32 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-
   @Test
   public void minimumBudgetStillExpiresEntriesAndCompletesFlush() throws Exception {
     AtomicLong now = new AtomicLong();
-    Ticker ticker = new Ticker() {
-      @Override
-      public long nanos() {
-        return now.get();
-      }
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return now.get();
+          }
 
-      @Override
-      public long currentTimeMillis() {
-        return 0L;
-      }
-    };
+          @Override
+          public long currentTimeMillis() {
+            return 0L;
+          }
+        };
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ConcurrentHashMap<Entry, Entry> data = index();
-    MaintenanceEventLoop loop = new MaintenanceEventLoop(
-        data, memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            data, memory, ticker, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
     try {
       for (int index = 0; index < 2; index++) {
         long value = memory.newWriterArena().allocate(ValueBlock.allocationLength(1));
         ValueBlock.initialize(value, TimerWheel.TICK_NANOS, 1, 0L);
-        Entry entry = EntryTestSupport.entry(
-            memory, 0, index + 1, 0L, Entry.tagValueAddress(value, true));
+        Entry entry =
+            EntryTestSupport.entry(memory, 0, index + 1, 0L, Entry.tagValueAddress(value, true));
         data.put(entry, entry);
         invokeApplyEntry(loop, entry);
       }
@@ -2819,9 +3108,15 @@ public class MaintenanceEventLoopTest {
 
   private void assertResourceSweepContinuation(boolean blockedHead) throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
-    MaintenanceEventLoop loop = new MaintenanceEventLoop(
-        index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        newReaderRegistry(memory), Long.MAX_VALUE);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new FrozenTicker(),
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -2835,7 +3130,8 @@ public class MaintenanceEventLoopTest {
       resources.requestRetirement(first);
       resources.requestRetirement(second);
       assertEquals(resources.processRetirements(), 0);
-      assertFalse(invokeBooleanMethod(loop, "hasRunnableWork"),
+      assertFalse(
+          invokeBooleanMethod(loop, "hasRunnableWork"),
           "a completed sweep of blocked resources must allow the actor to sleep");
       if (!blockedHead) {
         consumeCancelledLifecycle(first, firstSequence);
@@ -2851,7 +3147,7 @@ public class MaintenanceEventLoopTest {
       assertEquals(resources.pooledCount(), blockedHead ? 1 : 2);
       // Resume through the real run loop: it must drain the resource-owned retirement work
       // from the pooled resources and park once the registry is quiet.
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
       while (!loop.isParked() && System.nanoTime() < deadline) {
         Thread.yield();
@@ -2875,22 +3171,28 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
-  public void lifecycleProgressRevisitsResourcesAlreadyCheckedByAPartialSweep() throws Exception {
+  public void actorConsumedLifecycleProgressRevisitsResourcesAlreadyCheckedByAPartialSweep()
+      throws Exception {
     assertLifecycleProgressRescansResources(false);
   }
 
   @Test
-  public void mailboxProgressRevisitsResourcesAlreadyCheckedByAPartialSweep() throws Exception {
+  public void lifecycleProgressRevisitsResourcesAlreadyCheckedByAPartialSweep() throws Exception {
     assertLifecycleProgressRescansResources(true);
   }
-
 
   @Test
   public void advisoryMaintenanceDoesNotReopenBlockedResourceSweep() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
-    MaintenanceEventLoop loop = new MaintenanceEventLoop(
-        index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        newReaderRegistry(memory), Long.MAX_VALUE);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new FrozenTicker(),
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -2931,11 +3233,17 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-  private void assertLifecycleProgressRescansResources(boolean mailboxOwned) throws Exception {
+  private void assertLifecycleProgressRescansResources(boolean actorConsumed) throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
-    MaintenanceEventLoop loop = new MaintenanceEventLoop(
-        index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU,
-        newReaderRegistry(memory), Long.MAX_VALUE);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            new FrozenTicker(),
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -2950,7 +3258,7 @@ public class MaintenanceEventLoopTest {
       resources.requestRetirement(second);
       assertEquals(resources.processRetirements(), 0);
       invokeMaintenancePass(loop);
-      if (mailboxOwned) {
+      if (actorConsumed) {
         loop.cancelWriterLifecycle(first.lifecycleLane(), firstSequence, true);
         invokeMaintenancePass(loop);
       } else {
@@ -2960,7 +3268,9 @@ public class MaintenanceEventLoopTest {
       for (int pass = 0; pass < 4 && invokeBooleanMethod(loop, "hasRunnableWork"); pass++) {
         invokeMaintenancePass(loop);
       }
-      assertEquals(resources.pooledCount(), 1,
+      assertEquals(
+          resources.pooledCount(),
+          1,
           "lifecycle progress must recheck a resource visited before its watermark completed");
       assertFalse(invokeBooleanMethod(loop, "hasRunnableWork"));
       consumeCancelledLifecycle(second, secondSequence);
@@ -2978,8 +3288,9 @@ public class MaintenanceEventLoopTest {
     ReaderSlot reader = new ReaderSlot();
     readers.register(reader);
     readers.beginOpForTest(reader, true);
-    MaintenanceEventLoop loop = new MaintenanceEventLoop(
-        index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, new FrozenTicker(), 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal();
     WriterResourceRegistry resources =
         new WriterResourceRegistry(memory, lifecycle, loop.retirementJournal());
@@ -3002,7 +3313,9 @@ public class MaintenanceEventLoopTest {
         invokeMaintenancePass(loop);
       }
       assertEquals(loop.retirementJournal().completedRecordsTotal(), 2L);
-      assertEquals(resources.pooledCount(), 2,
+      assertEquals(
+          resources.pooledCount(),
+          2,
           "SAFE reclaim must recheck all resources whose captured watermark completed");
       assertFalse(invokeBooleanMethod(loop, "hasRunnableWork"));
     } finally {
@@ -3019,19 +3332,22 @@ public class MaintenanceEventLoopTest {
     resource.lifecycleLane().release(record);
   }
 
-
   @Test
   public void advisoryQuotaIsNotCountedTwiceAcrossMaintenancePhases() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
       Class<?> workPlanType =
-          Class.forName(
-              "com.red.ohc.maintenance.MaintenanceEventLoop$WorkPlan");
-      java.lang.reflect.Constructor<?> workPlanConstructor =
-          workPlanType.getDeclaredConstructor();
+          Class.forName("com.red.ohc.maintenance.MaintenanceEventLoop$WorkPlan");
+      java.lang.reflect.Constructor<?> workPlanConstructor = workPlanType.getDeclaredConstructor();
       workPlanConstructor.setAccessible(true);
       Object plan = workPlanConstructor.newInstance();
       setBooleanField(plan, "access", true);
@@ -3040,8 +3356,7 @@ public class MaintenanceEventLoopTest {
       setBooleanField(plan, "readerLifecycle", true);
 
       Class<?> turnCutsType =
-          Class.forName(
-              "com.red.ohc.maintenance.MaintenanceEventLoop$TurnCuts");
+          Class.forName("com.red.ohc.maintenance.MaintenanceEventLoop$TurnCuts");
       java.lang.reflect.Constructor<?> constructor = turnCutsType.getDeclaredConstructor(int.class);
       constructor.setAccessible(true);
       Object turn = constructor.newInstance(0);
@@ -3095,8 +3410,9 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
-    loop.start();
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
+    MaintenanceTestSupport.start(loop);
     try {
       long deadline = System.nanoTime() + 1_000_000_000L;
       while (!loop.isParked() && System.nanoTime() < deadline) {
@@ -3120,8 +3436,9 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
-    loop.start();
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
+    MaintenanceTestSupport.start(loop);
     try {
       loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
       long deadline = System.nanoTime() + 1_000_000_000L;
@@ -3196,12 +3513,7 @@ public class MaintenanceEventLoopTest {
     ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            data,
-            memory,
-            Ticker.DEFAULT,
-            16L << 20,
-            Eviction.LRU,
-            readers, Long.MAX_VALUE);
+            data, memory, Ticker.DEFAULT, 16L << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     try {
       Entry entry = EntryTestSupport.entry(memory, 0, 127, 8L);
       data.put(entry, EntryTestSupport.entry(memory, 0, 128, 0L));
@@ -3214,8 +3526,6 @@ public class MaintenanceEventLoopTest {
     }
   }
 
-
-
   @Test(timeOut = 5_000L)
   public void flushWaitsForRetirementReclaimWhileAReaderIsActive() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
@@ -3227,7 +3537,7 @@ public class MaintenanceEventLoopTest {
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     try {
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       retireOne(loop, memory);
       waitForRetiredEntries(loop, 1);
 
@@ -3294,7 +3604,8 @@ public class MaintenanceEventLoopTest {
     readers.register(activeReader);
     readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+        new MaintenanceEventLoop(
+            index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     try {
       retireOne(loop, memory);
       invokeMaintenancePass(loop);
@@ -3305,7 +3616,8 @@ public class MaintenanceEventLoopTest {
       assertEquals(
           getLongField(loop, "reclaimRetryNanos"),
           3_000_000L,
-          "the first blocked QSBR reclaim must wait one maintenance window before rescanning readers");
+          "the first blocked QSBR reclaim must wait one maintenance window before rescanning"
+              + " readers");
     } finally {
       readers.endOpForTest(activeReader);
       memory.closeArenas();
@@ -3330,12 +3642,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+        new MaintenanceEventLoop(
+            index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext pinned = new ThreadContext(null);
     AtomicInteger requestedWork = (AtomicInteger) getField(loop, "requestedWork");
     try {
-      assertTrue(guard.enter(pinned));
+      guard.enter(pinned);
 
       retireOne(loop, memory);
       invokeMaintenancePass(loop);
@@ -3345,7 +3658,7 @@ public class MaintenanceEventLoopTest {
 
       for (int index = 0; index < 64; index++) {
         ThreadContext newer = new ThreadContext(null);
-        assertTrue(guard.enter(newer));
+        guard.enter(newer);
         assertTrue(
             (readers.readerSequence(newer.slot) & 1L) != 0L,
             "each newer reader publishes its own odd sequence word");
@@ -3392,14 +3705,15 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
     MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+        new MaintenanceEventLoop(
+            index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
     ReaderGuard guard = new ReaderGuard(loop);
     ThreadContext pinned = new ThreadContext(null);
     guardReference.set(guard);
     contextReference.set(pinned);
     AtomicInteger requestedWork = (AtomicInteger) getField(loop, "requestedWork");
     try {
-      assertTrue(guard.enter(pinned));
+      guard.enter(pinned);
       retireOne(loop, memory);
       invokeMaintenancePass(loop);
       assertTrue((Boolean) getField(loop, "reclaimBlocked"));
@@ -3408,7 +3722,7 @@ public class MaintenanceEventLoopTest {
       releaseOnReclaimSample.set(true);
       setBooleanField(loop, "monotonicSampledThisPass", false);
       invokeMaintenancePass(loop);
-      invokeDrainMailboxTasks(loop, 1);
+      invokeDrainLifecycle(loop, 1);
       assertTrue(awaitCompletedRecords(loop.retirementJournal(), 1L, 3_000L));
       assertEquals(loop.retiredEntries(), 0);
       // The direct compatibility pass can leave an advisory retirement bit published by the
@@ -3424,10 +3738,17 @@ public class MaintenanceEventLoopTest {
     }
   }
 
+  @Test(timeOut = 5_000L)
+  public void terminalFailureRejectsPendingTestTasksExactlyOnce() throws Exception {
+    assertPendingTasksRejected(true);
+  }
 
+  @Test(timeOut = 5_000L)
+  public void internalStopRejectsPendingTestTasksExactlyOnce() throws Exception {
+    assertPendingTasksRejected(false);
+  }
 
-  @Test(timeOut = 2_000L)
-  public void terminalFailureCloseClearsPendingMutationQueues() throws Exception {
+  private void assertPendingTasksRejected(boolean fail) throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
@@ -3436,17 +3757,65 @@ public class MaintenanceEventLoopTest {
             Ticker.DEFAULT,
             1 << 20,
             Eviction.LRU,
-            newReaderRegistry(memory), Long.MAX_VALUE);
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
+    AtomicInteger executed = new AtomicInteger();
+    AtomicInteger rejected = new AtomicInteger();
+    CountDownLatch rejectionDone = new CountDownLatch(fail ? 3 : 2);
+    java.util.function.Consumer<Throwable> reject =
+        failure -> {
+          rejected.incrementAndGet();
+          rejectionDone.countDown();
+        };
+    try {
+      assertTrue(
+          loop.submitActorTaskForTest(
+              () -> {
+                executed.incrementAndGet();
+                if (fail) {
+                  throw new IllegalStateException("test task failure");
+                }
+                loop.stop();
+              },
+              reject));
+      assertTrue(loop.submitActorTaskForTest(executed::incrementAndGet, reject));
+      assertTrue(loop.submitActorTaskForTest(executed::incrementAndGet, reject));
+      MaintenanceTestSupport.start(loop);
+      assertTrue(rejectionDone.await(2L, TimeUnit.SECONDS));
+      loop.stop();
+      loop.join(30_000L);
+      assertFalse(loop.isAlive());
+      assertEquals(executed.get(), 1);
+      assertEquals(rejected.get(), fail ? 3 : 2);
+    } finally {
+      loop.stop();
+      loop.join(30_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void terminalFailureStopClearsPendingLifecycleRecords() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 128, 0L);
     try {
-      loop.publishMutation(entry, Entry.PENDING_ADD);
+      MaintenanceTestSupport.publishMutation(loop, entry, Entry.PENDING_ADD);
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       loop.recordTerminalFailure(new IllegalStateException("maintenance boom"));
       loop.stop();
       loop.join(1_000L);
 
-      assertTrue(((MpscUnboundedArrayQueue<?>) getField(loop, "mailbox")).isEmpty());
+      assertEquals(MaintenanceTestSupport.lifecycle(loop).queuedRecords(), 0L);
     } finally {
       if (loop.isAlive()) {
         loop.stop();
@@ -3457,7 +3826,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 2_000L)
-  public void eachRetirementCutAdvancesTheReaderEpoch() throws Exception {
+  public void eachRetirementCutSealsItsRecords() throws Exception {
     Ticker ticker = new FrozenTicker();
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
@@ -3465,21 +3834,21 @@ public class MaintenanceEventLoopTest {
     readers.register(activeReader);
     readers.beginOpForTest(activeReader, true);
     MaintenanceEventLoop loop =
-        new MaintenanceEventLoop(index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
-    loop.start();
+        new MaintenanceEventLoop(
+            index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+    MaintenanceTestSupport.start(loop);
     try {
       retireOne(loop, memory);
-      waitForEpoch(loop, 2L);
-      long firstEpoch = loop.epoch();
+      waitForRetiredEntries(loop, 1);
+      long firstSealRecords = loop.retirementJournal().sealRecordsTotal();
       waitForRetiredEntries(loop, 1);
 
       retireOne(loop, memory);
       waitForRetiredEntries(loop, 2);
-      waitForEpoch(loop, firstEpoch + 1L);
 
       assertTrue(
-          loop.epoch() > firstEpoch,
-          "each completed retirement cut must advance the reader epoch immediately");
+          loop.retirementJournal().sealRecordsTotal() > firstSealRecords,
+          "each retirement cut must seal its records");
     } finally {
       readers.endOpForTest(activeReader);
       loop.stop();
@@ -3506,7 +3875,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, ticker, 1 << 20, Eviction.S3_FIFO, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            ticker,
+            1 << 20,
+            Eviction.S3_FIFO,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     RetirementJournal journal = loop.retirementJournal();
     try {
       for (int record = 0; record < 33 * RetirementSegment.CAPACITY; record++) {
@@ -3548,7 +3923,7 @@ public class MaintenanceEventLoopTest {
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
             index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
-    loop.start();
+    MaintenanceTestSupport.start(loop);
     try {
       retireOne(loop, memory);
       waitForRetiredEntries(loop, 1);
@@ -3579,7 +3954,7 @@ public class MaintenanceEventLoopTest {
     try {
       retireOne(loop, memory);
 
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       waitForRetiredEntries(loop, 1);
       readers.armReaderQuiescence(new long[readers.slotCapacity()]);
       readers.endOpForTest(activeReader);
@@ -3599,7 +3974,13 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 16L << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            16L << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     long allocation = ValueBlock.allocationLength(1);
     int recordCount = 2_048;
     try {
@@ -3608,7 +3989,7 @@ public class MaintenanceEventLoopTest {
         ValueBlock.initialize(address, 0L, 1, 0L);
         loop.retirementJournal().append(address, allocation);
       }
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
       while (loop.retirementQueueDepth() != 0L && System.nanoTime() < deadline) {
         Thread.sleep(1L);
@@ -3635,9 +4016,15 @@ public class MaintenanceEventLoopTest {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, newReaderRegistry(memory), Long.MAX_VALUE);
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
     try {
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       waitUntilParked(loop);
 
       long allocation = ValueBlock.allocationLength(1);
@@ -3661,8 +4048,7 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test(timeOut = 5_000L)
-  public void firstPartialWriterReservationWakesTheIdleGateWithoutAReadyHint()
-      throws Exception {
+  public void firstPartialWriterReservationWakesTheIdleGateWithoutAReadyHint() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory, 1);
     MaintenanceEventLoop loop =
@@ -3677,7 +4063,7 @@ public class MaintenanceEventLoopTest {
             Long.MAX_VALUE);
     RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
     try {
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       waitUntilParked(loop);
 
       long allocation = ValueBlock.allocationLength(1);
@@ -3731,15 +4117,6 @@ public class MaintenanceEventLoopTest {
     loop.retirementJournal().append(value, allocation);
   }
 
-  private static void waitForEpoch(MaintenanceEventLoop loop, long expected)
-      throws InterruptedException {
-    long deadline = System.nanoTime() + 1_000_000_000L;
-    while (loop.epoch() < expected && System.nanoTime() < deadline) {
-      Thread.yield();
-    }
-    assertTrue(loop.epoch() >= expected, "maintenance actor did not seal retirement");
-  }
-
   private static void waitForRetiredEntries(MaintenanceEventLoop loop, int expected) {
     RetirementJournal journal = loop.retirementJournal();
     long deadline = System.nanoTime() + 1_000_000_000L;
@@ -3748,7 +4125,8 @@ public class MaintenanceEventLoopTest {
     while (journal.unsafeRecords() < expected && System.nanoTime() < deadline) {
       Thread.yield();
     }
-    assertTrue(journal.unsafeRecords() >= expected, "maintenance actor did not seal expected records");
+    assertTrue(
+        journal.unsafeRecords() >= expected, "maintenance actor did not seal expected records");
     assertTrue(
         loop.retiredEntries() >= expected, "maintenance actor did not retain expected records");
   }
@@ -3906,6 +4284,7 @@ public class MaintenanceEventLoopTest {
   }
 
   private static int invokeMaintenancePassWork(MaintenanceEventLoop loop) throws Exception {
+    MaintenanceTestSupport.lifecycle(loop);
     Method method = MaintenanceEventLoop.class.getDeclaredMethod("maintenancePass");
     method.setAccessible(true);
     return (Integer) method.invoke(loop);
@@ -3929,18 +4308,22 @@ public class MaintenanceEventLoopTest {
     return future.isCompletedExceptionally();
   }
 
-  private static int invokeDrainMailboxTasks(MaintenanceEventLoop loop, int limit)
-      throws Exception {
+  private static int invokeDrainLifecycle(MaintenanceEventLoop loop, int limit) throws Exception {
+    WriterLifecycleJournal journal = MaintenanceTestSupport.lifecycle(loop);
     Method method =
-        MaintenanceEventLoop.class.getDeclaredMethod("drainMailbox", int.class);
+        MaintenanceEventLoop.class.getDeclaredMethod(
+            "drainWriterLifecycleJournal", long[].class, int.class);
     method.setAccessible(true);
-    return (Integer) method.invoke(loop, limit);
+    return (Integer) method.invoke(loop, journal.captureWatermark(), limit);
   }
 
   private static int invokeDrainMutations(MaintenanceEventLoop loop, int limit) throws Exception {
-    Method method = MaintenanceEventLoop.class.getDeclaredMethod("drainMailbox", int.class);
+    WriterLifecycleJournal journal = MaintenanceTestSupport.lifecycle(loop);
+    Method method =
+        MaintenanceEventLoop.class.getDeclaredMethod(
+            "drainWriterLifecycleJournal", long[].class, int.class);
     method.setAccessible(true);
-    return (Integer) method.invoke(loop, limit);
+    return (Integer) method.invoke(loop, journal.captureWatermark(), limit);
   }
 
   private static boolean invokeBooleanMethod(Object target, String name) throws Exception {

@@ -59,8 +59,13 @@ public final class ReadyPageTrimTest {
       ReaderRegistry readers = new ReaderRegistry(memory);
       MaintenanceEventLoop loop =
           new MaintenanceEventLoop(
-              new ConcurrentHashMap<>(), memory, Ticker.DEFAULT, 1 << 10,
-              Eviction.LRU, readers, Long.MAX_VALUE);
+              new ConcurrentHashMap<>(),
+              memory,
+              Ticker.DEFAULT,
+              1 << 10,
+              Eviction.LRU,
+              readers,
+              Long.MAX_VALUE);
       loop.bindLogicalAdmission(new LogicalAdmission(1 << 10, false));
       WriterArena arena = memory.newWriterArena();
       long first = arena.allocate(32_700L);
@@ -69,8 +74,7 @@ public final class ReadyPageTrimTest {
       memory.releaseEntry(first, 32_700L);
       assertEquals(memory.pageReadyCount(), 1L);
 
-      Method trim =
-          MaintenanceEventLoop.class.getDeclaredMethod("trimReadyPagesWhenOverCapacity");
+      Method trim = MaintenanceEventLoop.class.getDeclaredMethod("trimReadyPagesWhenOverCapacity");
       trim.setAccessible(true);
       trim.invoke(loop);
 
@@ -79,7 +83,7 @@ public final class ReadyPageTrimTest {
 
       loop.stop();
       if (loop.thread().getState() == Thread.State.NEW) {
-        loop.start();
+        MaintenanceTestSupport.start(loop);
       }
       loop.join(2_000L);
     } finally {
@@ -96,8 +100,13 @@ public final class ReadyPageTrimTest {
       ReaderRegistry readers = new ReaderRegistry(memory);
       loop =
           new MaintenanceEventLoop(
-              new ConcurrentHashMap<>(), memory, Ticker.DEFAULT, capacity,
-              Eviction.LRU, readers, Long.MAX_VALUE);
+              new ConcurrentHashMap<>(),
+              memory,
+              Ticker.DEFAULT,
+              capacity,
+              Eviction.LRU,
+              readers,
+              Long.MAX_VALUE);
       loop.bindLogicalAdmission(new LogicalAdmission(capacity, false));
       arena = memory.newWriterArena();
       long first = arena.allocate(32_700L);
@@ -117,7 +126,7 @@ public final class ReadyPageTrimTest {
     public void close() throws Exception {
       loop.stop();
       if (loop.thread().getState() == Thread.State.NEW) {
-        loop.start();
+        MaintenanceTestSupport.start(loop);
       }
       loop.join(2_000L);
     }

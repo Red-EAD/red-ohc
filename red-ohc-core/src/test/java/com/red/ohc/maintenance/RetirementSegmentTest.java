@@ -86,7 +86,7 @@ public final class RetirementSegmentTest {
           "an unpublished reservation must keep recycle from resetting the native columns");
 
       segment.cancelReserved(slot);
-      assertTrue(segment.seal(1L));
+      assertTrue(segment.seal());
       assertTrue(segment.tryClaimSegment());
       segment.finishSegmentClaim();
       assertTrue(segment.tryBeginRecycle());
@@ -124,7 +124,7 @@ public final class RetirementSegmentTest {
       segment.commitReserved(firstSlot);
       segment.closeForSnapshot();
       assertTrue(segment.isComplete());
-      assertTrue(segment.seal(1L));
+      assertTrue(segment.seal());
       assertTrue(segment.tryClaimSegment());
       segment.finishSegmentClaim();
 
@@ -164,8 +164,7 @@ public final class RetirementSegmentTest {
             new Thread(
                 () -> {
                   try {
-                    RetirementSegment.Reservation reservation =
-                        new RetirementSegment.Reservation();
+                    RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
                     start.await();
                     for (int index = 0; index < recordsPerWriter; index++) {
                       assertTrue(lane.reserve(reservation));
@@ -189,7 +188,7 @@ public final class RetirementSegmentTest {
 
       int records = writers * recordsPerWriter;
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), records);
+      assertEquals(journal.sealReadySegments(), records);
       assertEquals(
           journal.publishSafe(true, true),
           (records + RetirementSegment.CAPACITY - 1) / RetirementSegment.CAPACITY);
@@ -276,7 +275,7 @@ public final class RetirementSegmentTest {
   private static void finishEmptySegment(RetirementSegment segment) {
     assertEquals(segment.closeForSnapshot(), 0);
     assertTrue(segment.isComplete());
-    assertTrue(segment.seal(1L));
+    assertTrue(segment.seal());
     assertTrue(segment.tryClaimSegment());
     segment.finishSegmentClaim();
   }
@@ -291,7 +290,7 @@ public final class RetirementSegmentTest {
         journal.append(0L, 0L);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), records);
+      assertEquals(journal.sealReadySegments(), records);
       journal.publishSafe(true, true);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
 
@@ -300,8 +299,7 @@ public final class RetirementSegmentTest {
       Object tracking = trackingField.get(journal);
       assertTrue(tracking instanceof Set, "close tracking must release trimmed descriptors");
       assertEquals(
-          ((Set<?>) tracking).size(),
-          journal.allocatedSegments() - journal.trimmedSegments());
+          ((Set<?>) tracking).size(), journal.allocatedSegments() - journal.trimmedSegments());
     } finally {
       journal.close();
       memory.closeArenas();
@@ -321,7 +319,7 @@ public final class RetirementSegmentTest {
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
 
-      assertEquals(journal.sealReadySegments(7L), 2);
+      assertEquals(journal.sealReadySegments(), 2);
       assertEquals(journal.publishSafe(true, true), 2);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 2);
       assertEquals(journal.queuedRecords(), 0L);
@@ -341,7 +339,7 @@ public final class RetirementSegmentTest {
     try {
       journal.append(entry, allocation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(3L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.unsafeRecords(), 1L);
       assertEquals(journal.unsafeBytes(), WriterArena.allocationWeight(allocation));
       assertEquals(journal.safeRecords(), 0L);
@@ -379,7 +377,7 @@ public final class RetirementSegmentTest {
       }
 
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), count);
+      assertEquals(journal.sealReadySegments(), count);
       assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, count);
       assertEquals(journal.queuedRecords(), 0L);
@@ -414,7 +412,7 @@ public final class RetirementSegmentTest {
       journal.append(pooledEntry, pooledAllocation);
       journal.append(directEntry, directAllocation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 2);
+      assertEquals(journal.sealReadySegments(), 2);
       assertEquals(journal.publishSafe(true, true), 1);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, 2);
       pooledEntry = 0L;
@@ -450,7 +448,7 @@ public final class RetirementSegmentTest {
       segment.writeReserved(secondSlot, second, allocation);
       segment.commitReserved(secondSlot, allocation, false);
       assertEquals(segment.closeForSnapshot(), 2);
-      assertTrue(segment.seal(1L));
+      assertTrue(segment.seal());
       assertTrue(segment.tryClaimSegment());
 
       ThreadContext context = new ThreadContext(null);
@@ -500,7 +498,7 @@ public final class RetirementSegmentTest {
       journal.append(first, allocation);
       journal.append(second, allocation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 2);
+      assertEquals(journal.sealReadySegments(), 2);
       assertEquals(journal.publishSafe(true, true), 1);
 
       try {
@@ -551,7 +549,7 @@ public final class RetirementSegmentTest {
     try {
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(7L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.reclaimActorResult(readers, Integer.MAX_VALUE).records, 0);
       assertEquals(journal.queuedRecords(), 1L);
       assertFalse(journal.hasSafeSegments());
@@ -579,7 +577,7 @@ public final class RetirementSegmentTest {
     try {
       journal.append(0L, 0L);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(7L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       journal.finishReadyDrains();
 
       assertTrue(journal.hasSealedSegments());
@@ -606,7 +604,7 @@ public final class RetirementSegmentTest {
       lane.write(reservation, 0L, 0L);
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.publishSafe(true, true), 1);
       journal.finishReadyDrains();
 
@@ -665,7 +663,7 @@ public final class RetirementSegmentTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), records);
+      assertEquals(journal.sealReadySegments(), records);
       journal.publishSafe(true, true);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
       assertEquals(journal.queuedRecords(), 0L);
@@ -693,7 +691,7 @@ public final class RetirementSegmentTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), records);
+      assertEquals(journal.sealReadySegments(), records);
       assertEquals(journal.publishSafe(true, true), records / RetirementSegment.CAPACITY + 1);
       assertEquals(journal.reclaimActorResult(memory, Integer.MAX_VALUE).records, records);
       assertEquals(journal.publishedRecordsTotal(), records);
@@ -718,8 +716,7 @@ public final class RetirementSegmentTest {
             () -> {
               try {
                 RetirementJournal.Lane lane = journal.lane(0);
-                RetirementSegment.Reservation reservation =
-                    new RetirementSegment.Reservation();
+                RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
                 start.await();
                 for (int index = 0; index < records; index++) {
                   assertTrue(lane.reserve(reservation));
@@ -740,7 +737,7 @@ public final class RetirementSegmentTest {
                 long epoch = 1L;
                 while (writing.get() || journal.queuedRecords() != 0L) {
                   journal.cutAllProducersAtWatermark();
-                  journal.sealReadySegments(epoch++);
+                  journal.sealReadySegments();
                   journal.publishSafe(true, true);
                   journal.reclaimActorResult(memory, Integer.MAX_VALUE);
                   journal.finishReadyDrains();
@@ -791,8 +788,7 @@ public final class RetirementSegmentTest {
             () -> {
               try {
                 RetirementJournal.Lane lane = journal.lane(1);
-                RetirementSegment.Reservation reservation =
-                    new RetirementSegment.Reservation();
+                RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
                 start.await();
                 for (int index = 0; index < records; index++) {
                   assertTrue(lane.reserve(reservation));
@@ -814,7 +810,7 @@ public final class RetirementSegmentTest {
                 long epoch = 1L;
                 while (writing.get() || journal.queuedRecords() != 0L) {
                   journal.cutAllProducersAtWatermark();
-                  journal.sealReadySegments(epoch++);
+                  journal.sealReadySegments();
                   journal.publishSafe(true, true);
                   journal.reclaimActorResult(memory, Integer.MAX_VALUE);
                   journal.finishReadyDrains();
@@ -866,8 +862,7 @@ public final class RetirementSegmentTest {
             () -> {
               try {
                 RetirementJournal.Lane lane = journal.lane(1);
-                RetirementSegment.Reservation reservation =
-                    new RetirementSegment.Reservation();
+                RetirementSegment.Reservation reservation = new RetirementSegment.Reservation();
                 start.await();
                 for (int index = 0; index < records; index++) {
                   assertTrue(lane.reserve(reservation));
@@ -889,10 +884,9 @@ public final class RetirementSegmentTest {
                 long epoch = 1L;
                 while (writing.get() || journal.queuedRecords() != 0L) {
                   journal.cutAllProducersAtWatermark();
-                  journal.sealReadySegments(epoch++);
+                  journal.sealReadySegments();
                   journal.publishSafe(true, true);
-                  while (journal.reclaimActorSafeBatchResult(memory, 1).records
-                      != 0) {
+                  while (journal.reclaimActorSafeBatchResult(memory, 1).records != 0) {
                     // Drain all segments that became SAFE in this turn.
                   }
                   journal.finishReadyDrains();
@@ -940,7 +934,7 @@ public final class RetirementSegmentTest {
         journal.append(0L, 0L);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 4 * RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), 4 * RetirementSegment.CAPACITY);
       journal.publishSafe(true, true);
 
       RetirementJournal.ReclaimResult result =
@@ -958,13 +952,20 @@ public final class RetirementSegmentTest {
       String who, Thread writer, Thread actor, RetirementJournal journal) {
     StringBuilder report = new StringBuilder(who).append(" did not finish; ");
     report
-        .append("queued=").append(journal.queuedRecords())
-        .append(" published=").append(journal.publishedRecordsTotal())
-        .append(" completed=").append(journal.completedRecordsTotal())
-        .append(" openProducer=").append(journal.hasOpenProducerRecords())
-        .append(" sealed=").append(journal.hasSealedSegments())
-        .append(" safe=").append(journal.hasSafeSegments())
-        .append(" readyHint=").append(journal.hasReadyHint());
+        .append("queued=")
+        .append(journal.queuedRecords())
+        .append(" published=")
+        .append(journal.publishedRecordsTotal())
+        .append(" completed=")
+        .append(journal.completedRecordsTotal())
+        .append(" openProducer=")
+        .append(journal.hasOpenProducerRecords())
+        .append(" sealed=")
+        .append(journal.hasSealedSegments())
+        .append(" safe=")
+        .append(journal.hasSafeSegments())
+        .append(" readyHint=")
+        .append(journal.hasReadyHint());
     appendStack(report, writer);
     appendStack(report, actor);
     return report.toString();
@@ -976,5 +977,4 @@ public final class RetirementSegmentTest {
       report.append("\n    ").append(frame);
     }
   }
-
 }

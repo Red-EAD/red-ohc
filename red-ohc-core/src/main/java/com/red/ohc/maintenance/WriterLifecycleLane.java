@@ -17,8 +17,10 @@ import com.red.ohc.index.Entry;
 public final class WriterLifecycleLane {
   public static final int REMOVE = 1;
   public static final int MUTATION = 2;
+
   /** A mutation record whose primitive seed could not be tied to the published version. */
   public static final long UNSEEDED_MUTATION_VERSION = Long.MIN_VALUE;
+
   private static final long EMPTY = Long.MIN_VALUE;
 
   /**
@@ -32,8 +34,10 @@ public final class WriterLifecycleLane {
   private final long segmentMask;
   private final SegmentPool segmentPool;
   private final AtomicBoolean readySignalled = new AtomicBoolean();
+
   /** Bound by the owning journal before the lane becomes visible to producers. */
   private WriterLifecycleJournal journal;
+
   private int laneIndex;
 
   private volatile long producerSequence;
@@ -43,20 +47,15 @@ public final class WriterLifecycleLane {
   private volatile long headOfLineStopCount;
   private volatile Runnable readySignal;
   private volatile Consumer<Throwable> readySignalFailure;
-  private final Runnable readinessChanged;
   private Segment producerSegment;
   private Segment consumerSegment;
   private int consumerIndex;
 
   public WriterLifecycleLane(int segmentCapacity) {
-    this(segmentCapacity, new SegmentPool(segmentCapacity), null);
+    this(segmentCapacity, new SegmentPool(segmentCapacity));
   }
 
   WriterLifecycleLane(int segmentCapacity, SegmentPool segmentPool) {
-    this(segmentCapacity, segmentPool, null);
-  }
-
-  WriterLifecycleLane(int segmentCapacity, SegmentPool segmentPool, Runnable readinessChanged) {
     if (Integer.bitCount(segmentCapacity) != 1 || segmentCapacity < 2) {
       throw new IllegalArgumentException("segmentCapacity must be a power of two >= 2");
     }
@@ -66,7 +65,6 @@ public final class WriterLifecycleLane {
     this.segmentCapacity = segmentCapacity;
     this.segmentMask = segmentCapacity - 1L;
     this.segmentPool = segmentPool;
-    this.readinessChanged = readinessChanged;
     Segment initial = new Segment(this, segmentCapacity, 0L);
     producerSegment = initial;
     consumerSegment = initial;
@@ -100,11 +98,7 @@ public final class WriterLifecycleLane {
   }
 
   public void writeMutation(
-      long sequence,
-      Entry entry,
-      int keyHash,
-      long valueAllocation,
-      long mutationVersion) {
+      long sequence, Entry entry, int keyHash, long valueAllocation, long mutationVersion) {
     Segment segment = producerSegmentFor(sequence);
     int index = (int) (sequence & segmentMask);
     segment.entries[index] = entry;
@@ -250,7 +244,6 @@ public final class WriterLifecycleLane {
       if (journal != null) {
         journal.readyLaneCleared();
       }
-      notifyReadinessChanged();
     }
     if (hasHeadCommitted()) {
       signalReady();
@@ -271,7 +264,6 @@ public final class WriterLifecycleLane {
       if (journal != null) {
         journal.readyLaneCleared();
       }
-      notifyReadinessChanged();
     }
     if (!hasHeadCommitted()) {
       return false;
@@ -367,7 +359,6 @@ public final class WriterLifecycleLane {
         return;
       }
     }
-    notifyReadinessChanged();
     Runnable signal = readySignal;
     if (signal != null) {
       try {
@@ -387,13 +378,6 @@ public final class WriterLifecycleLane {
         // the same sequence and double-publish it; a bound failure handler is responsible for
         // forcing the actor's terminal/unpark path.
       }
-    }
-  }
-
-  private void notifyReadinessChanged() {
-    Runnable callback = readinessChanged;
-    if (callback != null) {
-      callback.run();
     }
   }
 

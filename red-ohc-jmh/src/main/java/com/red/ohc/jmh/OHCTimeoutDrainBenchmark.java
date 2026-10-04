@@ -40,7 +40,6 @@ public class OHCTimeoutDrainBenchmark {
   private static final long TTL_MILLIS = 64L;
   private static final long EXPIRED_MILLIS = TTL_MILLIS * 2L;
 
-
   @Param({"1000", "10000"})
   public int entries;
 
@@ -68,24 +67,31 @@ public class OHCTimeoutDrainBenchmark {
 
   @Setup(Level.Invocation)
   public void scheduleExpiryStorm() {
-    ticker = new MutableTicker();
-    long capacity = (long) entries * (keyBytes + valueBytes) * 2L;
-    cache =
-        (OffHeapCache<byte[], byte[]>)
-            OHCacheBuilder.<byte[], byte[]>newBuilder()
-                .capacity(capacity)
-                .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.byteArraySerializer)
-                .eviction(Eviction.S3_FIFO)
-                .ticker(ticker)
-                .defaultTTLmillis(TTL_MILLIS)
-                .build();
-    for (int index = 0; index < entries; index++) {
-      cache.put(keys[index], values[index]);
+    try {
+      ticker = new MutableTicker();
+      long capacity = (long) entries * (keyBytes + valueBytes) * 2L;
+      cache =
+          (OffHeapCache<byte[], byte[]>)
+              OHCacheBuilder.<byte[], byte[]>newBuilder()
+                  .capacity(capacity)
+                  .keySerializer(Utils.byteArraySerializer)
+                  .valueSerializer(Utils.byteArraySerializer)
+                  .eviction(Eviction.S3_FIFO)
+                  .ticker(ticker)
+                  .defaultTTLmillis(TTL_MILLIS)
+                  .build();
+      for (int index = 0; index < entries; index++) {
+        cache.put(keys[index], values[index]);
+      }
+      cache.flushAsync().join();
+      physicalExpiredBefore = cache.stats().expirationCount();
+      ticker.setMillis(EXPIRED_MILLIS);
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      cache = null;
+      throw failure;
     }
-    cache.flushAsync().join();
-    physicalExpiredBefore = cache.stats().expirationCount();
-    ticker.setMillis(EXPIRED_MILLIS);
   }
 
   @Benchmark
@@ -113,9 +119,9 @@ public class OHCTimeoutDrainBenchmark {
   }
 
   @TearDown(Level.Invocation)
-  public void closeCache() {
+  public void stopCache() {
     if (cache != null) {
-      cache.close();
+      SerializedBenchmarkSupport.stopOHC(cache);
     }
     cache = null;
   }

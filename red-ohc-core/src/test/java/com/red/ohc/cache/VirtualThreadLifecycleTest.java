@@ -44,42 +44,47 @@ public final class VirtualThreadLifecycleTest {
   public void shortLivedVirtualThreadsDoNotAccumulateReaderOrWriterRegistrations()
       throws Exception {
     Method startVirtualThread = virtualThreadStarter();
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(64L << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      cache.put("seed", "value");
-      cache.flushAsync().join();
-      int baselineReaders = readerCount(cache);
-      int baselineResources = writerResourceActiveCount(cache);
-      WorkloadResult workload = runWorkload(cache, startVirtualThread);
-      assertEquals(workload.readHits, READERS);
-      assertEquals(workload.acceptedWrites, WRITERS);
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(64L << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Thread[] callers = new Thread[TOTAL];
+      Throwable cacheFailure1 = null;
+      try {
+        cache.put("seed", "value");
+        cache.flushAsync().join();
+        int baselineReaders = readerCount(cache);
+        int baselineResources = writerResourceActiveCount(cache);
+        WorkloadResult workload = runWorkload(cache, startVirtualThread, callers);
+        assertEquals(workload.readHits, READERS);
+        assertEquals(workload.acceptedWrites, WRITERS);
 
-      awaitCollectionAndCleanup(cache, baselineReaders, baselineResources);
+        awaitCollectionAndCleanup(cache, baselineReaders, baselineResources);
 
-      int remainingReaders = readerCount(cache);
-      int remainingResources = writerResourceActiveCount(cache);
-      assertTrue(
-          remainingReaders <= baselineReaders + 4,
-          "reader registrations="
-              + remainingReaders
-              + ", baseline="
-              + baselineReaders);
-      assertTrue(
-          remainingResources <= baselineResources + 4,
-          "active writer resources="
-              + remainingResources
-              + ", baseline="
-              + baselineResources);
-      WriterResourceRegistry resources = writerResources(cache);
-      assertEquals(resources.retiringCount(), 0);
-      assertTrue(
-          resources.resourceCount() <= baselineResources + WRITERS,
-          "resource descriptors must grow only to the writer concurrency high-water mark");
-      assertTrue(resources.pooledCount() >= resources.resourceCount() - remainingResources - 1);
+        int remainingReaders = readerCount(cache);
+        int remainingResources = writerResourceActiveCount(cache);
+        assertTrue(
+            remainingReaders <= baselineReaders + 4,
+            "reader registrations=" + remainingReaders + ", baseline=" + baselineReaders);
+        assertTrue(
+            remainingResources <= baselineResources + 4,
+            "active writer resources=" + remainingResources + ", baseline=" + baselineResources);
+        WriterResourceRegistry resources = writerResources(cache);
+        assertEquals(resources.retiringCount(), 0);
+        assertTrue(
+            resources.resourceCount() <= baselineResources + WRITERS,
+            "resource descriptors must grow only to the writer concurrency high-water mark");
+        assertTrue(resources.pooledCount() >= resources.resourceCount() - remainingResources - 1);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stopAfterCallers(cache, cacheFailure1, callers);
+      }
     }
   }
 
@@ -95,11 +100,10 @@ public final class VirtualThreadLifecycleTest {
     return (Thread) starter.invoke(null, task);
   }
 
-  private static WorkloadResult runWorkload(OffHeapCache<String, String> cache, Method starter)
-      throws Exception {
+  private static WorkloadResult runWorkload(
+      OffHeapCache<String, String> cache, Method starter, Thread[] threads) throws Exception {
     AtomicInteger readHits = new AtomicInteger();
     AtomicInteger acceptedWrites = new AtomicInteger();
-    Thread[] threads = new Thread[TOTAL];
     for (int index = 0; index < READERS; index++) {
       threads[index] =
           startVirtualThread(
@@ -121,14 +125,13 @@ public final class VirtualThreadLifecycleTest {
               });
     }
     for (Thread thread : threads) {
-      thread.join();
+      CacheTestSupport.awaitCaller(thread);
     }
     return new WorkloadResult(readHits.get(), acceptedWrites.get());
   }
 
   private static void awaitCollectionAndCleanup(
-      OffHeapCache<?, ?> cache, int baselineReaders, int baselineResources)
-      throws Exception {
+      OffHeapCache<?, ?> cache, int baselineReaders, int baselineResources) throws Exception {
     for (int attempt = 0; attempt < 100; attempt++) {
       cache.flushAsync().join();
       if (readerCount(cache) <= baselineReaders + 4
@@ -144,8 +147,7 @@ public final class VirtualThreadLifecycleTest {
     return writerResources(cache).activeCount();
   }
 
-  private static WriterResourceRegistry writerResources(OffHeapCache<?, ?> cache)
-      throws Exception {
+  private static WriterResourceRegistry writerResources(OffHeapCache<?, ?> cache) throws Exception {
     Field resourceField = OffHeapCache.class.getDeclaredField("writerResources");
     resourceField.setAccessible(true);
     return (WriterResourceRegistry) resourceField.get(cache);

@@ -37,18 +37,6 @@ public class WriteAdmissionTest {
       };
 
   @Test
-  public void closedPutThrowsInsteadOfReturningResourceRejection() {
-    OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
-    cache.close();
-    expectThrows(IllegalStateException.class, () -> cache.put("key", "value"));
-  }
-
-  @Test
   public void reentrantPutFailsExplicitlyInsteadOfSilentlyDroppingTheNestedWrite() {
     AtomicReference<OHCache<String, String>> holder = new AtomicReference<>();
     CacheSerializer<String> reentrant =
@@ -71,69 +59,109 @@ public class WriteAdmissionTest {
             return STRING.serializedSize(value);
           }
         };
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(reentrant)
-            .build()) {
-      holder.set(cache);
-      expectThrows(IllegalStateException.class, () -> cache.put("outer", "outer"));
-      assertEquals(cache.size(), 0L);
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(reentrant)
+              .build();
+      Throwable cacheFailure3 = null;
+      try {
+        holder.set(cache);
+        expectThrows(IllegalStateException.class, () -> cache.put("outer", "outer"));
+        assertEquals(cache.size(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
   @Test(timeOut = 5_000L)
   public void readOnlyThreadDoesNotAllocateWriterState() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      cache.put("seed", "value");
-      cache.flushAsync().join();
-      AtomicReference<String> observed = new AtomicReference<>();
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Thread reader = null;
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put("seed", "value");
+        cache.flushAsync().join();
+        AtomicReference<String> observed = new AtomicReference<>();
 
-      Thread reader = new Thread(() -> observed.set(cache.get("seed")), "read-only-cache-thread");
-      reader.start();
-      reader.join();
+        reader = new Thread(() -> observed.set(cache.get("seed")), "read-only-cache-thread");
+        reader.start();
+        CacheTestSupport.awaitCaller(reader);
 
-      assertEquals(observed.get(), "value");
+        assertEquals(observed.get(), "value");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stopAfterCallers(cache, cacheFailure2, reader);
+      }
     }
   }
 
   @Test
   public void oneLiveWriterKeepsOneExclusiveResource() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      int before = writerResourceCount(cache);
-      cache.put("first", "value");
-      cache.put("second", "value");
-      assertEquals(writerResourceCount(cache), before + 1);
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure1 = null;
+      try {
+        int before = writerResourceCount(cache);
+        cache.put("first", "value");
+        cache.put("second", "value");
+        assertEquals(writerResourceCount(cache), before + 1);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 
   @Test
-  public void closeClearsReaderRegistryAndNativeMemory() throws Exception {
+  public void internalStopClearsReaderRegistryAndNativeMemory() throws Exception {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .capacity(1 << 20)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    cache.put("key", "value");
-    assertEquals(cache.get("key"), "value");
-    assertTrue(readerCount(cache) > 0);
+    Throwable primaryFailure = null;
+    try {
+      cache.put("key", "value");
+      assertEquals(cache.get("key"), "value");
+      assertTrue(readerCount(cache) > 0);
 
-    cache.close();
+      CacheTestSupport.stop(cache);
 
-    assertEquals(readerCount(cache), 0);
-    assertEquals(cache.totalAllocatedBytes(), 0L);
+      assertEquals(readerCount(cache), 0);
+      assertEquals(cache.totalAllocatedBytes(), 0L);
+
+    } catch (Throwable operationFailure) {
+      primaryFailure = operationFailure;
+      throw operationFailure;
+    } finally {
+      CacheTestSupport.stop(cache, primaryFailure);
+    }
   }
 
   @Test(timeOut = 30_000L)
@@ -149,47 +177,55 @@ public class WriteAdmissionTest {
     java.util.concurrent.ExecutorService readers =
         java.util.concurrent.Executors.newFixedThreadPool(2);
     java.util.concurrent.Future<Boolean> direct = null;
-    try {
-      cache.put("key", "initial");
-      cache.flushAsync().join();
-      direct =
-          readers.submit(
-              () ->
-                  cache.getDirect(
-                      "key",
-                      view -> {
-                        entered.countDown();
-                        try {
-                          release.await();
-                        } catch (InterruptedException interrupted) {
-                          Thread.currentThread().interrupt();
-                          throw new AssertionError(interrupted);
-                        }
-                        view.getByte(0);
-                      }));
-      assertTrue(entered.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+    {
+      Throwable explicitCacheFailure1 = null;
+      try {
 
-      int attempts = 64;
-      java.util.concurrent.Future<Integer> writer =
-          readers.submit(
-              () -> {
-                for (int i = 0; i < attempts; i++) {
-                  cache.put("key", "value-" + i);
-                }
-                return attempts;
-              });
-      Thread.sleep(100L);
-      assertTrue(writer.isDone(), "writer must not wait for reader-backed retirement");
-      release.countDown();
-      assertEquals(writer.get(8L, java.util.concurrent.TimeUnit.SECONDS).intValue(), attempts);
-      assertTrue(direct.get(2L, java.util.concurrent.TimeUnit.SECONDS));
-    } finally {
-      release.countDown();
-      if (direct != null) {
-        direct.cancel(true);
+        cache.put("key", "initial");
+        cache.flushAsync().join();
+        direct =
+            readers.submit(
+                () ->
+                    cache.getDirect(
+                        "key",
+                        view -> {
+                          entered.countDown();
+                          try {
+                            release.await();
+                          } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(interrupted);
+                          }
+                          view.getByte(0);
+                        }));
+        assertTrue(entered.await(2L, java.util.concurrent.TimeUnit.SECONDS));
+
+        int attempts = 64;
+        java.util.concurrent.Future<Integer> writer =
+            readers.submit(
+                () -> {
+                  for (int i = 0; i < attempts; i++) {
+                    cache.put("key", "value-" + i);
+                  }
+                  return attempts;
+                });
+        Thread.sleep(100L);
+        assertTrue(writer.isDone(), "writer must not wait for reader-backed retirement");
+        release.countDown();
+        assertEquals(writer.get(8L, java.util.concurrent.TimeUnit.SECONDS).intValue(), attempts);
+        assertTrue(direct.get(2L, java.util.concurrent.TimeUnit.SECONDS));
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        release.countDown();
+        if (direct != null) {
+          direct.cancel(true);
+        }
+        CacheTestSupport.stop(cache, explicitCacheFailure1, readers);
       }
-      readers.shutdownNow();
-      cache.close();
     }
   }
 

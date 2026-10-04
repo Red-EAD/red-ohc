@@ -14,7 +14,6 @@ public final class OHCacheStats {
   private final long liveWeight;
   private final long nativeAllocatedBytes;
   private final boolean maintenanceUnhealthy;
-  private final long maintenanceQueueDepth;
   private final long ttlLagMillis;
   private final long ttlBacklog;
   private final long nativeAllocationFailureCount;
@@ -30,7 +29,6 @@ public final class OHCacheStats {
   private final long retirementSealRecordsTotal;
   private final long retirementReclaimRecordsTotal;
   private final long retirementSealScannedLanesTotal;
-  private final long retirementSealHeadOfLineStops;
   private final long retirementReclaimBlockedCount;
   private final long retirementReclaimBlockedNanos;
   private final long maintenancePassCount;
@@ -77,7 +75,6 @@ public final class OHCacheStats {
   private final long retirementSafeSegmentCount;
   private final long retirementReclaimBatchCount;
   private final long retirementOldestSafeWaitNanos;
-  private final long mailboxHeadUnpublishedCount;
   private final long[] allocatorReadyPagesByClass;
   private final long[] allocatorPagesInUseByClass;
   private final double[] allocatorPageOccupancyByClass;
@@ -98,7 +95,6 @@ public final class OHCacheStats {
       long liveWeight,
       long nativeAllocatedBytes,
       boolean maintenanceUnhealthy,
-      long maintenanceQueueDepth,
       long ttlLagMillis,
       long ttlBacklog,
       long nativeAllocationFailureCount,
@@ -114,7 +110,6 @@ public final class OHCacheStats {
       long retirementSealRecordsTotal,
       long retirementReclaimRecordsTotal,
       long retirementSealScannedLanesTotal,
-      long retirementSealHeadOfLineStops,
       long retirementReclaimBlockedCount,
       long retirementReclaimBlockedNanos,
       long maintenancePassCount,
@@ -161,7 +156,6 @@ public final class OHCacheStats {
       long retirementSafeSegmentCount,
       long retirementReclaimBatchCount,
       long retirementOldestSafeWaitNanos,
-      long mailboxHeadUnpublishedCount,
       long[] allocatorReadyPagesByClass,
       long[] allocatorPagesInUseByClass,
       double[] allocatorPageOccupancyByClass,
@@ -180,7 +174,6 @@ public final class OHCacheStats {
     this.liveWeight = liveWeight;
     this.nativeAllocatedBytes = nativeAllocatedBytes;
     this.maintenanceUnhealthy = maintenanceUnhealthy;
-    this.maintenanceQueueDepth = maintenanceQueueDepth;
     this.ttlLagMillis = ttlLagMillis;
     this.ttlBacklog = ttlBacklog;
     this.nativeAllocationFailureCount = nativeAllocationFailureCount;
@@ -196,7 +189,6 @@ public final class OHCacheStats {
     this.retirementSealRecordsTotal = retirementSealRecordsTotal;
     this.retirementReclaimRecordsTotal = retirementReclaimRecordsTotal;
     this.retirementSealScannedLanesTotal = retirementSealScannedLanesTotal;
-    this.retirementSealHeadOfLineStops = retirementSealHeadOfLineStops;
     this.retirementReclaimBlockedCount = retirementReclaimBlockedCount;
     this.retirementReclaimBlockedNanos = retirementReclaimBlockedNanos;
     this.maintenancePassCount = maintenancePassCount;
@@ -243,7 +235,6 @@ public final class OHCacheStats {
     this.retirementSafeSegmentCount = retirementSafeSegmentCount;
     this.retirementReclaimBatchCount = retirementReclaimBatchCount;
     this.retirementOldestSafeWaitNanos = retirementOldestSafeWaitNanos;
-    this.mailboxHeadUnpublishedCount = mailboxHeadUnpublishedCount;
     this.allocatorReadyPagesByClass = allocatorReadyPagesByClass;
     this.allocatorPagesInUseByClass = allocatorPagesInUseByClass;
     this.allocatorPageOccupancyByClass = allocatorPageOccupancyByClass;
@@ -273,9 +264,6 @@ public final class OHCacheStats {
     long requests = requestCount();
     return requests == 0L ? 0.0d : (double) missCount / requests;
   }
-
-
-
 
   public long evictionCount() {
     return evictionCount;
@@ -318,10 +306,6 @@ public final class OHCacheStats {
 
   public boolean maintenanceUnhealthy() {
     return maintenanceUnhealthy;
-  }
-
-  public long maintenanceQueueDepth() {
-    return maintenanceQueueDepth;
   }
 
   public long ttlLagMillis() {
@@ -382,10 +366,6 @@ public final class OHCacheStats {
 
   public long retirementSealScannedLanesTotal() {
     return retirementSealScannedLanesTotal;
-  }
-
-  public long retirementSealHeadOfLineStops() {
-    return retirementSealHeadOfLineStops;
   }
 
   public long retirementReclaimBlockedCount() {
@@ -471,10 +451,6 @@ public final class OHCacheStats {
   public long retirementTrimmedSegments() {
     return retirementTrimmedSegments;
   }
-
-
-
-
 
   /** Native bytes reserved by the S3-FIFO ghost history. */
   public long ghostNativeBytes() {
@@ -578,10 +554,6 @@ public final class OHCacheStats {
 
   public long retirementOldestSafeWaitNanos() {
     return retirementOldestSafeWaitNanos;
-  }
-
-  public long mailboxHeadUnpublishedCount() {
-    return mailboxHeadUnpublishedCount;
   }
 
   public long[] allocatorReadyPagesByClass() {

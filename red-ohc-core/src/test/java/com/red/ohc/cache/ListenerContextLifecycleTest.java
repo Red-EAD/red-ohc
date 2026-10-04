@@ -34,22 +34,52 @@ public final class ListenerContextLifecycleTest {
 
   @Test
   public void cacheWithoutListenerDoesNotCreateAnEvictionContext() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache(null)) {
-      assertNull(evictionContext(cache));
+    {
+      OffHeapCache<String, String> cache = newCache(null);
+      Throwable cacheFailure3 = null;
+      try {
+        assertNull(evictionContext(cache));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
   @Test
   public void configuredListenerUsesOneActorContext() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache((key, value, cause) -> {})) {
-      assertTrue(evictionContext(cache) instanceof ThreadContext);
+    {
+      OffHeapCache<String, String> cache = newCache((key, value, cause) -> {});
+      Throwable cacheFailure2 = null;
+      try {
+        assertTrue(evictionContext(cache) instanceof ThreadContext);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
   @Test
   public void listenerActorContextIsSeparateFromNestedBusinessContext() throws Exception {
-    try (OffHeapCache<String, String> cache = newCache((key, value, cause) -> {})) {
-      assertNotSame(evictionContext(cache), businessContext(cache));
+    {
+      OffHeapCache<String, String> cache = newCache((key, value, cause) -> {});
+      Throwable cacheFailure1 = null;
+      try {
+        assertNotSame(evictionContext(cache), businessContext(cache));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 

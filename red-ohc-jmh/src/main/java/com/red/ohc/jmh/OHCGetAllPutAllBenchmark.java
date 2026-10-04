@@ -103,7 +103,6 @@ public class OHCGetAllPutAllBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-
   private Integer[] keys;
   private byte[][] values;
   private List<Integer> batchKeys;
@@ -114,63 +113,76 @@ public class OHCGetAllPutAllBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new Integer[KEY_COUNT];
-    values = new byte[KEY_COUNT][];
-    for (int index = 0; index < KEY_COUNT; index++) {
-      keys[index] = index;
-      values[index] = bytes(valueBytes, index * 31 + 7);
-    }
-    batchKeys = new ArrayList<>(BATCH_SIZE);
-    batch = new HashMap<>(BATCH_SIZE * 2);
-    for (int index = 0; index < BATCH_SIZE; index++) {
-      batchKeys.add(keys[index]);
-      batch.put(keys[index], values[index]);
-    }
-    if ("OHC".equals(implementation)) {
-      ohc =
-          OHCacheBuilder.<Integer, byte[]>newBuilder()
-              .capacity(CAPACITY)
-              .keySerializer(INT_SERIALIZER)
-              .valueSerializer(BYTES_SERIALIZER)
-              .eviction(Eviction.S3_FIFO)
-              .build();
-      for (int index = 0; index < KEY_COUNT; index += BATCH_SIZE) {
-        ohc.putAll(batch(index, BATCH_SIZE));
+    try {
+      keys = new Integer[KEY_COUNT];
+      values = new byte[KEY_COUNT][];
+      for (int index = 0; index < KEY_COUNT; index++) {
+        keys[index] = index;
+        values[index] = bytes(valueBytes, index * 31 + 7);
       }
-      // Stabilize the preload once. Repeated barriers here would measure setup cost and
-      // make the benchmark needlessly sensitive to maintenance wake-up latency.
-      ohc.flushAsync().join();
-      if (ohc.size() != KEY_COUNT || ohc.stats().maintenanceUnhealthy()) {
-        throw new IllegalStateException(
-            "OHC preload did not converge: size="
-                + ohc.size()
-                + ", unhealthy="
-                + ohc.stats().maintenanceUnhealthy());
+      batchKeys = new ArrayList<>(BATCH_SIZE);
+      batch = new HashMap<>(BATCH_SIZE * 2);
+      for (int index = 0; index < BATCH_SIZE; index++) {
+        batchKeys.add(keys[index]);
+        batch.put(keys[index], values[index]);
       }
-    } else {
-      caffeine =
-          Caffeine.<Integer, byte[]>newBuilder()
-              .maximumWeight(CAPACITY)
-              .weigher((Integer key, byte[] value) -> Integer.BYTES + value.length)
-              .build();
-      for (int index = 0; index < KEY_COUNT; index += BATCH_SIZE) {
-        caffeine.putAll(batch(index, BATCH_SIZE));
+      if ("OHC".equals(implementation)) {
+        ohc =
+            OHCacheBuilder.<Integer, byte[]>newBuilder()
+                .capacity(CAPACITY)
+                .keySerializer(INT_SERIALIZER)
+                .valueSerializer(BYTES_SERIALIZER)
+                .eviction(Eviction.S3_FIFO)
+                .build();
+        for (int index = 0; index < KEY_COUNT; index += BATCH_SIZE) {
+          ohc.putAll(batch(index, BATCH_SIZE));
+        }
+        // Stabilize the preload once. Repeated barriers here would measure setup cost and
+        // make the benchmark needlessly sensitive to maintenance wake-up latency.
+        ohc.flushAsync().join();
+        if (ohc.size() != KEY_COUNT || ohc.stats().maintenanceUnhealthy()) {
+          throw new IllegalStateException(
+              "OHC preload did not converge: size="
+                  + ohc.size()
+                  + ", unhealthy="
+                  + ohc.stats().maintenanceUnhealthy());
+        }
+      } else {
+        caffeine =
+            Caffeine.<Integer, byte[]>newBuilder()
+                .maximumWeight(CAPACITY)
+                .weigher((Integer key, byte[] value) -> Integer.BYTES + value.length)
+                .build();
+        for (int index = 0; index < KEY_COUNT; index += BATCH_SIZE) {
+          caffeine.putAll(batch(index, BATCH_SIZE));
+        }
+        if (caffeine.estimatedSize() != KEY_COUNT) {
+          throw new IllegalStateException(
+              "Caffeine preload did not converge: size=" + caffeine.estimatedSize());
+        }
       }
-      if (caffeine.estimatedSize() != KEY_COUNT) {
-        throw new IllegalStateException(
-            "Caffeine preload did not converge: size=" + caffeine.estimatedSize());
-      }
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(ohc, failure);
+      ohc = null;
+      throw failure;
     }
   }
 
   @TearDown(Level.Trial)
   public void tearDown() {
-    if (ohc != null) {
-      ohc.close();
-    }
-    if (caffeine != null) {
-      caffeine.invalidateAll();
-      caffeine.cleanUp();
+    Throwable failure = null;
+    try {
+      if (caffeine != null) {
+        caffeine.invalidateAll();
+        caffeine.cleanUp();
+      }
+
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
+    } finally {
+      SerializedBenchmarkSupport.stopOHC(ohc, failure);
     }
   }
 

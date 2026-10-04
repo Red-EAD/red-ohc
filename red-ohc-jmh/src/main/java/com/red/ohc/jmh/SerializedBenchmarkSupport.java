@@ -1,5 +1,6 @@
 package com.red.ohc.jmh;
 
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Arrays;
@@ -20,7 +21,11 @@ import org.ehcache.spi.serialization.Serializer;
 import org.mapdb.DBMaker;
 import org.mapdb.HTreeMap;
 
+import com.red.ohc.api.OHCache;
+import com.red.ohc.cache.OffHeapCache;
 import com.red.ohc.index.Entry;
+import com.red.ohc.maintenance.LogicalAdmission;
+import com.red.ohc.maintenance.MaintenanceEventLoop;
 import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.ValueBlock;
 
@@ -37,6 +42,58 @@ public final class SerializedBenchmarkSupport {
 
   private SerializedBenchmarkSupport() {}
 
+  public static void stopOHC(OHCache<?, ?> cache) {
+    stopOHC(cache, null);
+  }
+
+  /** Stops a quiesced benchmark cache, including failed setup and invocation states. */
+  public static void stopOHC(OHCache<?, ?> cache, Throwable primaryFailure) {
+    if (cache == null) {
+      return;
+    }
+    try {
+      Field workerField = OffHeapCache.class.getDeclaredField("worker");
+      workerField.setAccessible(true);
+      MaintenanceEventLoop worker = (MaintenanceEventLoop) workerField.get(cache);
+      worker.stop();
+      boolean interrupted = false;
+      long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30L);
+      try {
+        while (worker.isAlive()) {
+          long remaining = deadline - System.nanoTime();
+          if (remaining <= 0L) {
+            break;
+          }
+          try {
+            worker.join(
+                Math.max(1L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining)));
+          } catch (InterruptedException interruption) {
+            interrupted = true;
+          }
+        }
+      } finally {
+        if (interrupted) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      if (worker.isAlive()) {
+        throw new IllegalStateException("benchmark cache actor did not stop");
+      }
+      Field admissionField = OffHeapCache.class.getDeclaredField("logicalAdmission");
+      admissionField.setAccessible(true);
+      worker.assertLogicalAdmissionStable((LogicalAdmission) admissionField.get(cache));
+      if (cache.totalAllocatedBytes() != 0L) {
+        throw new IllegalStateException("benchmark cache retained native memory");
+      }
+    } catch (Throwable failure) {
+      if (primaryFailure != null) {
+        primaryFailure.addSuppressed(failure);
+      } else {
+        throw new IllegalStateException("benchmark cache teardown failed", failure);
+      }
+    }
+  }
+
   public static EhcacheStore newEhcache(long offHeapBytes, long ttlMillis) {
     CacheManager manager =
         CacheManagerBuilder.newCacheManagerBuilder()
@@ -50,8 +107,7 @@ public final class SerializedBenchmarkSupport {
                     .withKeySerializer(new RawByteArraySerializer())
                     .withValueSerializer(new RawByteArraySerializer())
                     .withExpiry(
-                        ExpiryPolicyBuilder.timeToLiveExpiration(
-                            Duration.ofMillis(ttlMillis))))
+                        ExpiryPolicyBuilder.timeToLiveExpiration(Duration.ofMillis(ttlMillis))))
             .build(true);
     return new EhcacheStore(manager, manager.getCache("serialized", byte[].class, byte[].class));
   }
@@ -98,10 +154,7 @@ public final class SerializedBenchmarkSupport {
       keys[i] = bytes(keyBytes, i);
       values[i] = bytes(valueBytes, i * 31 + 7);
     }
-    return new Dataset(
-        keys,
-        values,
-        sequenceForDistribution(WORKING_SET, distribution));
+    return new Dataset(keys, values, sequenceForDistribution(WORKING_SET, distribution));
   }
 
   public static int[] writeSequence(String shape, String distribution) {
@@ -146,12 +199,11 @@ public final class SerializedBenchmarkSupport {
   }
 
   /**
-   * Ehcache's off-heap tier charges serialized mapping metadata in addition to key and value
-   * bytes. The fixed headroom keeps the target 32B/5KiB preload resident at the same entry cap.
+   * Ehcache's off-heap tier charges serialized mapping metadata in addition to key and value bytes.
+   * The fixed headroom keeps the target 32B/5KiB preload resident at the same entry cap.
    */
   public static long ehcacheCapacityBytes(int keyBytes, int valueBytes) {
-    return (long) CAPACITY_ENTRIES
-        * (keyBytes + valueBytes + EHCACHE_ENTRY_OVERHEAD_BYTES);
+    return (long) CAPACITY_ENTRIES * (keyBytes + valueBytes + EHCACHE_ENTRY_OVERHEAD_BYTES);
   }
 
   /** Returns the logical serialized-byte capacity for the fixed-size OHC benchmark workload. */
@@ -162,7 +214,8 @@ public final class SerializedBenchmarkSupport {
   }
 
   public static int benchmarkThreadCount() {
-    int configured = Integer.getInteger("redohc.benchmark.threads", Runtime.getRuntime().availableProcessors());
+    int configured =
+        Integer.getInteger("redohc.benchmark.threads", Runtime.getRuntime().availableProcessors());
     if (configured <= 0) {
       throw new IllegalArgumentException("redohc.benchmark.threads must be positive");
     }
@@ -174,9 +227,9 @@ public final class SerializedBenchmarkSupport {
   }
 
   /**
-   * Creates a deterministic key for a sustained-new-key workload. The high 32 bits identify the
-   * JMH writer thread and the low 32 bits identify that thread's write ordinal, so benchmark
-   * threads never intentionally collide within the measured run.
+   * Creates a deterministic key for a sustained-new-key workload. The high 32 bits identify the JMH
+   * writer thread and the low 32 bits identify that thread's write ordinal, so benchmark threads
+   * never intentionally collide within the measured run.
    */
   public static byte[] newKey(int keyBytes, int threadIndex, long writeOrdinal) {
     if (keyBytes < Long.BYTES) {

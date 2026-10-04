@@ -17,12 +17,15 @@ import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
 /**
- * A reader whose odd sequence word spans the actor's arm-confirm cut must keep its native value
- * out of the reclaim path, regardless of how the entry and the arm interleave.
+ * A reader whose odd sequence word spans the actor's arm-confirm cut must keep its native value out
+ * of the reclaim path, regardless of how the entry and the arm interleave.
  */
 @JCStressTest
 @Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the in-op reader blocks native release")
-@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "value released while an armed odd reader held it")
+@Outcome(
+    id = "1",
+    expect = Expect.FORBIDDEN,
+    desc = "value released while an armed odd reader held it")
 @State
 public class ReaderSeqQuiescenceSafetyStress {
   private static final int VALUE_LENGTH = 32_768;
@@ -41,7 +44,7 @@ public class ReaderSeqQuiescenceSafetyStress {
     ValueBlock.initialize(value, 0L, VALUE_LENGTH, 0L);
     journal.append(value, allocation);
     journal.cutAllProducersAtWatermark();
-    if (journal.sealReadySegments(1L) != 1) {
+    if (journal.sealReadySegments() != 1) {
       throw new AssertionError("expected one sealed retirement segment");
     }
   }

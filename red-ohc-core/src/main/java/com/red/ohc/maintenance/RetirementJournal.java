@@ -22,8 +22,8 @@ public final class RetirementJournal {
   /**
    * Result of one bounded actor reclaim attempt.
    *
-   * <p>The three counters deliberately have different units: a segment is a storage/reclaim
-   * batch, a record is a committed logical slot, and bytes are physical native payload bytes.
+   * <p>The three counters deliberately have different units: a segment is a storage/reclaim batch,
+   * a record is a committed logical slot, and bytes are physical native payload bytes.
    */
   public static final class ReclaimResult {
     public static final ReclaimResult EMPTY = new ReclaimResult(0, 0, 0, 0L);
@@ -59,13 +59,14 @@ public final class RetirementJournal {
   private final Lane actorLane;
   private final MpscUnboundedArrayQueue<Lane> readyLanes =
       new MpscUnboundedArrayQueue<>(QUEUE_CHUNK_SIZE);
+
   /** SAFE segments have multiple publishers and exactly one maintenance-actor consumer. */
   private final MpscUnboundedArrayQueue<RetirementSegment> safeSegments =
       new MpscUnboundedArrayQueue<>(QUEUE_CHUNK_SIZE);
+
   private final MpmcUnboundedXaddArrayQueue<RetirementSegment> reusableSegments =
       new MpmcUnboundedXaddArrayQueue<>(QUEUE_CHUNK_SIZE);
-  private final Set<RetirementSegment> allocatedSegmentDescriptors =
-      ConcurrentHashMap.newKeySet();
+  private final Set<RetirementSegment> allocatedSegmentDescriptors = ConcurrentHashMap.newKeySet();
   private final AtomicInteger openProducerCount = new AtomicInteger();
   private final AtomicInteger readyLaneCount = new AtomicInteger();
   private final AtomicInteger sealedSegmentCount = new AtomicInteger();
@@ -80,8 +81,10 @@ public final class RetirementJournal {
   private final AtomicLong actorReclaimedRecords = new AtomicLong();
   private final AtomicLong retiredBytes = new AtomicLong();
   private final AtomicInteger retiredEntries = new AtomicInteger();
+
   /** Committed physical retirement bytes that have not completed native release. */
   private final AtomicLong admittedRetirementBytes = new AtomicLong();
+
   private final AtomicLong unsafeRecords = new AtomicLong();
   private final AtomicLong unsafeBytes = new AtomicLong();
   private final AtomicLong safeRecords = new AtomicLong();
@@ -316,8 +319,7 @@ public final class RetirementJournal {
     watermark[0] = actorLane.cutAndCaptureWatermark();
     Lane[] snapshot = writerLanes;
     for (int index = 1; index < watermark.length; index++) {
-      watermark[index] =
-          snapshot[index - ACTOR_LANE_OFFSET].cutOrArmAndCaptureWatermark();
+      watermark[index] = snapshot[index - ACTOR_LANE_OFFSET].cutOrArmAndCaptureWatermark();
     }
   }
 
@@ -327,8 +329,7 @@ public final class RetirementJournal {
     watermark[0] = actorLane.cutReadyAndCaptureWatermark();
     Lane[] snapshot = writerLanes;
     for (int index = 1; index < watermark.length; index++) {
-      watermark[index] =
-          snapshot[index - ACTOR_LANE_OFFSET].cutReadyAndCaptureWatermark();
+      watermark[index] = snapshot[index - ACTOR_LANE_OFFSET].cutReadyAndCaptureWatermark();
     }
   }
 
@@ -450,16 +451,16 @@ public final class RetirementJournal {
     return true;
   }
 
-  public int sealReadySegments(long epoch) {
+  public int sealReadySegments() {
     int sealed = 0;
     int sealedLanes = 0;
     actorLane.forceCutOpenProducer();
     for (Lane lane : writerLanes) {
-      int laneRecords = sealLane(lane, epoch, Long.MAX_VALUE);
+      int laneRecords = sealLane(lane, Long.MAX_VALUE);
       sealed += laneRecords;
       sealedLanes += laneRecords == 0 ? 0 : 1;
     }
-    int actorRecords = sealLane(actorLane, epoch, Long.MAX_VALUE);
+    int actorRecords = sealLane(actorLane, Long.MAX_VALUE);
     sealed += actorRecords;
     sealedLanes += actorRecords == 0 ? 0 : 1;
     recordSealScan(writerLanes.length + ACTOR_LANE_OFFSET, sealedLanes, sealed);
@@ -469,9 +470,9 @@ public final class RetirementJournal {
     return sealed;
   }
 
-  public int sealSnapshotSegments(long epoch, long[] watermark) {
+  public int sealSnapshotSegments(long[] watermark) {
     checkWatermark(watermark);
-    int actorRecords = sealLane(actorLane, epoch, watermark[0]);
+    int actorRecords = sealLane(actorLane, watermark[0]);
     int sealed = actorRecords;
     int sealedLanes = actorRecords == 0 ? 0 : 1;
     int visited = ACTOR_LANE_OFFSET;
@@ -488,7 +489,7 @@ public final class RetirementJournal {
       if (laneWatermarkIndex >= watermark.length) {
         continue;
       }
-      int laneRecords = sealLane(lane, epoch, watermark[laneWatermarkIndex]);
+      int laneRecords = sealLane(lane, watermark[laneWatermarkIndex]);
       sealed += laneRecords;
       sealedLanes += laneRecords == 0 ? 0 : 1;
     }
@@ -540,12 +541,12 @@ public final class RetirementJournal {
     return published;
   }
 
-  private int sealLane(Lane lane, long epoch, long watermark) {
+  private int sealLane(Lane lane, long watermark) {
     if (!lane.tryAcquireProgress()) {
       return 0;
     }
     try {
-      return lane.sealThrough(epoch, watermark);
+      return lane.sealThrough(watermark);
     } finally {
       lane.releaseProgress();
     }
@@ -565,13 +566,8 @@ public final class RetirementJournal {
 
   /** Reclaims SAFE segments on the maintenance actor; this is the sole queue consumer. */
   ReclaimResult reclaimActorResult(NativeMemory.Memory releaseMemory, int maximumRecords) {
-    return reclaimInternal(
-        releaseMemory,
-        maximumRecords,
-        null,
-        captureSafePublishedTicket());
+    return reclaimInternal(releaseMemory, maximumRecords, null, captureSafePublishedTicket());
   }
-
 
   /** One quiescence cut driven by a registry: arm, confirm, then publish what is unblocked. */
   public int publishSafeForQuiescence(ReaderRegistry readers) {
@@ -587,22 +583,15 @@ public final class RetirementJournal {
       throw new NullPointerException("readers");
     }
     publishSafeForQuiescence(readers);
-    return reclaimInternal(
-        memory,
-        maximumRecords,
-        null,
-        captureSafePublishedTicket());
+    return reclaimInternal(memory, maximumRecords, null, captureSafePublishedTicket());
   }
 
-  /** Reclaims a bounded SAFE batch on the maintenance actor, preserving actor reclaim accounting. */
+  /**
+   * Reclaims a bounded SAFE batch on the maintenance actor, preserving actor reclaim accounting.
+   */
   ReclaimResult reclaimActorSafeBatchResult(
       NativeMemory.Memory releaseMemory, int maximumSegments) {
-    return reclaimInternal(
-        releaseMemory,
-        Integer.MAX_VALUE,
-        null,
-        Long.MAX_VALUE,
-        maximumSegments);
+    return reclaimInternal(releaseMemory, Integer.MAX_VALUE, null, Long.MAX_VALUE, maximumSegments);
   }
 
   public boolean consumeReadyHint() {
@@ -679,10 +668,6 @@ public final class RetirementJournal {
     sealScannedLanesTotal.addAndGet(scannedLanes);
   }
 
-  public long sealHeadOfLineStops() {
-    return 0L;
-  }
-
   public void append(long address, long allocation) {
     actorLane.append(address, allocation);
   }
@@ -704,7 +689,7 @@ public final class RetirementJournal {
     }
     try {
       long[] watermark = captureWatermark();
-      while (sealSnapshotSegments(Long.MAX_VALUE, watermark) != 0) {
+      while (sealSnapshotSegments(watermark) != 0) {
         watermark = captureWatermark();
       }
     } catch (Throwable cleanupFailure) {
@@ -717,12 +702,7 @@ public final class RetirementJournal {
     }
     try {
       while (safeSegmentCount.get() != 0) {
-        ReclaimResult reclaimed =
-            reclaimInternal(
-                memory,
-                Integer.MAX_VALUE,
-                null,
-                Long.MAX_VALUE);
+        ReclaimResult reclaimed = reclaimInternal(memory, Integer.MAX_VALUE, null, Long.MAX_VALUE);
         if (reclaimed.records == 0) {
           break;
         }
@@ -730,8 +710,7 @@ public final class RetirementJournal {
     } catch (Throwable cleanupFailure) {
       failure = appendCloseFailure(failure, cleanupFailure);
     }
-    RetirementSegment[] descriptors =
-        allocatedSegmentDescriptors.toArray(new RetirementSegment[0]);
+    RetirementSegment[] descriptors = allocatedSegmentDescriptors.toArray(new RetirementSegment[0]);
     for (RetirementSegment segment : descriptors) {
       try {
         trimSegment(segment);
@@ -811,11 +790,7 @@ public final class RetirementJournal {
       long[] watermark,
       long maximumSafeTicket) {
     return reclaimInternal(
-        releaseMemory,
-        maximumRecords,
-        watermark,
-        maximumSafeTicket,
-        Integer.MAX_VALUE);
+        releaseMemory, maximumRecords, watermark, maximumSafeTicket, Integer.MAX_VALUE);
   }
 
   private ReclaimResult reclaimInternal(
@@ -948,10 +923,10 @@ public final class RetirementJournal {
   }
 
   /**
-   * Settles a wave whose merged release failed part-way. Progress is durable per cleared
-   * address: segments whose every record was released are finished exactly like the success
-   * path; the rest abort their claim, reverse the claimed→safe ledger move for their remaining
-   * pending, and re-queue at the tail for a later retry that skips cleared addresses.
+   * Settles a wave whose merged release failed part-way. Progress is durable per cleared address:
+   * segments whose every record was released are finished exactly like the success path; the rest
+   * abort their claim, reverse the claimed→safe ledger move for their remaining pending, and
+   * re-queue at the tail for a later retry that skips cleared addresses.
    */
   private void settleFailedWave(TurnReleaseWave wave, Throwable failure) {
     int[] clearedRecords = actorContext.releaseTurnClearedRecords();
@@ -1029,8 +1004,10 @@ public final class RetirementJournal {
     final long[] beforeReleasedBytes = new long[MAX_SEGMENTS];
     int count;
     int records;
+
     /** Distinct owner lanes finished this wave; drained once at wave end. */
     final int[] finishedLaneIndexes = new int[MAX_SEGMENTS];
+
     int finishedLaneCount;
 
     void reset() {
@@ -1163,8 +1140,7 @@ public final class RetirementJournal {
   public final class Lane {
     private final int index;
     private final AtomicReference<RetirementSegment> producer;
-    private final ArrayDeque<RetirementSegment> sealedSegments =
-        new ArrayDeque<>(SEGMENT_CAPACITY);
+    private final ArrayDeque<RetirementSegment> sealedSegments = new ArrayDeque<>(SEGMENT_CAPACITY);
     // Lane-owned counters: one live owner at a time; committed stays volatile because the actor
     // reads it cross-thread for queue depth, which also publishes the earlier reserved writes.
     private long reserved;
@@ -1295,7 +1271,7 @@ public final class RetirementJournal {
       }
     }
 
-    private int sealThrough(long epoch, long maximumSequenceInclusive) {
+    private int sealThrough(long maximumSequenceInclusive) {
       int records = 0;
       while (true) {
         RetirementSegment segment = sealCursor;
@@ -1311,7 +1287,7 @@ public final class RetirementJournal {
           break;
         }
         if (!segment.isSealed()) {
-          if (!segment.seal(epoch)) {
+          if (!segment.seal()) {
             break;
           }
           sealedSegments.addLast(segment);
@@ -1350,8 +1326,7 @@ public final class RetirementJournal {
       return publishSafe(true, true, true);
     }
 
-    private int publishSafe(
-        boolean lookupSafe, boolean valueSafe, boolean includeBoundary) {
+    private int publishSafe(boolean lookupSafe, boolean valueSafe, boolean includeBoundary) {
       int published = 0;
       while (true) {
         RetirementSegment segment = sealedSegments.peek();
@@ -1460,9 +1435,7 @@ public final class RetirementJournal {
         return completionPrefix;
       }
       int count = current.reservationCount();
-      if (!current.isClosed()
-          && !(index == 0 && count != 0)
-          && count < WRITER_WAKE_RECORDS) {
+      if (!current.isClosed() && !(index == 0 && count != 0) && count < WRITER_WAKE_RECORDS) {
         return current.baseSequence();
       }
       if (count == 0) {
@@ -1475,7 +1448,9 @@ public final class RetirementJournal {
 
     private synchronized long reservationWatermark() {
       RetirementSegment current = producer.get();
-      return current == null ? completionPrefix : current.baseSequence() + current.reservationCount();
+      return current == null
+          ? completionPrefix
+          : current.baseSequence() + current.reservationCount();
     }
 
     private int cutProducer(RetirementSegment segment) {
@@ -1764,7 +1739,6 @@ public final class RetirementJournal {
         }
       }
     }
-
   }
 
   private void signalReady(Runnable signal, Consumer<Throwable> failureHandler) {
@@ -1784,5 +1758,4 @@ public final class RetirementJournal {
       // signal as best effort and retain the published work for the next owner/teardown drain.
     }
   }
-
 }

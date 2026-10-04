@@ -33,15 +33,24 @@ public class MaintenanceLifecycleTest {
       };
 
   @Test
-  public void closeReclaimsAllNativeMemoryAfterAcceptedMutations() {
+  public void internalStopReclaimsAllNativeMemoryAfterAcceptedMutations() {
     OHCache<String, String> cache = newCache();
-    cache.put("alpha", "value");
-    cache.flushAsync().join();
-    assertTrue(cache.totalAllocatedBytes() > 0L);
+    Throwable primaryFailure = null;
+    try {
+      cache.put("alpha", "value");
+      cache.flushAsync().join();
+      assertTrue(cache.totalAllocatedBytes() > 0L);
 
-    cache.close();
+      CacheTestSupport.stop(cache);
 
-    assertEquals(cache.totalAllocatedBytes(), 0L);
+      assertEquals(cache.totalAllocatedBytes(), 0L);
+
+    } catch (Throwable operationFailure) {
+      primaryFailure = operationFailure;
+      throw operationFailure;
+    } finally {
+      CacheTestSupport.stop(cache, primaryFailure);
+    }
   }
 
   private static OHCache<String, String> newCache() {

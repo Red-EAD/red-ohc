@@ -2,7 +2,6 @@ package com.red.ohc.cache;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
 import java.lang.reflect.Method;
@@ -14,10 +13,10 @@ import com.red.ohc.api.OHCache;
 
 public final class ConcurrentMapApiTest {
   @Test
-  public void ohCacheIsADedicatedAutoCloseableApi() {
-    assertTrue(
-        AutoCloseable.class.isAssignableFrom(OHCache.class),
-        "OHCache must remain closeable");
+  public void ohCacheIsADedicatedProcessLifetimeApi() {
+    assertFalse(AutoCloseable.class.isAssignableFrom(OHCache.class));
+    assertMissing(OHCache.class, "close");
+    assertMissing(OffHeapCache.class, "close");
     assertFalse(
         ConcurrentMap.class.isAssignableFrom(OHCache.class),
         "OHCache must not expose the ConcurrentMap contract");
@@ -37,9 +36,11 @@ public final class ConcurrentMapApiTest {
     assertReturnType("remove", boolean.class, Object.class, Object.class);
     assertReturnType("replace", boolean.class, Object.class, Object.class, Object.class);
     assertReturnType("replace", Object.class, Object.class, Object.class);
-    assertReturnType("replace", boolean.class, Object.class, Object.class, Object.class, long.class);
+    assertReturnType(
+        "replace", boolean.class, Object.class, Object.class, Object.class, long.class);
     assertReturnType("compute", Object.class, Object.class, java.util.function.BiFunction.class);
-    assertReturnType("merge", Object.class, Object.class, Object.class, java.util.function.BiFunction.class);
+    assertReturnType(
+        "merge", Object.class, Object.class, Object.class, java.util.function.BiFunction.class);
   }
 
   @Test
@@ -66,11 +67,11 @@ public final class ConcurrentMapApiTest {
     assertMissing(OffHeapCache.class, "removeFast", Object.class);
   }
 
-  private static void assertReturnType(String methodName, Class<?> expected, Class<?>... parameters) {
+  private static void assertReturnType(
+      String methodName, Class<?> expected, Class<?>... parameters) {
     try {
       Method method = OHCache.class.getMethod(methodName, parameters);
-      assertEquals(
-          method.getReturnType(), expected, "unexpected return type for " + methodName);
+      assertEquals(method.getReturnType(), expected, "unexpected return type for " + methodName);
     } catch (NoSuchMethodException missing) {
       fail("missing ConcurrentMap method " + methodName, missing);
     }

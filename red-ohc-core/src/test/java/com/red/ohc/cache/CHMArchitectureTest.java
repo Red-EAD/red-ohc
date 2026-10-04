@@ -46,18 +46,28 @@ public final class CHMArchitectureTest {
 
   @Test
   public void cacheUsesTheDirectChmAsItsAuthoritativeIndexWithoutBootstrapEntry() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      assertTrue(cache.dataForTest() instanceof ConcurrentHashMap);
-      Field table = ConcurrentHashMap.class.getDeclaredField("table");
-      table.setAccessible(true);
-      assertNull(table.get(cache.dataForTest()), "CHM must not be warmed by a sentinel Entry");
-      cache.put("key", "value");
-      assertNotNull(table.get(cache.dataForTest()), "the first real mapping must initialize CHM");
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure1 = null;
+      try {
+        assertTrue(cache.dataForTest() instanceof ConcurrentHashMap);
+        Field table = ConcurrentHashMap.class.getDeclaredField("table");
+        table.setAccessible(true);
+        assertNull(table.get(cache.dataForTest()), "CHM must not be warmed by a sentinel Entry");
+        cache.put("key", "value");
+        assertNotNull(table.get(cache.dataForTest()), "the first real mapping must initialize CHM");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 
@@ -90,11 +100,11 @@ public final class CHMArchitectureTest {
   public void maintenanceClockHasNoCallerRefreshEntryPoint() {
     for (Method method : MaintenanceEventLoop.class.getDeclaredMethods()) {
       assertTrue(
-          !method.getName().equals("refreshClock") || java.lang.reflect.Modifier.isPrivate(method.getModifiers()),
+          !method.getName().equals("refreshClock")
+              || java.lang.reflect.Modifier.isPrivate(method.getModifiers()),
           "business and loader threads must not write the actor-owned clock");
     }
   }
-
 
   @Test
   public void chmLookupMustEvaluateTheProbeSideEquals() {
@@ -104,15 +114,13 @@ public final class CHMArchitectureTest {
       LookupKey probe = new LookupKey();
       probe.set(keyBytes, keyBytes.length);
       Entry entry =
-          EntryTestSupport.entry(
-              memory, keyBytes.length, probe.hashCode(), probe.hash(), 0x1_000L);
+          EntryTestSupport.entry(memory, keyBytes.length, probe.hashCode(), probe.hash(), 0x1_000L);
       NativeMemory.copy(keyBytes, 0, entry.nativeKeyBytesAddress(), keyBytes.length);
 
       assertEquals(probe.hashCode(), entry.hashCode(), "probe and entry must hash alike");
       assertTrue(probe.equals(entry), "the probe compares heap bytes against the native key");
       assertFalse(
-          entry.equals(probe),
-          "Entry.equals is Entry-to-Entry only; the asymmetry is deliberate");
+          entry.equals(probe), "Entry.equals is Entry-to-Entry only; the asymmetry is deliberate");
 
       ConcurrentHashMap<Object, Object> index = new ConcurrentHashMap<>();
       index.put(entry, entry);
@@ -125,6 +133,4 @@ public final class CHMArchitectureTest {
       memory.closeArenas();
     }
   }
-
-
 }

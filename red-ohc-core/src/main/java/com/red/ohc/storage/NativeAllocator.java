@@ -2,11 +2,12 @@ package com.red.ohc.storage;
 
 import com.sun.jna.Function;
 import com.sun.jna.Native;
+import com.sun.jna.Platform;
 
 /** Owns the native allocation backend without cache-specific accounting. */
 public class NativeAllocator {
   private static final int PROT_READ_WRITE = 0x3;
-  private static final int MAP_PRIVATE_ANONYMOUS = 0x22;
+  private static final int MAP_PRIVATE_ANONYMOUS = Platform.isMac() ? 0x1002 : 0x22;
   private static volatile Function mmap;
   private static volatile Function munmap;
 
@@ -56,7 +57,7 @@ public class NativeAllocator {
       mmap = Function.getFunction("c", "mmap");
       munmap = Function.getFunction("c", "munmap");
     } catch (Throwable failure) {
-      // Non-Linux or the symbols are unavailable: pages stay on the malloc path.
+      // Platforms without mapping symbols stay on the malloc path.
       mmap = null;
       munmap = null;
     }

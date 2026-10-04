@@ -63,48 +63,61 @@ public class OHCSerializedBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    workloadMode = WorkloadMode.parse(workload);
-    newKeyShape = SerializedBenchmarkSupport.isNewKeyShape(writeShape);
-    dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
-    writeSequence = SerializedBenchmarkSupport.writeSequence(writeShape, distribution);
-    long capacity = SerializedBenchmarkSupport.ohcCapacityBytes(keyBytes, valueBytes);
-    cache =
-        (OffHeapCache<byte[], byte[]>)
-            OHCacheBuilder.<byte[], byte[]>newBuilder()
-                .capacity(capacity)
-                .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.lightweightValueSerializer)
-                .eviction(Eviction.S3_FIFO)
-                .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
-                .build();
-    for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
-      cache.put(dataset.keys[i], dataset.values[i]);
-      if ((i & 1023) == 1023) {
-        cache.flushAsync().join();
+    try {
+      workloadMode = WorkloadMode.parse(workload);
+      newKeyShape = SerializedBenchmarkSupport.isNewKeyShape(writeShape);
+      dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
+      writeSequence = SerializedBenchmarkSupport.writeSequence(writeShape, distribution);
+      long capacity = SerializedBenchmarkSupport.ohcCapacityBytes(keyBytes, valueBytes);
+      cache =
+          (OffHeapCache<byte[], byte[]>)
+              OHCacheBuilder.<byte[], byte[]>newBuilder()
+                  .capacity(capacity)
+                  .keySerializer(Utils.byteArraySerializer)
+                  .valueSerializer(Utils.lightweightValueSerializer)
+                  .eviction(Eviction.S3_FIFO)
+                  .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
+                  .build();
+      for (int i = 0; i < SerializedBenchmarkSupport.CAPACITY_ENTRIES; i++) {
+        cache.put(dataset.keys[i], dataset.values[i]);
+        if ((i & 1023) == 1023) {
+          cache.flushAsync().join();
+        }
       }
+      cache.flushAsync().join();
+      if (cache.get(dataset.keys[0]) == null
+          || cache.get(dataset.keys[SerializedBenchmarkSupport.CAPACITY_ENTRIES - 1]) == null) {
+        throw new IllegalStateException("OHC preload is not resident");
+      }
+      assertHealthy();
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      cache = null;
+      throw failure;
     }
-    cache.flushAsync().join();
-    if (cache.get(dataset.keys[0]) == null
-        || cache.get(dataset.keys[SerializedBenchmarkSupport.CAPACITY_ENTRIES - 1]) == null) {
-      throw new IllegalStateException("OHC preload is not resident");
-    }
-    assertHealthy();
   }
 
   @TearDown(Level.Trial)
   public void tearDown() {
-    long flushStart = System.nanoTime();
-    cache.flushAsync().join();
-    long flushNanos = Math.max(0L, System.nanoTime() - flushStart);
-    long idleStart = System.nanoTime();
-    awaitIdle();
-    long idleNanos = Math.max(0L, System.nanoTime() - idleStart);
-    long stopStart = System.nanoTime();
+    long flushNanos = 0L;
+    long idleNanos = 0L;
+    Throwable failure = null;
     try {
+      long flushStart = System.nanoTime();
+      cache.flushAsync().join();
+      flushNanos = Math.max(0L, System.nanoTime() - flushStart);
+      long idleStart = System.nanoTime();
+      awaitIdle();
+      idleNanos = Math.max(0L, System.nanoTime() - idleStart);
       assertHealthy();
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
     } finally {
+      long stopStart = System.nanoTime();
       try {
-        cache.close();
+        SerializedBenchmarkSupport.stopOHC(cache, failure);
       } finally {
         System.out.printf(
             Locale.ROOT,
@@ -137,19 +150,13 @@ public class OHCSerializedBenchmark {
 
   @Benchmark
   @Threads(1)
-  public void oneThread(
-      ThreadState state,
-      BenchmarkWindowResults window,
-      Blackhole blackhole) {
+  public void oneThread(ThreadState state, BenchmarkWindowResults window, Blackhole blackhole) {
     access(state, blackhole);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
-  public void cpuThreads(
-      ThreadState state,
-      BenchmarkWindowResults window,
-      Blackhole blackhole) {
+  public void cpuThreads(ThreadState state, BenchmarkWindowResults window, Blackhole blackhole) {
     access(state, blackhole);
   }
 
@@ -157,10 +164,7 @@ public class OHCSerializedBenchmark {
   @Benchmark
   @Threads(Threads.MAX)
   public void diagnosticCpuThreads(
-      ThreadState state,
-      BenchmarkWindowResults window,
-      DebtResults debt,
-      Blackhole blackhole) {
+      ThreadState state, BenchmarkWindowResults window, DebtResults debt, Blackhole blackhole) {
     access(state, blackhole);
   }
 
@@ -207,8 +211,7 @@ public class OHCSerializedBenchmark {
     }
   }
 
-  private void directAccess(
-      ThreadState state, DirectReadState directState, Blackhole blackhole) {
+  private void directAccess(ThreadState state, DirectReadState directState, Blackhole blackhole) {
     state.attemptedOperations++;
     boolean write = workloadMode.isWrite(++state.operations);
     int index = nextIndex(state, write);
@@ -242,16 +245,12 @@ public class OHCSerializedBenchmark {
         : dataset.keys[index];
   }
 
-  private boolean write(
-      OffHeapCache<byte[], byte[]> cache,
-      byte[] key,
-      byte[] value) {
+  private boolean write(OffHeapCache<byte[], byte[]> cache, byte[] key, byte[] value) {
     cache.put(key, value);
     return true;
   }
 
-  static int nextIndex(
-      ThreadState state, boolean write, int[] readSequence, int[] writeSequence) {
+  static int nextIndex(ThreadState state, boolean write, int[] readSequence, int[] writeSequence) {
     int[] sequence = write ? writeSequence : readSequence;
     long cursor = write ? state.writeCursor++ : state.readCursor++;
     return sequence[Math.floorMod(cursor, sequence.length)];
@@ -259,17 +258,17 @@ public class OHCSerializedBenchmark {
 
   private void assertHealthy() {
     OHCacheStats stats = cache.stats();
-    if (stats.maintenanceUnhealthy() || stats.maintenanceQueueDepth() != 0L) {
+    if (stats.maintenanceUnhealthy() || stats.lifecycleJournalLagRecords() != 0L) {
       throw new IllegalStateException("invalid OHC serialized measurement");
     }
   }
 
   private void awaitIdle() {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
-    for (;;) {
+    for (; ; ) {
       OHCacheStats stats = cache.stats();
       if (!stats.maintenanceUnhealthy()
-          && stats.maintenanceQueueDepth() == 0L
+          && stats.lifecycleJournalLagRecords() == 0L
           && stats.retirementSafeSegmentCount() == 0L
           && stats.activeReaderCount() == 0L) {
         return;
@@ -308,7 +307,6 @@ public class OHCSerializedBenchmark {
       readCursor = offset;
       writeCursor = offset;
     }
-
   }
 
   @State(Scope.Thread)
@@ -446,12 +444,9 @@ public class OHCSerializedBenchmark {
       // per-iteration deltas so warmup and preload history is never included in the measurement.
       // Gauges are printed per iteration because JMH sums EVENTS across iterations.
       endNativeDebtHeadroomBytes = stats.nativeDebtHeadroomBytes();
-      retirementGeneratedBytesDelta =
-          stats.retirementGeneratedBytesTotal() - generatedBefore;
-      retirementCompletedBytesDelta =
-          stats.retirementCompletedBytesTotal() - completedBefore;
-      retirementReclaimBatchCountDelta =
-          stats.retirementReclaimBatchCount() - reclaimBatchesBefore;
+      retirementGeneratedBytesDelta = stats.retirementGeneratedBytesTotal() - generatedBefore;
+      retirementCompletedBytesDelta = stats.retirementCompletedBytesTotal() - completedBefore;
+      retirementReclaimBatchCountDelta = stats.retirementReclaimBatchCount() - reclaimBatchesBefore;
       retirementSafeSegmentCount = stats.retirementSafeSegmentCount();
       System.out.printf(
           Locale.ROOT,

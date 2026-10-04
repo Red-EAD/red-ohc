@@ -15,7 +15,7 @@ import com.sun.jdi.ClassType;
 import com.sun.jdi.Method;
 import com.sun.jdi.VirtualMachine;
 import com.sun.jdi.connect.Connector;
-import com.sun.jdi.connect.LaunchingConnector;
+import com.sun.jdi.connect.ListeningConnector;
 import com.sun.jdi.event.BreakpointEvent;
 import com.sun.jdi.event.ClassPrepareEvent;
 import com.sun.jdi.event.Event;
@@ -38,14 +38,38 @@ public final class RetirementProducerInterleavingTest {
 
   @Test(dataProvider = "operations", timeOut = 30_000L)
   public void actorInterleavingPreservesOwnershipAndWakeup(String operation) throws Exception {
-    LaunchingConnector connector = Bootstrap.virtualMachineManager().defaultConnector();
+    ListeningConnector connector =
+        Bootstrap.virtualMachineManager().listeningConnectors().stream()
+            .filter(candidate -> candidate.name().equals("com.sun.jdi.SocketListen"))
+            .findFirst()
+            .orElseThrow();
     Map<String, Connector.Argument> arguments = connector.defaultArguments();
-    arguments.get("main").setValue(Probe.class.getName() + " " + operation);
+    arguments.get("localAddress").setValue("127.0.0.1");
+    arguments.get("timeout").setValue("20000");
     String classpath =
         System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
-    arguments.get("options").setValue("-cp \"" + classpath + "\"");
-    VirtualMachine vm = connector.launch(arguments);
-    Process process = vm.process();
+    String address = connector.startListening(arguments);
+    Process process;
+    VirtualMachine vm;
+    try {
+      process =
+          new ProcessBuilder(
+                  System.getProperty("java.home") + "/bin/java",
+                  "-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,address=" + address,
+                  "-cp",
+                  classpath,
+                  Probe.class.getName(),
+                  operation)
+              .start();
+      try {
+        vm = connector.accept(arguments);
+      } catch (Throwable failure) {
+        process.destroyForcibly();
+        throw failure;
+      }
+    } finally {
+      connector.stopListening(arguments);
+    }
     int interleavings = 0;
     try {
       ClassPrepareRequest prepare = vm.eventRequestManager().createClassPrepareRequest();
@@ -62,7 +86,8 @@ public final class RetirementProducerInterleavingTest {
           if (event instanceof ClassPrepareEvent) {
             String methodName =
                 operation.equals("reserve") ? "reservationState" : operation + "Reserved";
-            for (Method method : ((ClassPrepareEvent) event).referenceType().methodsByName(methodName)) {
+            for (Method method :
+                ((ClassPrepareEvent) event).referenceType().methodsByName(methodName)) {
               BreakpointRequest breakpoint =
                   vm.eventRequestManager().createBreakpointRequest(method.location());
               breakpoint.enable();
@@ -71,7 +96,13 @@ public final class RetirementProducerInterleavingTest {
             BreakpointEvent breakpoint = (BreakpointEvent) event;
             // reset/close also read reservationState; pause only the reservation fast path.
             if (operation.equals("reserve")
-                && !breakpoint.thread().frame(1).location().method().name().equals("tryReserveForLane")) {
+                && !breakpoint
+                    .thread()
+                    .frame(1)
+                    .location()
+                    .method()
+                    .name()
+                    .equals("tryReserveForLane")) {
               continue;
             }
             for (BreakpointRequest request : vm.eventRequestManager().breakpointRequests()) {
@@ -103,7 +134,9 @@ public final class RetirementProducerInterleavingTest {
     }
   }
 
-  /** Separate JVM so the debugger can pause immediately before the actual state/publication read. */
+  /**
+   * Separate JVM so the debugger can pause immediately before the actual state/publication read.
+   */
   public static final class Probe {
     private static String operation;
     private static NativeMemory.Memory memory;
@@ -142,7 +175,7 @@ public final class RetirementProducerInterleavingTest {
           }
           assertTrue(
               journal.hasRunnableWork(), "late completion must wake an actor that drained the cut");
-          assertEquals(journal.sealReadySegments(2L), 1);
+          assertEquals(journal.sealReadySegments(), 1);
           journal.publishSafe(true, true);
           journal.reclaimActorResult(memory, Integer.MAX_VALUE);
           journal.finishReadyDrains();
@@ -163,7 +196,7 @@ public final class RetirementProducerInterleavingTest {
         original.reset(0L, 2);
       } else {
         journal.cutAllProducersAtWatermark();
-        assertEquals(journal.sealReadySegments(1L), 0);
+        assertEquals(journal.sealReadySegments(), 0);
         journal.finishReadyDrains();
         assertFalse(journal.hasWork(), "the actor must drain its signal before completion");
       }

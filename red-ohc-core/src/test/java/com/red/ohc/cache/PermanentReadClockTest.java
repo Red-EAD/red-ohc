@@ -56,18 +56,28 @@ public final class PermanentReadClockTest {
           }
         };
     byte[] key = {1, 2, 3, 4};
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, new byte[16]);
-      cache.flushAsync().join();
-      readerClockCalls.set(0);
-      assertTrue(cache.getDirect(key, value -> value.getLong(0)));
-      assertEquals(readerClockCalls.get(), 0);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure4 = null;
+      try {
+        cache.put(key, new byte[16]);
+        cache.flushAsync().join();
+        readerClockCalls.set(0);
+        assertTrue(cache.getDirect(key, value -> value.getLong(0)));
+        assertEquals(readerClockCalls.get(), 0);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
@@ -87,18 +97,28 @@ public final class PermanentReadClockTest {
           }
         };
     byte[] key = {9, 8, 7, 6};
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, new byte[16], 64L);
-      cache.flushAsync().join();
-      now.set(64);
-      cache.flushAsync().join();
-      assertTrue(!cache.getDirect(key, value -> value.getLong(0)));
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put(key, new byte[16], 64L);
+        cache.flushAsync().join();
+        now.set(64);
+        cache.flushAsync().join();
+        assertTrue(!cache.getDirect(key, value -> value.getLong(0)));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
@@ -120,26 +140,35 @@ public final class PermanentReadClockTest {
     byte[] readKey = {1, 2, 3, 4};
     byte[] absentKey = {5, 6, 7, 8};
     byte[] replaceKey = {9, 10, 11, 12};
-    try (OffHeapCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .buildTyped()) {
-      assertPutEventually(cache, readKey, new byte[16], 64L);
-      assertPutEventually(cache, absentKey, new byte[] {1}, 64L);
-      assertPutEventually(cache, replaceKey, new byte[] {2}, 64L);
+    {
+      OffHeapCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .buildTyped();
+      Throwable cacheFailure2 = null;
+      try {
+        assertPutEventually(cache, readKey, new byte[16], 64L);
+        assertPutEventually(cache, absentKey, new byte[] {1}, 64L);
+        assertPutEventually(cache, replaceKey, new byte[] {2}, 64L);
 
-      now.set(64);
+        now.set(64);
 
-      assertEquals(cache.get(readKey), null);
-      assertFalse(cache.containsKey(readKey));
-      assertFalse(cache.getDirect(readKey, value -> value.getByte(0)));
-      assertEquals(
-          cache.getDirectAll(Collections.singletonList(readKey), (key, value) -> {}), 0);
-      assertTrue(cache.putIfAbsent(absentKey, new byte[] {3}, 0L) == null);
-      assertFalse(cache.replace(replaceKey, new byte[] {2}, new byte[] {4}, 0L));
+        assertEquals(cache.get(readKey), null);
+        assertFalse(cache.containsKey(readKey));
+        assertFalse(cache.getDirect(readKey, value -> value.getByte(0)));
+        assertEquals(cache.getDirectAll(Collections.singletonList(readKey), (key, value) -> {}), 0);
+        assertTrue(cache.putIfAbsent(absentKey, new byte[] {3}, 0L) == null);
+        assertFalse(cache.replace(replaceKey, new byte[] {2}, new byte[] {4}, 0L));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
@@ -161,20 +190,30 @@ public final class PermanentReadClockTest {
           }
         };
     byte[] key = {11, 12, 13, 14};
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .ticker(ticker)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, new byte[16], 2_000L);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .ticker(ticker)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure1 = null;
+      try {
+        cache.put(key, new byte[16], 2_000L);
 
-      readerWallMillis.set(3_000L);
-      assertTrue(cache.getDirect(key, value -> value.getLong(0)));
+        readerWallMillis.set(3_000L);
+        assertTrue(cache.getDirect(key, value -> value.getLong(0)));
 
-      monotonicNanos.set(1_000_000_000L);
-      assertFalse(cache.getDirect(key, value -> value.getLong(0)));
+        monotonicNanos.set(1_000_000_000L);
+        assertFalse(cache.getDirect(key, value -> value.getLong(0)));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 

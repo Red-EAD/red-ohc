@@ -2,7 +2,6 @@ package com.red.ohc.maintenance;
 
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 import org.jctools.queues.MpscUnboundedArrayQueue;
@@ -15,10 +14,13 @@ public final class WriterLifecycleJournal {
   private final Object laneCreationLock = new Object();
   private final WriterLifecycleLane.SegmentPool segmentPool =
       new WriterLifecycleLane.SegmentPool(SEGMENT_CAPACITY);
-  private final AtomicLong readinessGeneration = new AtomicLong();
-  /** Lanes whose ready marker is set; the actor drains only these instead of scanning every lane. */
+
+  /**
+   * Lanes whose ready marker is set; the actor drains only these instead of scanning every lane.
+   */
   private final MpscUnboundedArrayQueue<WriterLifecycleLane> readyLanes =
       new MpscUnboundedArrayQueue<>(READY_QUEUE_CHUNK_SIZE);
+
   private final AtomicInteger readyLaneCount = new AtomicInteger();
   private volatile WriterLifecycleLane[] lanes = new WriterLifecycleLane[0];
   private volatile Runnable readySignal;
@@ -38,8 +40,7 @@ public final class WriterLifecycleJournal {
   /** Cold-path lane creation; an active writer keeps the returned lane exclusively. */
   public WriterLifecycleLane createLane() {
     synchronized (laneCreationLock) {
-      WriterLifecycleLane lane =
-          new WriterLifecycleLane(SEGMENT_CAPACITY, segmentPool, this::onLaneReadinessChanged);
+      WriterLifecycleLane lane = new WriterLifecycleLane(SEGMENT_CAPACITY, segmentPool);
       WriterLifecycleLane[] current = lanes;
       lane.bindJournal(this, current.length);
       Runnable signal = readySignal;
@@ -147,32 +148,6 @@ public final class WriterLifecycleJournal {
     return false;
   }
 
-  /** Returns whether an explicit maintenance wake has an executable head record. */
-  public boolean hasUnmanagedReadyRecords() {
-    for (WriterLifecycleLane lane : lanes) {
-      if (lane.hasHeadCommitted()) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** Actor-only slow path that refreshes every lane's coalesced ready marker. */
-  boolean probeUnmanagedReadyRecords() {
-    boolean ready = false;
-    for (WriterLifecycleLane lane : lanes) {
-      if (lane.refreshReadySignal()) {
-        ready = true;
-      }
-    }
-    return ready;
-  }
-
-  /** Changes only when a lane's coalesced ready marker changes state. */
-  long readinessGeneration() {
-    return readinessGeneration.get();
-  }
-
   public void bindReadySignal(Runnable signal) {
     bindReadySignal(signal, null);
   }
@@ -204,10 +179,6 @@ public final class WriterLifecycleJournal {
       total += lane.headOfLineStopCount();
     }
     return total;
-  }
-
-  private void onLaneReadinessChanged() {
-    readinessGeneration.incrementAndGet();
   }
 
   /** Producer edge: tentatively counts a set before the marker CAS; retracted on CAS loss. */
@@ -248,9 +219,8 @@ public final class WriterLifecycleJournal {
   }
 
   /**
-   * Cheap runnable gate. Queue entries whose marker was cleared elsewhere (mailbox drain,
-   * stale-marker probe) may linger, so emptiness alone must not keep the actor runnable;
-   * a bounded no-work drain consumes them.
+   * Cheap runnable gate. Queue entries whose marker was cleared by a completed drain may linger, so
+   * emptiness alone must not keep the actor runnable; a bounded no-work drain consumes them.
    */
   public boolean hasPendingReadyLanes() {
     return readyLaneCount.get() != 0;

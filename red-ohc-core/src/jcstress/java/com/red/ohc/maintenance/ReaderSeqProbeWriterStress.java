@@ -13,7 +13,6 @@ import org.openjdk.jcstress.infra.results.I_Result;
 import com.red.ohc.runtime.ReaderRegistry;
 import com.red.ohc.runtime.ReaderSlot;
 import com.red.ohc.storage.NativeMemory;
-import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
 /**
@@ -42,7 +41,7 @@ public class ReaderSeqProbeWriterStress {
     NativeMemory.putLong(key + 48L, 0x5eedL);
     journal.appendStructural(key, keyAllocation);
     journal.cutAllProducersAtWatermark();
-    if (journal.sealReadySegments(1L) != 1) {
+    if (journal.sealReadySegments() != 1) {
       throw new AssertionError("expected one sealed structural record");
     }
   }

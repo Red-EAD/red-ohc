@@ -6,8 +6,7 @@ import com.red.ohc.maintenance.MaintenanceEventLoop;
 
 /**
  * Publishes a per-op sequence word (odd = inside an op) and keeps native payloads protected until
- * the depth-0 exit store. Close is a quiesced-only teardown, so this guard owns
- * reader-vs-reclaimer safety, not close racing.
+ * the depth-0 exit store.
  */
 public final class ReaderGuard {
   private final MaintenanceEventLoop worker;
@@ -16,25 +15,23 @@ public final class ReaderGuard {
     this.worker = Objects.requireNonNull(worker, "worker");
   }
 
-  public boolean enter(ThreadContext context) {
-    return enter(context, true);
+  public void enter(ThreadContext context) {
+    enter(context, true);
   }
 
   /** Enters a value reader admitted by an operation-level lifecycle guard. */
-  public boolean enterAfterAdmission(ThreadContext context) {
-    return enter(context, true);
+  public void enterAfterAdmission(ThreadContext context) {
+    enter(context, true);
   }
 
   /** Protects native-key lookup only; the caller does not dereference a replaceable value. */
-  public boolean enterLookupAfterAdmission(ThreadContext context) {
-    return enter(context, false);
+  public void enterLookupAfterAdmission(ThreadContext context) {
+    enter(context, false);
   }
 
-  private boolean enter(ThreadContext context, boolean protectsValues) {
+  private void enter(ThreadContext context, boolean protectsValues) {
     if (!context.isRegistered()) {
-      if (!worker.registerReader(context)) {
-        return false;
-      }
+      worker.registerReader(context);
     }
     if (context.readerDepth() != 0) {
       // Nested scopes only bump depth; the first value protector re-stores the odd word with
@@ -42,11 +39,10 @@ public final class ReaderGuard {
       if (context.enterReader(protectsValues)) {
         context.upgradeReaderOpValueBit();
       }
-      return true;
+      return;
     }
     context.beginReaderOp(protectsValues);
     context.enterReader(protectsValues);
-    return true;
   }
 
   public void exit(ThreadContext context) {

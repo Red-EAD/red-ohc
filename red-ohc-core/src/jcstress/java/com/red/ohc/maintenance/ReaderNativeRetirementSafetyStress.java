@@ -18,8 +18,14 @@ import com.red.ohc.storage.WriterArena;
 
 /** A value-protected reader must keep its native value out of the SAFE queue. */
 @JCStressTest
-@Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the active value reader blocks native release")
-@Outcome(id = "1", expect = Expect.FORBIDDEN, desc = "native value was released while the reader guard was active")
+@Outcome(
+    id = "0",
+    expect = Expect.ACCEPTABLE,
+    desc = "the active value reader blocks native release")
+@Outcome(
+    id = "1",
+    expect = Expect.FORBIDDEN,
+    desc = "native value was released while the reader guard was active")
 @State
 public class ReaderNativeRetirementSafetyStress {
   private static final int VALUE_LENGTH = 32_768;
@@ -38,7 +44,7 @@ public class ReaderNativeRetirementSafetyStress {
     ValueBlock.initialize(value, 0L, VALUE_LENGTH, 0L);
     journal.append(value, allocation);
     journal.cutAllProducersAtWatermark();
-    if (journal.sealReadySegments(1L) != 1) {
+    if (journal.sealReadySegments() != 1) {
       throw new AssertionError("expected one sealed retirement segment");
     }
   }

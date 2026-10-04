@@ -51,16 +51,10 @@ public final class MaxSizeTest {
   public void maxSizeAndCapacityAreMutuallyExclusive() {
     expectThrows(
         IllegalStateException.class,
-        () ->
-            OHCacheBuilder.<String, String>newBuilder()
-                .capacity(1 << 20)
-                .maxSize(2));
+        () -> OHCacheBuilder.<String, String>newBuilder().capacity(1 << 20).maxSize(2));
     expectThrows(
         IllegalStateException.class,
-        () ->
-            OHCacheBuilder.<String, String>newBuilder()
-                .maxSize(2)
-                .capacity(1 << 20));
+        () -> OHCacheBuilder.<String, String>newBuilder().maxSize(2).capacity(1 << 20));
     expectThrows(
         IllegalArgumentException.class,
         () -> OHCacheBuilder.<String, String>newBuilder().maxSize(0));
@@ -79,17 +73,27 @@ public final class MaxSizeTest {
 
   @Test(dataProvider = "evictionStrategies", timeOut = 5_000L)
   public void maxSizeEvictsAtTheEntryCountBoundary(Eviction eviction) {
-    try (OHCache<String, String> cache = newMaxSizeCache(2, eviction)) {
-      assertEquals(cache.capacity(), -1L);
-      cache.put("one", "short");
-      cache.put("two", "a value with a different size");
-      cache.put("three", "third");
+    {
+      OHCache<String, String> cache = newMaxSizeCache(2, eviction);
+      Throwable cacheFailure9 = null;
+      try {
+        assertEquals(cache.capacity(), -1L);
+        cache.put("one", "short");
+        cache.put("two", "a value with a different size");
+        cache.put("three", "third");
 
-      cache.flushAsync().join();
+        cache.flushAsync().join();
 
-      assertEquals(cache.size(), 2L);
-      assertTrue(cache.stats().liveWeight() > 0L);
-      assertEquals(cache.get("three"), "third");
+        assertEquals(cache.size(), 2L);
+        assertTrue(cache.stats().liveWeight() > 0L);
+        assertEquals(cache.get("three"), "third");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure9 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure9);
+      }
     }
   }
 
@@ -100,15 +104,25 @@ public final class MaxSizeTest {
 
   @Test
   public void replacingAnEntryDoesNotConsumeAnotherMaxSizeSlot() {
-    try (OHCache<String, String> cache = newMaxSizeCache(2)) {
-      cache.put("one", "one");
-      cache.put("two", "two");
-      cache.put("one", "a replacement with a larger value");
+    {
+      OHCache<String, String> cache = newMaxSizeCache(2);
+      Throwable cacheFailure8 = null;
+      try {
+        cache.put("one", "one");
+        cache.put("two", "two");
+        cache.put("one", "a replacement with a larger value");
 
-      cache.flushAsync().join();
+        cache.flushAsync().join();
 
-      assertEquals(cache.size(), 2L);
-      assertEquals(cache.get("one"), "a replacement with a larger value");
+        assertEquals(cache.size(), 2L);
+        assertEquals(cache.get("one"), "a replacement with a larger value");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure8 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure8);
+      }
     }
   }
 
@@ -117,18 +131,28 @@ public final class MaxSizeTest {
     String small = "s";
     String medium = repeat('m', 8_192);
     String large = repeat('l', 16_384);
-    try (OHCache<String, String> cache = newMaxSizeCache(3)) {
-      assertPutEventually(cache, "small", small);
-      assertPutEventually(cache, "medium", medium);
-      assertPutEventually(cache, "large", large);
+    {
+      OHCache<String, String> cache = newMaxSizeCache(3);
+      Throwable cacheFailure7 = null;
+      try {
+        assertPutEventually(cache, "small", small);
+        assertPutEventually(cache, "medium", medium);
+        assertPutEventually(cache, "large", large);
 
-      cache.flushAsync().join();
+        cache.flushAsync().join();
 
-      assertEquals(cache.size(), 3L);
-      assertEquals(cache.get("small"), small);
-      assertEquals(cache.get("medium"), medium);
-      assertEquals(cache.get("large"), large);
-      assertTrue(cache.stats().liveWeight() > medium.length());
+        assertEquals(cache.size(), 3L);
+        assertEquals(cache.get("small"), small);
+        assertEquals(cache.get("medium"), medium);
+        assertEquals(cache.get("large"), large);
+        assertTrue(cache.stats().liveWeight() > medium.length());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure7 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure7);
+      }
     }
   }
 
@@ -140,254 +164,344 @@ public final class MaxSizeTest {
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
-    try {
-      cache.put("one", "value");
-      Map<String, String> batch = new LinkedHashMap<>();
-      batch.put("batch", "batch-value");
-      cache.putAll(batch);
-      assertTrue(cache.putIfAbsent("async", "async-value", 0L) == null);
-      assertTrue(
-          cache.replace("one", "value", "replacement", 0L));
-    } finally {
-      cache.close();
+    {
+      Throwable explicitCacheFailure7 = null;
+      try {
+
+        cache.put("one", "value");
+        Map<String, String> batch = new LinkedHashMap<>();
+        batch.put("batch", "batch-value");
+        cache.putAll(batch);
+        assertTrue(cache.putIfAbsent("async", "async-value", 0L) == null);
+        assertTrue(cache.replace("one", "value", "replacement", 0L));
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure7 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure7);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void synchronousReplaceUsesTheSharedNativePoolPath() throws Exception {
-    OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(1);
-    try {
-      cache.put("one", "old");
-      assertTrue(cache.replace("one", "old", "new", 0L));
-      assertEquals(cache.get("one"), "new");
-    } finally {
-      cache.close();
+    OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(1);
+    {
+      Throwable explicitCacheFailure6 = null;
+      try {
+
+        cache.put("one", "old");
+        assertTrue(cache.replace("one", "old", "new", 0L));
+        assertEquals(cache.get("one"), "new");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure6 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure6);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void replacementDoesNotWaitForTheMaintenanceActor() throws Exception {
-    OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(1);
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
-    try {
-      cache.put("one", "value-one");
-      ExecutorService writer = Executors.newSingleThreadExecutor();
+    ExecutorService writer = Executors.newSingleThreadExecutor();
+    {
+      Throwable explicitCacheFailure5 = null;
       try {
+        pauseMaintenance(cache, paused, release);
+
+        cache.put("one", "value-one");
+
         Future<?> replacement = writer.submit(() -> cache.put("one", "replacement"));
         replacement.get(1L, TimeUnit.SECONDS);
         assertEquals(cache.get("one"), "replacement");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure5 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
       } finally {
-        writer.shutdownNow();
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure5, writer);
       }
-    } finally {
-      release.countDown();
-      cache.close();
     }
   }
 
   @Test(timeOut = 10_000L)
   public void newKeyPutDoesNotWaitForTheMaintenanceActorWhenTargetIsFull() throws Exception {
-    OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(1);
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
     ExecutorService writer = Executors.newSingleThreadExecutor();
-    try {
-      cache.put("one", "value-one");
-      Future<?> second = writer.submit(() -> cache.put("two", "value-two"));
+    {
+      Throwable explicitCacheFailure4 = null;
+      try {
+        pauseMaintenance(cache, paused, release);
 
-      second.get(1L, TimeUnit.SECONDS);
-      assertEquals(cache.size(), 2L);
-    } finally {
-      release.countDown();
-      writer.shutdownNow();
-      cache.close();
+        cache.put("one", "value-one");
+        Future<?> second = writer.submit(() -> cache.put("two", "value-two"));
+
+        second.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.size(), 2L);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure4 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure4, writer);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void putAllDoesNotWaitForTheMaintenanceActor() throws Exception {
-    OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(1);
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
-    try {
-      Map<String, String> entries = new LinkedHashMap<>();
-      entries.put("one", "value-one");
-      entries.put("two", "value-two");
-      entries.put("three", "value-three");
-      ExecutorService writer = Executors.newSingleThreadExecutor();
+    ExecutorService writer = Executors.newSingleThreadExecutor();
+    {
+      Throwable explicitCacheFailure3 = null;
       try {
+        pauseMaintenance(cache, paused, release);
+
+        Map<String, String> entries = new LinkedHashMap<>();
+        entries.put("one", "value-one");
+        entries.put("two", "value-two");
+        entries.put("three", "value-three");
+
         Future<?> putAll = writer.submit(() -> cache.putAll(entries));
         putAll.get(1L, TimeUnit.SECONDS);
         assertEquals(cache.size(), 3L);
         release.countDown();
         cache.flushAsync().join();
+
+        assertEquals(cache.size(), 1L);
+        assertEquals(cache.get("three"), "value-three");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure3 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
       } finally {
-        writer.shutdownNow();
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure3, writer);
       }
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.get("three"), "value-three");
-    } finally {
-      release.countDown();
-      cache.close();
     }
   }
 
-
   @Test(timeOut = 10_000L)
   public void newKeyPutDoesNotWaitForTheMaintenanceActor() throws Exception {
-    OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(1);
+    OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(1);
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
     ExecutorService writer = Executors.newSingleThreadExecutor();
-    try {
-      cache.put("first", "value");
-      Future<?> second = writer.submit(() -> cache.put("second", "value"));
-      second.get(1L, TimeUnit.SECONDS);
-      assertEquals(cache.size(), 2L);
-      release.countDown();
-      cache.flushAsync().join();
-      assertEquals(cache.get("second"), "value");
-      assertEquals(cache.size(), 1L);
-    } finally {
-      release.countDown();
-      writer.shutdownNow();
-      cache.close();
+    {
+      Throwable explicitCacheFailure2 = null;
+      try {
+        pauseMaintenance(cache, paused, release);
+
+        cache.put("first", "value");
+        Future<?> second = writer.submit(() -> cache.put("second", "value"));
+        second.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.size(), 2L);
+        release.countDown();
+        cache.flushAsync().join();
+        assertEquals(cache.get("second"), "value");
+        assertEquals(cache.size(), 1L);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure2 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure2, writer);
+      }
     }
   }
 
   @Test
   public void ttlAndRemoveUpdateCountAndLiveBytesAfterFlush() {
     MutableTicker ticker = new MutableTicker();
-    try (OHCache<String, String> cache = newMaxSizeCache(4, ticker)) {
-      cache.put("expires", "value", 100L);
-      cache.put("remove", "another value");
-      cache.flushAsync().join();
-      long liveBeforeRemove = cache.stats().liveWeight();
+    {
+      OHCache<String, String> cache = newMaxSizeCache(4, ticker);
+      Throwable cacheFailure6 = null;
+      try {
+        cache.put("expires", "value", 100L);
+        cache.put("remove", "another value");
+        cache.flushAsync().join();
+        long liveBeforeRemove = cache.stats().liveWeight();
 
-      cache.remove("remove");
-      assertTrue(!cache.containsKey("remove"));
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.stats().liveWeight() < liveBeforeRemove);
+        cache.remove("remove");
+        assertTrue(!cache.containsKey("remove"));
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.stats().liveWeight() < liveBeforeRemove);
 
-      ticker.now = 200L;
-      cache.flushAsync().join();
-      assertEquals(
-          cache.size(),
-          0L,
-          "ttl flush did not remove the expired entry: expirationCount="
-              + cache.stats().expirationCount()
-              + ", ttlBacklog="
-              + cache.stats().ttlBacklog()
-              + ", queueDepth="
-              + cache.stats().maintenanceQueueDepth()
-              + ", liveWeight="
-              + cache.stats().liveWeight());
-      assertEquals(cache.stats().liveWeight(), 0L);
+        ticker.now = 200L;
+        cache.flushAsync().join();
+        assertEquals(
+            cache.size(),
+            0L,
+            "ttl flush did not remove the expired entry: expirationCount="
+                + cache.stats().expirationCount()
+                + ", ttlBacklog="
+                + cache.stats().ttlBacklog()
+                + ", queueDepth="
+                + cache.stats().lifecycleJournalLagRecords()
+                + ", liveWeight="
+                + cache.stats().liveWeight());
+        assertEquals(cache.stats().liveWeight(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure6 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure6);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void flushDrainsEveryDueTtlContinuationBeforeCompleting() {
     MutableTicker ticker = new MutableTicker();
-    try (OHCache<String, String> cache = newMaxSizeCache(2_048, ticker)) {
-      for (int index = 0; index < 1_025; index++) {
-        cache.put("expires-" + index, "value", 64L);
+    {
+      OHCache<String, String> cache = newMaxSizeCache(2_048, ticker);
+      Throwable cacheFailure5 = null;
+      try {
+        for (int index = 0; index < 1_025; index++) {
+          cache.put("expires-" + index, "value", 64L);
+        }
+        cache.flushAsync().join();
+
+        ticker.now = 128L;
+        cache.flushAsync().join();
+
+        assertEquals(cache.size(), 0L);
+        assertEquals(cache.stats().expirationCount(), 1_025L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure5 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure5);
       }
-      cache.flushAsync().join();
-
-      ticker.now = 128L;
-      cache.flushAsync().join();
-
-      assertEquals(cache.size(), 0L);
-      assertEquals(cache.stats().expirationCount(), 1_025L);
     }
   }
 
   @Test(timeOut = 10_000L)
   public void resourceMaintenanceDrainsEveryDueTtlContinuation() throws Exception {
     MutableTicker ticker = new MutableTicker();
-    try (OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker)) {
-      for (int index = 0; index < 1_025; index++) {
-        cache.put("expires-" + index, "value", 64L);
-      }
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache =
+          (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker);
+      Throwable cacheFailure4 = null;
+      try {
+        for (int index = 0; index < 1_025; index++) {
+          cache.put("expires-" + index, "value", 64L);
+        }
+        cache.flushAsync().join();
 
-      ticker.now = 128L;
-      worker(cache).requestMaintenance();
-      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
-      while (cache.stats().expirationCount() < 1_025L && System.nanoTime() < deadline) {
-        Thread.yield();
-      }
+        ticker.now = 128L;
+        worker(cache).requestMaintenance();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+        while (cache.stats().expirationCount() < 1_025L && System.nanoTime() < deadline) {
+          Thread.yield();
+        }
 
-      assertEquals(cache.stats().expirationCount(), 1_025L);
-      assertEquals(cache.size(), 0L);
+        assertEquals(cache.stats().expirationCount(), 1_025L);
+        assertEquals(cache.size(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void resourceMaintenanceRetainsFutureTtl() throws Exception {
     MutableTicker ticker = new MutableTicker();
-    try (OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker)) {
-      cache.put("future", "value", 10_000L);
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache =
+          (OffHeapCache<String, String>) newMaxSizeCache(2_048, ticker);
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put("future", "value", 10_000L);
+        cache.flushAsync().join();
 
-      ticker.now = 128L;
-      worker(cache).requestMaintenance();
-      cache.flushAsync().join();
+        ticker.now = 128L;
+        worker(cache).requestMaintenance();
+        cache.flushAsync().join();
 
-      assertEquals(cache.get("future"), "value");
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.stats().expirationCount(), 0L);
+        assertEquals(cache.get("future"), "value");
+        assertEquals(cache.size(), 1L);
+        assertEquals(cache.stats().expirationCount(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
   @Test(timeOut = 20_000L)
   public void concurrentWritesEventuallyConvergeToMaxSize() throws Exception {
     ExecutorService writers = Executors.newFixedThreadPool(4);
-    try (OHCache<String, String> cache = newMaxSizeCache(8)) {
-      List<Future<?>> tasks = new ArrayList<>();
-      for (int worker = 0; worker < 4; worker++) {
-        final int workerId = worker;
-        tasks.add(
-            writers.submit(
-                () -> {
-                  for (int index = 0; index < 100; index++) {
-                    cache.put(
-                        "key-" + workerId + '-' + index,
-                        repeat((char) ('a' + workerId), index + 1));
-                  }
-                }));
+    try {
+      OHCache<String, String> cache = newMaxSizeCache(8);
+      Throwable cacheFailure2 = null;
+      try {
+        List<Future<?>> tasks = new ArrayList<>();
+        for (int worker = 0; worker < 4; worker++) {
+          final int workerId = worker;
+          tasks.add(
+              writers.submit(
+                  () -> {
+                    for (int index = 0; index < 100; index++) {
+                      cache.put(
+                          "key-" + workerId + '-' + index,
+                          repeat((char) ('a' + workerId), index + 1));
+                    }
+                  }));
+        }
+        writers.shutdown();
+        assertTrue(writers.awaitTermination(15L, TimeUnit.SECONDS));
+        for (Future<?> task : tasks) {
+          task.get();
+        }
+        cache.flushAsync().join();
+        OHCacheStats stats = cache.stats();
+        assertTrue(
+            cache.size() <= 8L,
+            "size="
+                + cache.size()
+                + ", queue="
+                + stats.lifecycleJournalLagRecords()
+                + ", liveWeight="
+                + stats.liveWeight());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2, writers);
       }
-      writers.shutdown();
-      assertTrue(writers.awaitTermination(15L, TimeUnit.SECONDS));
-      for (Future<?> task : tasks) {
-        task.get();
-      }
-      cache.flushAsync().join();
-      OHCacheStats stats = cache.stats();
-      assertTrue(
-          cache.size() <= 8L,
-          "size="
-              + cache.size()
-              + ", queue="
-              + stats.maintenanceQueueDepth()
-              + ", liveWeight="
-              + stats.liveWeight());
     } finally {
-      writers.shutdownNow();
+      CacheTestSupport.awaitCallers(writers);
     }
   }
 
@@ -397,29 +511,38 @@ public final class MaxSizeTest {
     int operationsPerWriter = 256;
     ExecutorService writers = Executors.newFixedThreadPool(writerCount);
     CountDownLatch start = new CountDownLatch(1);
-    try (OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(64)) {
-      List<Future<?>> tasks = new ArrayList<>();
-      for (int worker = 0; worker < writerCount; worker++) {
-        final int workerId = worker;
-        tasks.add(
-            writers.submit(
-                () -> {
-                  start.await();
-                  for (int index = 0; index < operationsPerWriter; index++) {
-                    cache.put("churn-" + workerId + '-' + index, "value");
-                  }
-                  return null;
-                }));
+    try {
+      OffHeapCache<String, String> cache = (OffHeapCache<String, String>) newMaxSizeCache(64);
+      Throwable cacheFailure1 = null;
+      try {
+        List<Future<?>> tasks = new ArrayList<>();
+        for (int worker = 0; worker < writerCount; worker++) {
+          final int workerId = worker;
+          tasks.add(
+              writers.submit(
+                  () -> {
+                    start.await();
+                    for (int index = 0; index < operationsPerWriter; index++) {
+                      cache.put("churn-" + workerId + '-' + index, "value");
+                    }
+                    return null;
+                  }));
+        }
+        start.countDown();
+        for (Future<?> task : tasks) {
+          task.get();
+        }
+        cache.flushAsync().join();
+        assertTrue(cache.size() <= 64L, "size=" + cache.size());
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1, writers);
       }
-      start.countDown();
-      for (Future<?> task : tasks) {
-        task.get();
-      }
-      cache.flushAsync().join();
-      assertTrue(cache.size() <= 64L, "size=" + cache.size());
     } finally {
-      writers.shutdownNow();
-      assertTrue(writers.awaitTermination(5L, TimeUnit.SECONDS));
+      CacheTestSupport.awaitCallers(writers);
     }
   }
 
@@ -433,24 +556,31 @@ public final class MaxSizeTest {
             .buildTyped();
     CountDownLatch paused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
-    try {
-      cache.put("one", "value-one");
-      ExecutorService writer = Executors.newSingleThreadExecutor();
+    ExecutorService writer = Executors.newSingleThreadExecutor();
+    {
+      Throwable explicitCacheFailure1 = null;
       try {
+        pauseMaintenance(cache, paused, release);
+
+        cache.put("one", "value-one");
+
         Future<?> second = writer.submit(() -> cache.put("two", "value-two"));
         second.get(1L, TimeUnit.SECONDS);
         assertEquals(cache.size(), 2L);
         release.countDown();
+
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertEquals(cache.get("two"), "value-two");
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
       } finally {
-        writer.shutdownNow();
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure1, writer);
       }
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertEquals(cache.get("two"), "value-two");
-    } finally {
-      release.countDown();
-      cache.close();
     }
   }
 
@@ -482,8 +612,7 @@ public final class MaxSizeTest {
     return new String(result);
   }
 
-  private static void assertPutEventually(
-      OHCache<String, String> cache, String key, String value) {
+  private static void assertPutEventually(OHCache<String, String> cache, String key, String value) {
     for (int attempt = 0; attempt < 1_000; attempt++) {
       cache.put(key, value);
       return;
@@ -534,5 +663,4 @@ public final class MaxSizeTest {
       return now;
     }
   }
-
 }

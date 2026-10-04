@@ -36,100 +36,129 @@ public final class MaintenanceStatsTest {
 
   @Test
   public void statsExposeCapacityAndMaintenanceHealthWithoutSentinelValues() {
-    try (OHCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .build()) {
-      cache.put("key", "value");
-      cache.flushAsync().join();
+    {
+      OHCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .build();
+      Throwable cacheFailure3 = null;
+      try {
+        cache.put("key", "value");
+        cache.flushAsync().join();
 
-      OHCacheStats stats = cache.stats();
-      assertEquals(stats.size(), 1L);
-      assertTrue(stats.liveWeight() > 0L);
-      assertTrue(stats.nativeAllocatedBytes() >= stats.liveWeight());
-      assertTrue(stats.ttlBacklog() >= 0L);
-      assertEquals(stats.maintenanceQueueDepth(), 0L);
-      assertTrue(stats.maintenancePassWorkNanos() >= 0L);
-      assertTrue(stats.maintenanceActiveNanosTotal() >= 0L);
-      assertTrue(stats.maintenanceParkNanosTotal() >= 0L);
-      assertTrue(stats.maintenanceImmediateContinuationCount() >= 0L);
-      assertTrue(stats.retirementQueueDepth() >= 0L);
-      assertTrue(stats.retirementSealRecordsTotal() >= 0L);
-      assertTrue(stats.retirementReclaimRecordsTotal() >= 0L);
-      assertTrue(stats.retirementSealScannedLanesTotal() >= 0L);
-      assertTrue(stats.retirementSealHeadOfLineStops() >= 0L);
-      assertTrue(stats.retirementReclaimBlockedCount() >= 0L);
-      assertTrue(stats.retirementReclaimBlockedNanos() >= 0L);
-      assertTrue(stats.maintenancePassCount() >= 0L);
-      assertTrue(stats.maintenanceWakeCount() >= 0L);
-      assertTrue(stats.maintenanceCollectedRecordsTotal() >= 0L);
-      assertTrue(stats.activeReaderCount() >= 0L);
-      assertTrue(stats.nativeDebtBudgetBytes() > 0L);
-      assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
+        OHCacheStats stats = cache.stats();
+        assertEquals(stats.size(), 1L);
+        assertTrue(stats.liveWeight() > 0L);
+        assertTrue(stats.nativeAllocatedBytes() >= stats.liveWeight());
+        assertTrue(stats.ttlBacklog() >= 0L);
+        assertEquals(stats.lifecycleJournalLagRecords(), 0L);
+        assertTrue(stats.maintenancePassWorkNanos() >= 0L);
+        assertTrue(stats.maintenanceActiveNanosTotal() >= 0L);
+        assertTrue(stats.maintenanceParkNanosTotal() >= 0L);
+        assertTrue(stats.maintenanceImmediateContinuationCount() >= 0L);
+        assertTrue(stats.retirementQueueDepth() >= 0L);
+        assertTrue(stats.retirementSealRecordsTotal() >= 0L);
+        assertTrue(stats.retirementReclaimRecordsTotal() >= 0L);
+        assertTrue(stats.retirementSealScannedLanesTotal() >= 0L);
+        assertTrue(stats.retirementReclaimBlockedCount() >= 0L);
+        assertTrue(stats.retirementReclaimBlockedNanos() >= 0L);
+        assertTrue(stats.maintenancePassCount() >= 0L);
+        assertTrue(stats.maintenanceWakeCount() >= 0L);
+        assertTrue(stats.maintenanceCollectedRecordsTotal() >= 0L);
+        assertTrue(stats.activeReaderCount() >= 0L);
+        assertTrue(stats.nativeDebtBudgetBytes() > 0L);
+        assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void pagePoolStatsExposePerClassUsageAudit() throws Exception {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      cache.put("key", "value");
-      cache.flushAsync().join();
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put("key", "value");
+        cache.flushAsync().join();
 
-      long inUsePages = 0L;
-      long deadline = System.nanoTime() + 5_000_000_000L;
-      OHCacheStats stats = null;
-      int index = 0;
-      do {
-        cache.put("key-" + (index++), "value");
-        stats = cache.stats();
-        inUsePages = 0L;
-        for (long pages : stats.allocatorPagesInUseByClass()) {
-          inUsePages += pages;
-        }
-        if (inUsePages > 0L) {
-          break;
-        }
-        Thread.sleep(10L);
-      } while (System.nanoTime() < deadline);
+        long inUsePages = 0L;
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        OHCacheStats stats = null;
+        int index = 0;
+        do {
+          cache.put("key-" + (index++), "value");
+          stats = cache.stats();
+          inUsePages = 0L;
+          for (long pages : stats.allocatorPagesInUseByClass()) {
+            inUsePages += pages;
+          }
+          if (inUsePages > 0L) {
+            break;
+          }
+          Thread.sleep(10L);
+        } while (System.nanoTime() < deadline);
 
-      assertEquals(stats.allocatorReadyPagesByClass().length, SizeClasses.count());
-      assertEquals(stats.allocatorPagesInUseByClass().length, SizeClasses.count());
-      assertEquals(stats.allocatorPageOccupancyByClass().length, SizeClasses.count());
-      assertTrue(inUsePages > 0L, "the audit sweep must publish in-use pages");
-      assertTrue(stats.allocatorPooledPageCount() > 0L);
-      assertTrue(stats.allocatorRetainedPagesCurrent() >= 0L);
-      assertTrue(stats.allocatorTrimmedBytesTotal() >= 0L);
-      for (double occupancy : stats.allocatorPageOccupancyByClass()) {
-        assertTrue(occupancy >= 0.0d && occupancy <= 1.0d);
+        assertEquals(stats.allocatorReadyPagesByClass().length, SizeClasses.count());
+        assertEquals(stats.allocatorPagesInUseByClass().length, SizeClasses.count());
+        assertEquals(stats.allocatorPageOccupancyByClass().length, SizeClasses.count());
+        assertTrue(inUsePages > 0L, "the audit sweep must publish in-use pages");
+        assertTrue(stats.allocatorPooledPageCount() > 0L);
+        assertTrue(stats.allocatorRetainedPagesCurrent() >= 0L);
+        assertTrue(stats.allocatorTrimmedBytesTotal() >= 0L);
+        for (double occupancy : stats.allocatorPageOccupancyByClass()) {
+          assertTrue(occupancy >= 0.0d && occupancy <= 1.0d);
+        }
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
       }
     }
   }
 
   @Test(timeOut = 10_000L)
   public void nativeDebtBudgetIsDiagnosticOnlyAndDoesNotRejectWrites() {
-    try (OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .nativeMemoryBudgetBytes(8L << 10)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped()) {
-      cache.put("key", "initial");
-      for (int index = 0; index < 32; index++) {
-        cache.put("key", "value-" + index);
-      }
+    {
+      OffHeapCache<String, String> cache =
+          OHCacheBuilder.<String, String>newBuilder()
+              .capacity(1 << 20)
+              .nativeMemoryBudgetBytes(8L << 10)
+              .keySerializer(STRING)
+              .valueSerializer(STRING)
+              .buildTyped();
+      Throwable cacheFailure1 = null;
+      try {
+        cache.put("key", "initial");
+        for (int index = 0; index < 32; index++) {
+          cache.put("key", "value-" + index);
+        }
 
-      OHCacheStats stats = cache.stats();
-      assertEquals(stats.nativeDebtBudgetBytes(), 8L << 10);
-      assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
-      assertEquals(cache.get("key"), "value-31");
+        OHCacheStats stats = cache.stats();
+        assertEquals(stats.nativeDebtBudgetBytes(), 8L << 10);
+        assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
+        assertEquals(cache.get("key"), "value-31");
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 }

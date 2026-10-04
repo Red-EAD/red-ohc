@@ -61,8 +61,7 @@ public final class MaintenanceIdleHandoffTest {
       fixture.loop.registerReader(urgent);
       pending.access = new AccessRing();
       urgent.access = new AccessRing();
-      Method scan =
-          MaintenanceEventLoop.class.getDeclaredMethod("scanAccessState", boolean.class);
+      Method scan = MaintenanceEventLoop.class.getDeclaredMethod("scanAccessState", boolean.class);
       scan.setAccessible(true);
       assertEquals(((Enum<?>) scan.invoke(fixture.loop, true)).name(), "NONE");
 
@@ -94,8 +93,7 @@ public final class MaintenanceIdleHandoffTest {
           accessNotificationState(pending.access) != 0,
           "the later ring must start signalled so the scan has to re-arm it");
 
-      Method scan =
-          MaintenanceEventLoop.class.getDeclaredMethod("scanAccessState", boolean.class);
+      Method scan = MaintenanceEventLoop.class.getDeclaredMethod("scanAccessState", boolean.class);
       scan.setAccessible(true);
       assertEquals(((Enum<?>) scan.invoke(fixture.loop, true)).name(), "URGENT");
       assertEquals(
@@ -138,7 +136,7 @@ public final class MaintenanceIdleHandoffTest {
       loop.registerReader(slot);
       slot.access = new AccessRing(slot::signalAccess);
       assertTrue(slot.access.offer(entry, 0L, 0L, 0));
-      loop.start();
+      MaintenanceTestSupport.start(loop);
 
       long deadline = System.nanoTime() + 1_000_000_000L;
       while (!slot.access.isEmpty() && System.nanoTime() < deadline) {
@@ -165,11 +163,10 @@ public final class MaintenanceIdleHandoffTest {
       lifecycleDeadline.setAccessible(true);
       lifecycleDeadline.setLong(fixture.loop, Long.MAX_VALUE);
       fixture.slot.access = new AccessRing(() -> {});
-      fixture.loop.start();
+      MaintenanceTestSupport.start(fixture.loop);
 
       long parkDeadline = System.nanoTime() + 1_000_000_000L;
-      while ((Long) field(field(fixture.loop, "idleBackoff"), "parkNanos")
-              != 10_000_000L
+      while ((Long) field(field(fixture.loop, "idleBackoff"), "parkNanos") != 10_000_000L
           && System.nanoTime() < parkDeadline) {
         Thread.yield();
       }
@@ -191,7 +188,8 @@ public final class MaintenanceIdleHandoffTest {
       }
       assertTrue(
           fixture.slot.access.isEmpty(),
-          "a registered reader must eventually drain an accepted record even when its signal is dropped");
+          "a registered reader must eventually drain an accepted record even when its signal is"
+              + " dropped");
       assertFalse(
           ((java.util.concurrent.atomic.AtomicBoolean) field(fixture.loop, "unhealthy")).get());
     }
@@ -210,7 +208,7 @@ public final class MaintenanceIdleHandoffTest {
             new ReaderRegistry(memory),
             Long.MAX_VALUE);
     try {
-      loop.start();
+      MaintenanceTestSupport.start(loop);
       long deadline = System.nanoTime() + 1_000_000_000L;
       while ((Long) field(field(loop, "idleBackoff"), "parkNanos") != 10_000_000L
           && System.nanoTime() < deadline) {
@@ -238,19 +236,23 @@ public final class MaintenanceIdleHandoffTest {
     final ReaderSlot slot = new ReaderSlot();
     final MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            new ConcurrentHashMap<>(), memory, Ticker.DEFAULT, 1 << 20,
-            Eviction.LRU, readers, Long.MAX_VALUE);
+            new ConcurrentHashMap<>(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            readers,
+            Long.MAX_VALUE);
     final Entry entry = EntryTestSupport.entry(memory, 0, 1, 0L);
 
     Fixture() throws Exception {
       loop.registerReader(slot);
       slot.access = new AccessRing(slot::signalAccess);
       assertTrue(slot.access.offer(entry, 0L, 0L, 0));
-      Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainMailbox", int.class);
+      Method drain = MaintenanceEventLoop.class.getDeclaredMethod("drainTestTasks", int.class);
       drain.setAccessible(true);
       drain.invoke(loop, Integer.MAX_VALUE);
-      Field accessDeadline =
-          MaintenanceEventLoop.class.getDeclaredField("nextAccessWakeNanos");
+      Field accessDeadline = MaintenanceEventLoop.class.getDeclaredField("nextAccessWakeNanos");
       accessDeadline.setAccessible(true);
       accessDeadline.setLong(loop, 0L);
       call(loop, "maintenancePass");
@@ -281,7 +283,7 @@ public final class MaintenanceIdleHandoffTest {
     public void close() throws InterruptedException {
       loop.stop();
       if (loop.thread().getState() == Thread.State.NEW) {
-        loop.start();
+        MaintenanceTestSupport.start(loop);
       }
       loop.join(2_000L);
       assertFalse(loop.isAlive(), "actor cleanup did not finish");

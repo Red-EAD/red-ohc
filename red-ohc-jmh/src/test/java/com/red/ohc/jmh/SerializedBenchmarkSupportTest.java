@@ -21,8 +21,7 @@ public class SerializedBenchmarkSupportTest {
     Assert.assertEquals(
         SerializedBenchmarkSupport.CAPACITY_ENTRIES,
         SerializedBenchmarkSupport.WORKING_SET * 4 / 5);
-    Assert.assertEquals(
-        SerializedBenchmarkSupport.TTL_MILLIS, TimeUnit.MINUTES.toMillis(10));
+    Assert.assertEquals(SerializedBenchmarkSupport.TTL_MILLIS, TimeUnit.MINUTES.toMillis(10));
   }
 
   @Test
@@ -86,7 +85,8 @@ public class SerializedBenchmarkSupportTest {
           "keyBytes", "valueBytes", "workload", "distribution", "writeShape",
         }) {
       try {
-        Param param = OHCSerializedBenchmark.class.getDeclaredField(fieldName).getAnnotation(Param.class);
+        Param param =
+            OHCSerializedBenchmark.class.getDeclaredField(fieldName).getAnnotation(Param.class);
         combinations *= param.value().length;
       } catch (NoSuchFieldException exception) {
         throw new AssertionError("missing benchmark parameter: " + fieldName, exception);
@@ -122,22 +122,32 @@ public class SerializedBenchmarkSupportTest {
     Assert.assertEquals(
         SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120),
         5_232L * SerializedBenchmarkSupport.CAPACITY_ENTRIES);
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120))
-            .keySerializer(Utils.byteArraySerializer)
-            .valueSerializer(Utils.byteArraySerializer)
-            .eviction(Eviction.S3_FIFO)
-            .build()) {
-      Assert.assertEquals(
-          cache.capacity(), SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120));
-      for (int index = 0; index < SerializedBenchmarkSupport.CAPACITY_ENTRIES; index++) {
-        cache.put(dataset.keys[index], dataset.values[index]);
-      }
-      cache.flushAsync().join();
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120))
+              .keySerializer(Utils.byteArraySerializer)
+              .valueSerializer(Utils.byteArraySerializer)
+              .eviction(Eviction.S3_FIFO)
+              .build();
+      Throwable cacheFailure1 = null;
+      try {
+        Assert.assertEquals(
+            cache.capacity(), SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120));
+        for (int index = 0; index < SerializedBenchmarkSupport.CAPACITY_ENTRIES; index++) {
+          cache.put(dataset.keys[index], dataset.values[index]);
+        }
+        cache.flushAsync().join();
 
-      for (int index = 0; index < 128; index++) {
-        cache.put(dataset.keys[index], dataset.values[index]);
+        for (int index = 0; index < 128; index++) {
+          cache.put(dataset.keys[index], dataset.values[index]);
+        }
+
+      } catch (Throwable failure) {
+        cacheFailure1 = failure;
+        throw failure;
+      } finally {
+        SerializedBenchmarkSupport.stopOHC(cache, cacheFailure1);
       }
     }
   }
@@ -154,21 +164,30 @@ public class SerializedBenchmarkSupportTest {
             .eviction(Eviction.S3_FIFO)
             .defaultTTLmillis(SerializedBenchmarkSupport.TTL_MILLIS)
             .build();
-    try {
-      for (int index = 0; index < SerializedBenchmarkSupport.CAPACITY_ENTRIES; index++) {
-        cache.put(dataset.keys[index], dataset.values[index]);
-        if ((index & 1023) == 1023) {
-          cache.flushAsync().join();
-        }
-      }
-      cache.flushAsync().join();
+    {
+      Throwable explicitCacheFailure1 = null;
+      try {
 
-      for (int index = 0; index < 128; index++) {
-        cache.put(dataset.keys[index], dataset.values[index]);
+        for (int index = 0; index < SerializedBenchmarkSupport.CAPACITY_ENTRIES; index++) {
+          cache.put(dataset.keys[index], dataset.values[index]);
+          if ((index & 1023) == 1023) {
+            cache.flushAsync().join();
+          }
+        }
+        cache.flushAsync().join();
+
+        for (int index = 0; index < 128; index++) {
+          cache.put(dataset.keys[index], dataset.values[index]);
+        }
+        Assert.assertEquals(cache.stats().nativeAllocationFailureCount(), 0L);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        SerializedBenchmarkSupport.stopOHC(cache, explicitCacheFailure1);
       }
-      Assert.assertEquals(cache.stats().nativeAllocationFailureCount(), 0L);
-    } finally {
-      cache.close();
     }
     Assert.assertEquals(cache.totalAllocatedBytes(), 0L);
   }
@@ -233,8 +252,7 @@ public class SerializedBenchmarkSupportTest {
   @Test
   public void rawKeyAdapterUsesContentEqualityAndOwnsItsBytes() {
     byte[] source = new byte[] {7, 8, 9};
-    SerializedBenchmarkSupport.RawKey first =
-        SerializedBenchmarkSupport.RawKey.copyOf(source);
+    SerializedBenchmarkSupport.RawKey first = SerializedBenchmarkSupport.RawKey.copyOf(source);
     SerializedBenchmarkSupport.RawKey second =
         SerializedBenchmarkSupport.RawKey.copyOf(new byte[] {7, 8, 9});
 
@@ -247,8 +265,7 @@ public class SerializedBenchmarkSupportTest {
   @Test
   public void offHeapCacheRoundTripsTheRawByteCodecWithoutPersistence() {
     SerializedBenchmarkSupport.EhcacheStore store =
-        SerializedBenchmarkSupport.newEhcache(
-            1 << 20, SerializedBenchmarkSupport.TTL_MILLIS);
+        SerializedBenchmarkSupport.newEhcache(1 << 20, SerializedBenchmarkSupport.TTL_MILLIS);
     try {
       byte[] key = new byte[] {1, 2, 3, 4};
       byte[] value = new byte[] {5, 6, 7, 8};
@@ -291,8 +308,7 @@ public class SerializedBenchmarkSupportTest {
   @Test
   public void mapDbDirectStoreRoundTripsTheRawByteCodecWithoutPersistence() {
     SerializedBenchmarkSupport.MapDbStore store =
-        SerializedBenchmarkSupport.newMapDb(
-            2, SerializedBenchmarkSupport.TTL_MILLIS);
+        SerializedBenchmarkSupport.newMapDb(2, SerializedBenchmarkSupport.TTL_MILLIS);
     try {
       byte[] key = new byte[] {11, 12, 13, 14};
       byte[] value = new byte[] {15, 16, 17, 18};

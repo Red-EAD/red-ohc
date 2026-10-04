@@ -43,29 +43,39 @@ public class DirectValueEpochTest {
     CountDownLatch entered = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     byte[] key = new byte[] {7, 8, 9, 10};
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, new byte[16]);
-      cache.flushAsync().join();
-      Future<Boolean> directRead =
-          reader.submit(() -> waitForDirectHit(cache, key, entered, release));
+    try {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(1 << 20)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure1 = null;
       try {
-        assertTrue(entered.await(2L, TimeUnit.SECONDS), "direct consumer did not start");
-        cache.remove(key);
-        assertFalse(cache.containsKey(key));
-        assertTrue(
-            cache.totalAllocatedBytes() > 0L,
-            "native storage must remain allocated during the direct callback");
+        cache.put(key, new byte[16]);
+        cache.flushAsync().join();
+        Future<Boolean> directRead =
+            reader.submit(() -> waitForDirectHit(cache, key, entered, release));
+        try {
+          assertTrue(entered.await(2L, TimeUnit.SECONDS), "direct consumer did not start");
+          cache.remove(key);
+          assertFalse(cache.containsKey(key));
+          assertTrue(
+              cache.totalAllocatedBytes() > 0L,
+              "native storage must remain allocated during the direct callback");
+        } finally {
+          release.countDown();
+          assertTrue(directRead.get(2L, TimeUnit.SECONDS));
+        }
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
       } finally {
-        release.countDown();
-        assertTrue(directRead.get(2L, TimeUnit.SECONDS));
+        CacheTestSupport.stop(cache, cacheFailure1, reader);
       }
     } finally {
-      reader.shutdownNow();
+      CacheTestSupport.awaitCallers(reader);
     }
   }
 
@@ -93,5 +103,4 @@ public class DirectValueEpochTest {
     }
     return false;
   }
-
 }

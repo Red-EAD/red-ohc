@@ -25,7 +25,6 @@ public final class OHCacheStatsTest {
             12L,
             13L,
             false,
-            14L,
             15L,
             16L,
             17L,
@@ -41,7 +40,6 @@ public final class OHCacheStatsTest {
             32L,
             33L,
             34L,
-            35L,
             36L,
             39L,
             40L,
@@ -88,7 +86,6 @@ public final class OHCacheStatsTest {
             82L,
             83L,
             84L,
-            85L,
             new long[] {86L},
             new long[] {87L},
             new double[] {88.0d},
@@ -111,7 +108,6 @@ public final class OHCacheStatsTest {
     assertEquals(stats.liveWeight(), 12L);
     assertEquals(stats.nativeAllocatedBytes(), 13L);
     assertTrue(!stats.maintenanceUnhealthy());
-    assertEquals(stats.maintenanceQueueDepth(), 14L);
     assertEquals(stats.ttlLagMillis(), 15L);
     assertEquals(stats.ttlBacklog(), 16L);
     assertEquals(stats.nativeAllocationFailureCount(), 17L);
@@ -127,7 +123,6 @@ public final class OHCacheStatsTest {
     assertEquals(stats.retirementSealRecordsTotal(), 32L);
     assertEquals(stats.retirementReclaimRecordsTotal(), 33L);
     assertEquals(stats.retirementSealScannedLanesTotal(), 34L);
-    assertEquals(stats.retirementSealHeadOfLineStops(), 35L);
     assertEquals(stats.retirementReclaimBlockedCount(), 36L);
     assertEquals(stats.retirementReclaimBlockedNanos(), 39L);
     assertEquals(stats.maintenancePassCount(), 40L);
@@ -174,7 +169,6 @@ public final class OHCacheStatsTest {
     assertEquals(stats.retirementSafeSegmentCount(), 82L);
     assertEquals(stats.retirementReclaimBatchCount(), 83L);
     assertEquals(stats.retirementOldestSafeWaitNanos(), 84L);
-    assertEquals(stats.mailboxHeadUnpublishedCount(), 85L);
     assertEquals(stats.allocatorReadyPagesByClass(), new long[] {86L});
     assertEquals(stats.allocatorPagesInUseByClass(), new long[] {87L});
     assertEquals(stats.allocatorPageOccupancyByClass()[0], 88.0d, 0.0d);
@@ -198,8 +192,7 @@ public final class OHCacheStatsTest {
             0L, // size
             0L, // liveWeight
             0L, // nativeAllocatedBytes
-            false, // maintenanceUnhealthy
-            0L, // maintenanceQueueDepth
+            false,
             0L, // ttlLagMillis
             0L, // ttlBacklog
             0L, // nativeAllocationFailureCount
@@ -214,8 +207,7 @@ public final class OHCacheStatsTest {
             0L, // retirementSealRecords
             0L, // retirementSealRecordsTotal
             0L, // retirementReclaimRecordsTotal
-            0L, // retirementSealScannedLanesTotal
-            0L, // retirementSealHeadOfLineStops
+            0L,
             0L, // retirementReclaimBlockedCount
             0L, // retirementReclaimBlockedNanos
             0L, // maintenancePassCount
@@ -261,8 +253,7 @@ public final class OHCacheStatsTest {
             0L, // nativeDebtHeadroomBytes
             0L, // retirementSafeSegmentCount
             0L, // retirementReclaimBatchCount
-            0L, // retirementOldestSafeWaitNanos
-            0L, // mailboxHeadUnpublishedCount
+            0L,
             new long[0], // allocatorReadyPagesByClass
             new long[0], // allocatorPagesInUseByClass
             new double[0], // allocatorPageOccupancyByClass
@@ -291,7 +282,6 @@ public final class OHCacheStatsTest {
       "liveWeight",
       "nativeAllocatedBytes",
       "maintenanceUnhealthy",
-      "maintenanceQueueDepth",
       "ttlLagMillis",
       "ttlBacklog",
       "nativeAllocationFailureCount",
@@ -307,7 +297,6 @@ public final class OHCacheStatsTest {
       "retirementSealRecordsTotal",
       "retirementReclaimRecordsTotal",
       "retirementSealScannedLanesTotal",
-      "retirementSealHeadOfLineStops",
       "retirementReclaimBlockedCount",
       "retirementReclaimBlockedNanos",
       "maintenancePassCount",
@@ -354,7 +343,6 @@ public final class OHCacheStatsTest {
       "retirementSafeSegmentCount",
       "retirementReclaimBatchCount",
       "retirementOldestSafeWaitNanos",
-      "mailboxHeadUnpublishedCount",
       "allocatorReadyPagesByClass",
       "allocatorPagesInUseByClass",
       "allocatorPageOccupancyByClass",

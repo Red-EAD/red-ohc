@@ -70,68 +70,79 @@ public class OHCBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    long payloadCapacity = capacityFor(residency, keyBytes, valueBytes);
-    rawKeys = new byte[WORKING_SET][];
-    values = new byte[WORKING_SET][];
-    for (int i = 0; i < WORKING_SET; i++) {
-      rawKeys[i] = bytes(keyBytes, i);
-      values[i] = bytes(valueBytes, i * 31 + 7);
-    }
-    directBatchKeys = Arrays.asList(Arrays.copyOf(rawKeys, 512));
-    accessSequence =
-        "ZIPF_099".equals(distribution) ? zipfSequence(WORKING_SET) : uniformSequence(WORKING_SET);
-    ohc =
-        (OffHeapCache<byte[], byte[]>)
-            OHCacheBuilder.<byte[], byte[]>newBuilder()
-                .capacity(payloadCapacity)
-                .keySerializer(Utils.byteArraySerializer)
-                .valueSerializer(Utils.byteArraySerializer)
-                .eviction(eviction)
-                .build();
-    for (int i = 0; i < WORKING_SET; i++) {
-      ohc.put(rawKeys[i], values[i]);
-      if ((i & 1023) == 1023) {
-        ohc.flushAsync().join();
+    try {
+      long payloadCapacity = capacityFor(residency, keyBytes, valueBytes);
+      rawKeys = new byte[WORKING_SET][];
+      values = new byte[WORKING_SET][];
+      for (int i = 0; i < WORKING_SET; i++) {
+        rawKeys[i] = bytes(keyBytes, i);
+        values[i] = bytes(valueBytes, i * 31 + 7);
       }
-    }
-    ohc.flushAsync().join();
-    if ("HIT_ONLY".equals(residency)) {
-      if (ohc.size() != WORKING_SET
-          || ohc.stats().evictionCount() != 0L
-          || ohc.stats().missCount() != 0L) {
-        throw new IllegalStateException(
-            "HIT_ONLY preload was not a complete hit set: size="
-                + ohc.size()
-                + ", evicted="
-                + ohc.stats().evictionCount()
-                + ", misses="
-                + ohc.stats().missCount());
+      directBatchKeys = Arrays.asList(Arrays.copyOf(rawKeys, 512));
+      accessSequence =
+          "ZIPF_099".equals(distribution)
+              ? zipfSequence(WORKING_SET)
+              : uniformSequence(WORKING_SET);
+      ohc =
+          (OffHeapCache<byte[], byte[]>)
+              OHCacheBuilder.<byte[], byte[]>newBuilder()
+                  .capacity(payloadCapacity)
+                  .keySerializer(Utils.byteArraySerializer)
+                  .valueSerializer(Utils.byteArraySerializer)
+                  .eviction(eviction)
+                  .build();
+      for (int i = 0; i < WORKING_SET; i++) {
+        ohc.put(rawKeys[i], values[i]);
+        if ((i & 1023) == 1023) {
+          ohc.flushAsync().join();
+        }
       }
+      ohc.flushAsync().join();
+      if ("HIT_ONLY".equals(residency)) {
+        if (ohc.size() != WORKING_SET
+            || ohc.stats().evictionCount() != 0L
+            || ohc.stats().missCount() != 0L) {
+          throw new IllegalStateException(
+              "HIT_ONLY preload was not a complete hit set: size="
+                  + ohc.size()
+                  + ", evicted="
+                  + ohc.stats().evictionCount()
+                  + ", misses="
+                  + ohc.stats().missCount());
+        }
+      }
+
+    } catch (Throwable failure) {
+      SerializedBenchmarkSupport.stopOHC(ohc, failure);
+      ohc = null;
+      throw failure;
     }
   }
 
   @TearDown(Level.Trial)
   public void tearDown() {
-    ohc.close();
+    Throwable failure = null;
+    try {
+
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
+    } finally {
+      SerializedBenchmarkSupport.stopOHC(ohc, failure);
+    }
   }
 
   @Benchmark
   @Threads(1)
   public void ohcDirectOneThread(
-      ThreadState state,
-      Blackhole blackhole,
-      WriteResults results,
-      BenchmarkWindowResults window) {
+      ThreadState state, Blackhole blackhole, WriteResults results, BenchmarkWindowResults window) {
     accessOHC(state, blackhole, results);
   }
 
   @Benchmark
   @Threads(Threads.MAX)
   public void ohcDirectCpuThreads(
-      ThreadState state,
-      Blackhole blackhole,
-      WriteResults results,
-      BenchmarkWindowResults window) {
+      ThreadState state, Blackhole blackhole, WriteResults results, BenchmarkWindowResults window) {
     accessOHC(state, blackhole, results);
   }
 

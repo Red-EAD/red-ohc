@@ -24,22 +24,21 @@ import com.red.ohc.storage.WriterArena;
 
 /** Contract tests for the single retirement transport planned for Red OHC. */
 public final class RetirementJournalContractTest {
-  private static final String JOURNAL =
-      "com.red.ohc.maintenance.RetirementJournal";
+  private static final String JOURNAL = "com.red.ohc.maintenance.RetirementJournal";
   private static final String WRITER_JOURNAL =
       "com.red.ohc.maintenance.WriterRetirementJournal";
-  private static final String NATIVE_LOG =
-      "com.red.ohc.maintenance.NativeRetirementLog";
+  private static final String NATIVE_LOG = "com.red.ohc.maintenance.NativeRetirementLog";
 
   @Test
   public void oneRetirementJournalReplacesTheSplitTransports() throws Exception {
     Class<?> journal = load(JOURNAL);
     assertNotNull(journal, "the unified retirement journal must exist");
-    assertFalse(load(WRITER_JOURNAL) != null, "the writer-only compatibility transport is obsolete");
+    assertFalse(
+        load(WRITER_JOURNAL) != null, "the writer-only compatibility transport is obsolete");
     assertFalse(load(NATIVE_LOG) != null, "the actor-only compatibility transport is obsolete");
 
     assertNotNull(
-        method(journal, "sealReadySegments", long.class),
+        method(journal, "sealReadySegments"),
         "the journal must expose fixed-watermark epoch sealing");
     assertNull(
         method(journal, "seal", long.class), "the obsolete compatibility sealing API must be gone");
@@ -95,7 +94,7 @@ public final class RetirementJournalContractTest {
       assertEquals(journal.sealedRecordsTotal(), 0L);
 
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.generatedBytesTotal(), weight);
       assertEquals(journal.publishSafe(true, true), 1);
       RetirementJournal.ReclaimResult result =
@@ -124,7 +123,7 @@ public final class RetirementJournalContractTest {
       lane.write(reservation, 0L, allocation);
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.publishSafe(true, true), 1);
 
       Field workField = lane.getClass().getDeclaredField("completionAdvanceWork");
@@ -160,15 +159,14 @@ public final class RetirementJournalContractTest {
     try {
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY);
       assertEquals(journal.publishSafe(true, true), 1);
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(2L), RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY);
       assertEquals(journal.publishSafe(true, true), 1);
 
-      RetirementJournal.ReclaimResult result =
-          journal.reclaimActorSafeBatchResult(memory, 1);
+      RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 1);
       assertEquals(result.segments, 1);
       assertEquals(result.records, RetirementSegment.CAPACITY);
       assertEquals(journal.safeSegmentDebt(), 1L);
@@ -186,12 +184,12 @@ public final class RetirementJournalContractTest {
     try {
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY);
       assertEquals(journal.publishSafe(true, true), 1);
 
       appendSegment(journal.actorLane());
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(2L), RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY);
       assertEquals(journal.publishSafe(true, true), 1);
 
       Method method =
@@ -199,8 +197,7 @@ public final class RetirementJournalContractTest {
               "reclaimActorSafeBatchResult", NativeMemory.Memory.class, int.class);
       method.setAccessible(true);
       RetirementJournal.ReclaimResult result =
-          (RetirementJournal.ReclaimResult)
-              method.invoke(journal, memory, 2);
+          (RetirementJournal.ReclaimResult) method.invoke(journal, memory, 2);
 
       assertEquals(result.segments, 2);
       assertEquals(result.records, 2 * RetirementSegment.CAPACITY);
@@ -224,8 +221,7 @@ public final class RetirementJournalContractTest {
       for (int index = 0; index < entries.length; index++) {
         entries[index] = arena.allocate(allocation);
       }
-      long pageKey =
-          NativeMemory.Memory.entryAllocatorHandle(entries[0], allocation) >>> 14;
+      long pageKey = NativeMemory.Memory.entryAllocatorHandle(entries[0], allocation) >>> 14;
       for (long entry : entries) {
         assertEquals(
             NativeMemory.Memory.entryAllocatorHandle(entry, allocation) >>> 14,
@@ -241,14 +237,14 @@ public final class RetirementJournalContractTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY);
       assertEquals(journal.publishSafe(true, true), 1);
 
       assertTrue(lane.reserve(reservation));
       lane.write(reservation, entries[entries.length - 1], allocation);
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(2L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.publishSafe(true, true), 1);
 
       Field actorContextField = RetirementJournal.class.getDeclaredField("actorContext");
@@ -265,8 +261,7 @@ public final class RetirementJournalContractTest {
                 invalidatedBeforeCallback.set(true);
               });
 
-      RetirementJournal.ReclaimResult result =
-          journal.reclaimActorSafeBatchResult(memory, 2);
+      RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 2);
       assertEquals(result.segments, 2);
       assertEquals(result.records, entries.length);
       assertEquals(result.physicalRecords, entries.length);
@@ -295,13 +290,12 @@ public final class RetirementJournalContractTest {
       lane.write(reservation, entry, allocation);
       lane.commit(reservation);
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 1);
+      assertEquals(journal.sealReadySegments(), 1);
       assertEquals(journal.publishSafe(true, true), 1);
 
       Field handlesAddressField = RetirementSegment.class.getDeclaredField("handlesAddress");
       handlesAddressField.setAccessible(true);
-      long handleAddress =
-          handlesAddressField.getLong(segment) + (long) recordIndex * Long.BYTES;
+      long handleAddress = handlesAddressField.getLong(segment) + (long) recordIndex * Long.BYTES;
       long validHandle = NativeMemory.getLong(handleAddress);
       // Slot bits occupy the low 14 bits and page-id bits the next 24. Toggle the first
       // generation bit so lookup cannot resolve this record to the registered descriptor.
@@ -324,8 +318,7 @@ public final class RetirementJournalContractTest {
       assertEquals(journal.completedRecordsTotal(), 0L);
 
       NativeMemory.putLong(handleAddress, validHandle);
-      RetirementJournal.ReclaimResult retry =
-          journal.reclaimActorSafeBatchResult(memory, 1);
+      RetirementJournal.ReclaimResult retry = journal.reclaimActorSafeBatchResult(memory, 1);
       assertEquals(retry.segments, 1);
       assertEquals(retry.records, 1);
       assertEquals(retry.physicalRecords, 1);
@@ -358,7 +351,7 @@ public final class RetirementJournalContractTest {
         appendSegment(journal.lane(laneIndex));
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), 4 * RetirementSegment.CAPACITY);
+      assertEquals(journal.sealReadySegments(), 4 * RetirementSegment.CAPACITY);
 
       actor =
           new Thread(
@@ -402,8 +395,7 @@ public final class RetirementJournalContractTest {
       actor.join(10_000L);
       assertTrue(!actor.isAlive(), "the single actor did not drain SAFE segments");
       assertNull(failure.get());
-      assertEquals(
-          journal.completedRecordsTotal(), (long) 4 * RetirementSegment.CAPACITY);
+      assertEquals(journal.completedRecordsTotal(), (long) 4 * RetirementSegment.CAPACITY);
       assertEquals(journal.safeSegmentDebt(), 0L);
       assertEquals(journal.lagRecords(), 0L);
     } finally {
@@ -419,9 +411,9 @@ public final class RetirementJournalContractTest {
 
   /**
    * One reclaim wave must publish a page shared by multiple segments exactly once: the merged
-   * decode groups the wave's records per page before any publication, so the availability
-   * callback (and its freeBits/summary/freedSlots rounds) fires once per page per wave instead
-   * of once per segment.
+   * decode groups the wave's records per page before any publication, so the availability callback
+   * (and its freeBits/summary/freedSlots rounds) fires once per page per wave instead of once per
+   * segment.
    */
   @Test
   public void mergedWavePublishesASharedPageOnce() throws Exception {
@@ -434,8 +426,7 @@ public final class RetirementJournalContractTest {
       for (int index = 0; index < entries.length; index++) {
         entries[index] = arena.allocate(allocation);
       }
-      long pageKey =
-          NativeMemory.Memory.entryAllocatorHandle(entries[0], allocation) >>> 14;
+      long pageKey = NativeMemory.Memory.entryAllocatorHandle(entries[0], allocation) >>> 14;
       for (long entry : entries) {
         assertEquals(
             NativeMemory.Memory.entryAllocatorHandle(entry, allocation) >>> 14,
@@ -451,15 +442,13 @@ public final class RetirementJournalContractTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY + 1);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY + 1);
       assertEquals(journal.publishSafe(true, true), 2);
 
       Method hook = WriterArena.class.getDeclaredMethod("setRetirementHookForTest", Runnable.class);
       hook.setAccessible(true);
       AtomicInteger availabilityCallbacks = new AtomicInteger();
-      hook.invoke(
-          arena,
-          (Runnable) () -> availabilityCallbacks.incrementAndGet());
+      hook.invoke(arena, (Runnable) () -> availabilityCallbacks.incrementAndGet());
 
       RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 2);
       assertEquals(result.segments, 2);
@@ -514,7 +503,7 @@ public final class RetirementJournalContractTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), RetirementSegment.CAPACITY + 1);
+      assertEquals(journal.sealReadySegments(), RetirementSegment.CAPACITY + 1);
       assertEquals(journal.publishSafe(true, true), 2);
 
       Field handlesAddressField = RetirementSegment.class.getDeclaredField("handlesAddress");
@@ -562,10 +551,9 @@ public final class RetirementJournalContractTest {
   }
 
   /**
-   * A publication-phase failure must settle per segment: a segment whose every record was
-   * already cleared by a published group finishes exactly like the success path, while untouched
-   * segments abort, reverse their ledger move, and re-queue; the retry frees the remainder
-   * exactly once.
+   * A publication-phase failure must settle per segment: a segment whose every record was already
+   * cleared by a published group finishes exactly like the success path, while untouched segments
+   * abort, reverse their ledger move, and re-queue; the retry frees the remainder exactly once.
    */
   @Test
   public void mergedWaveCallbackFailureSettlesCompleteSegments() throws Exception {
@@ -596,7 +584,7 @@ public final class RetirementJournalContractTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), firstSegmentRecords);
+      assertEquals(journal.sealReadySegments(), firstSegmentRecords);
       assertEquals(journal.publishSafe(true, true), 1);
       for (long entry : secondPageEntries) {
         assertTrue(lane.reserve(reservation));
@@ -604,7 +592,7 @@ public final class RetirementJournalContractTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(2L), secondSegmentRecords);
+      assertEquals(journal.sealReadySegments(), secondSegmentRecords);
       assertEquals(journal.publishSafe(true, true), 1);
 
       Method hook = WriterArena.class.getDeclaredMethod("setRetirementHookForTest", Runnable.class);
@@ -657,9 +645,9 @@ public final class RetirementJournalContractTest {
   }
 
   /**
-   * Whole-page fast path: a detached (FULL) page whose last live slots are freed by one merged
-   * wave must recycle in fresh bump mode at full capacity — no bitmap publication, page pushed
-   * to the shared ready stack, and every slot served again in slot order by the next owner.
+   * Whole-page fast path: a detached (FULL) page whose last live slots are freed by one merged wave
+   * must recycle in fresh bump mode at full capacity — no bitmap publication, page pushed to the
+   * shared ready stack, and every slot served again in slot order by the next owner.
    */
   @Test
   public void wholePageDeathRecyclesAFreshBumpModePageAtFullCapacity() throws Exception {
@@ -687,14 +675,14 @@ public final class RetirementJournalContractTest {
         lane.write(reservation, entry, allocation);
         lane.commit(reservation);
       }
-      int segments =
-          (slotsPerPage + RetirementSegment.CAPACITY - 1) / RetirementSegment.CAPACITY;
+      int segments = (slotsPerPage + RetirementSegment.CAPACITY - 1) / RetirementSegment.CAPACITY;
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), slotsPerPage);
+      assertEquals(journal.sealReadySegments(), slotsPerPage);
       assertEquals(
           journal.publishSafe(true, true), segments, "the fixture must publish every segment");
 
-      RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, segments);
+      RetirementJournal.ReclaimResult result =
+          journal.reclaimActorSafeBatchResult(memory, segments);
       assertEquals(result.records, slotsPerPage);
       assertEquals(
           memory.pageReadyCount(),
@@ -745,7 +733,7 @@ public final class RetirementJournalContractTest {
         lane.commit(reservation);
       }
       journal.cutAllProducersAtWatermark();
-      assertEquals(journal.sealReadySegments(1L), pairs * 2);
+      assertEquals(journal.sealReadySegments(), pairs * 2);
       assertEquals(journal.publishSafe(true, true), 1);
 
       RetirementJournal.ReclaimResult result = journal.reclaimActorSafeBatchResult(memory, 1);

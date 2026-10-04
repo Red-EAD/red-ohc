@@ -15,11 +15,14 @@ import com.red.ohc.storage.ValueBlock;
 import com.red.ohc.storage.WriterArena;
 
 /**
- * A lookup-only odd reader (value bit clear) must not pin a pure value record: confirm's
- * valueSafe channel must stay open while blocked[0] is set.
+ * A lookup-only odd reader (value bit clear) must not pin a pure value record: confirm's valueSafe
+ * channel must stay open while blocked[0] is set.
  */
 @JCStressTest
-@Outcome(id = "1", expect = Expect.ACCEPTABLE, desc = "lookup-only reader releases the value record")
+@Outcome(
+    id = "1",
+    expect = Expect.ACCEPTABLE,
+    desc = "lookup-only reader releases the value record")
 @Outcome(id = "0", expect = Expect.ACCEPTABLE, desc = "the cut raced ahead of the reader entry")
 @State
 public class ReaderSeqValueBitClassificationStress {
@@ -38,7 +41,7 @@ public class ReaderSeqValueBitClassificationStress {
     ValueBlock.initialize(value, 0L, VALUE_LENGTH, 0L);
     journal.append(value, allocation);
     journal.cutAllProducersAtWatermark();
-    if (journal.sealReadySegments(1L) != 1) {
+    if (journal.sealReadySegments() != 1) {
       throw new AssertionError("expected one sealed retirement segment");
     }
   }

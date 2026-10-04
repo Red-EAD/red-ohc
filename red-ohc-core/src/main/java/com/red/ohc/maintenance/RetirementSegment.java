@@ -34,8 +34,7 @@ public final class RetirementSegment {
       MethodHandles.Lookup lookup = MethodHandles.lookup();
       RESERVATION_STATE =
           lookup.findVarHandle(RetirementSegment.class, "reservationState", long.class);
-      COMMITTED_TAIL =
-          lookup.findVarHandle(RetirementSegment.class, "committedTail", int.class);
+      COMMITTED_TAIL = lookup.findVarHandle(RetirementSegment.class, "committedTail", int.class);
       SEGMENT_CLAIM_STATE =
           lookup.findVarHandle(RetirementSegment.class, "segmentClaimState", int.class);
       LINK_IN_FLIGHT = lookup.findVarHandle(RetirementSegment.class, "linkInFlight", int.class);
@@ -63,25 +62,24 @@ public final class RetirementSegment {
 
   private volatile long baseSequence;
   private volatile int snapshotTail = -1;
-  private volatile long sealedEpoch;
   private volatile long safeTicket;
   private volatile int retiredRecordCount;
   private volatile long retiredBytes;
+
   /** Physical native records already released from a claimed segment. */
   private int releasedRecordCount;
+
   private long releasedBytes;
+
   /** Logical committed slots already reported as completed; includes empty/structural slots. */
   private int releasedSlotCount;
+
   private volatile boolean structuralRetirement;
   private volatile boolean sealed;
   private volatile boolean detached;
   private volatile int laneIndex;
 
-  RetirementSegment(
-      NativeMemory.Memory memory,
-      int capacity,
-      long baseSequence,
-      int laneIndex) {
+  RetirementSegment(NativeMemory.Memory memory, int capacity, long baseSequence, int laneIndex) {
     if (memory == null) {
       throw new NullPointerException("memory");
     }
@@ -117,9 +115,7 @@ public final class RetirementSegment {
       int expectedLaneIndex,
       AtomicReference<RetirementSegment> ownerProducer) {
     while (true) {
-      if (ownerProducer == null
-          || ownerProducer.get() != this
-          || laneIndex != expectedLaneIndex) {
+      if (ownerProducer == null || ownerProducer.get() != this || laneIndex != expectedLaneIndex) {
         return -1;
       }
       long state = reservationState();
@@ -148,9 +144,7 @@ public final class RetirementSegment {
       // Capture the generation before validating ownership. Reuse after this read invalidates
       // the CAS; reuse before it is rejected by the owner check below.
       long state = reservationState();
-      if (ownerProducer == null
-          || ownerProducer.get() != this
-          || laneIndex != expectedLaneIndex) {
+      if (ownerProducer == null || ownerProducer.get() != this || laneIndex != expectedLaneIndex) {
         return -1;
       }
       if ((state & CLOSED) != 0L) {
@@ -295,7 +289,8 @@ public final class RetirementSegment {
         || reservation.segment != this
         || reservation.generation() != generation()
         || reservation.laneIndex() != laneIndex) {
-      throw new IllegalStateException("retirement reservation belongs to another segment generation");
+      throw new IllegalStateException(
+          "retirement reservation belongs to another segment generation");
     }
     checkReserved(reservation.index());
   }
@@ -308,21 +303,16 @@ public final class RetirementSegment {
     return (int) COMMITTED_TAIL.getAcquire(this) >= tail;
   }
 
-  boolean seal(long epoch) {
+  boolean seal() {
     if (!isComplete() || sealed) {
       return false;
     }
-    sealedEpoch = epoch;
     sealed = true;
     return true;
   }
 
   boolean isSealed() {
     return sealed;
-  }
-
-  long sealedEpoch() {
-    return sealedEpoch;
   }
 
   /** Claims a complete segment with one CAS. No per-record ownership is needed. */
@@ -381,8 +371,8 @@ public final class RetirementSegment {
   }
 
   /**
-   * Applies one merged-release wave's physical progress to this claimant-owned counters. Only
-   * the thread holding the segment claim may call this; identical semantics to the incremental
+   * Applies one merged-release wave's physical progress to this claimant-owned counters. Only the
+   * thread holding the segment claim may call this; identical semantics to the incremental
    * accounting inside {@link #releaseRecords(NativeMemory.Memory, ThreadContext)}.
    */
   void applyReleaseProgress(int records, long bytes) {
@@ -510,7 +500,6 @@ public final class RetirementSegment {
     LINK_IN_FLIGHT.setVolatile(this, 0);
     COMMITTED_TAIL.setVolatile(this, 0);
     snapshotTail = -1;
-    sealedEpoch = 0L;
     safeTicket = 0L;
     retiredRecordCount = 0;
     retiredBytes = 0L;

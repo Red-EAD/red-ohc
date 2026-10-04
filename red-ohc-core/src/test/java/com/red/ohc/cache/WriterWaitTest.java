@@ -47,7 +47,9 @@ public final class WriterWaitTest {
       awaitWriter = OffHeapCache.class.getDeclaredMethod("awaitWriter", Entry.class);
       releaseWriter = OffHeapCache.class.getDeclaredMethod("releaseWriter", Entry.class);
     } catch (NoSuchMethodException missingProtocol) {
-      fail("cache must expose one internal event-driven writer wait/release protocol", missingProtocol);
+      fail(
+          "cache must expose one internal event-driven writer wait/release protocol",
+          missingProtocol);
       return;
     }
     awaitWriter.setAccessible(true);
@@ -60,7 +62,6 @@ public final class WriterWaitTest {
             .valueSerializer(STRING)
             .buildTyped();
     Entry entry = EntryTestSupport.entry(1, 7, 0L);
-    assertTrue(entry.claimWriter(), "the test owner must hold the native writer first");
 
     CountDownLatch started = new CountDownLatch(1);
     AtomicBoolean acquired = new AtomicBoolean();
@@ -79,102 +80,39 @@ public final class WriterWaitTest {
               }
             },
             "ohc-writer-waiter");
-    waiter.start();
-    assertTrue(started.await(1L, TimeUnit.SECONDS));
-
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-    while (waiter.getState() != Thread.State.WAITING && System.nanoTime() < deadline) {
-      Thread.yield();
-    }
-    assertFalse(waiter.getState() == Thread.State.TERMINATED, "waiter returned before release");
-    assertTrue(
-        waiter.getState() == Thread.State.WAITING,
-        "a native writer conflict must wait for an event, not complete via a timer retry");
-
-    releaseWriter.invoke(cache, entry);
-    waiter.join(1_000L);
-    assertFalse(waiter.isAlive(), "writer waiter was not notified after release");
-    if (failure.get() != null) {
-      throw new AssertionError("writer wait protocol failed", failure.get());
-    }
-    assertTrue(acquired.get(), "waiter must acquire after the owner releases the native writer");
-    cache.close();
-  }
-
-  @Test(timeOut = 5_000L)
-  public void closingWriterWaitersAreAllReleased() throws Exception {
-    Method awaitWriter = OffHeapCache.class.getDeclaredMethod("awaitWriter", Entry.class);
-    Method releaseWriter = OffHeapCache.class.getDeclaredMethod("releaseWriter", Entry.class);
-    awaitWriter.setAccessible(true);
-    releaseWriter.setAccessible(true);
-
-    OffHeapCache<String, String> cache =
-        OHCacheBuilder.<String, String>newBuilder()
-            .capacity(1 << 20)
-            .keySerializer(STRING)
-            .valueSerializer(STRING)
-            .buildTyped();
-    Entry entry = EntryTestSupport.entry(1, 8, 0L);
-    assertTrue(entry.claimWriter(), "the test owner must hold the native writer first");
-
-    CountDownLatch started = new CountDownLatch(2);
-    AtomicReference<Throwable> failure = new AtomicReference<>();
-    Thread first = closingWaiter(cache, awaitWriter, entry, started, failure, "ohc-closing-waiter-1");
-    Thread second = closingWaiter(cache, awaitWriter, entry, started, failure, "ohc-closing-waiter-2");
+    Throwable primaryFailure = null;
+    boolean ownerReleased = false;
     try {
-      first.start();
-      second.start();
+      assertTrue(entry.claimWriter(), "the test owner must hold the native writer first");
+      waiter.start();
       assertTrue(started.await(1L, TimeUnit.SECONDS));
 
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-      while ((first.getState() != Thread.State.WAITING
-              || second.getState() != Thread.State.WAITING)
-          && System.nanoTime() < deadline) {
+      while (waiter.getState() != Thread.State.WAITING && System.nanoTime() < deadline) {
         Thread.yield();
       }
-      assertTrue(first.getState() == Thread.State.WAITING);
-      assertTrue(second.getState() == Thread.State.WAITING);
+      assertFalse(waiter.getState() == Thread.State.TERMINATED, "waiter returned before release");
+      assertTrue(
+          waiter.getState() == Thread.State.WAITING,
+          "a native writer conflict must wait for an event, not complete via a timer retry");
 
-      cache.close();
       releaseWriter.invoke(cache, entry);
-      first.join(1_000L);
-      second.join(1_000L);
-      assertFalse(first.isAlive(), "first waiter was not released during close");
-      assertFalse(second.isAlive(), "second waiter was not released during close");
+      ownerReleased = true;
+      waiter.join(1_000L);
+      assertFalse(waiter.isAlive(), "writer waiter was not notified after release");
       if (failure.get() != null) {
-        throw new AssertionError("closing writer wait protocol failed", failure.get());
+        throw new AssertionError("writer wait protocol failed", failure.get());
       }
+      assertTrue(acquired.get(), "waiter must acquire after the owner releases the native writer");
+
+    } catch (Throwable operationFailure) {
+      primaryFailure = operationFailure;
+      throw operationFailure;
     } finally {
-      if (first.isAlive() || second.isAlive()) {
-        synchronized (entry) {
-          entry.notifyAll();
-        }
-      }
-      if (entry.isWriterLocked()) {
+      if (!ownerReleased && entry.isWriterLocked()) {
         releaseWriter.invoke(cache, entry);
       }
-      if (cache != null) {
-        cache.close();
-      }
+      CacheTestSupport.stopAfterCallers(cache, primaryFailure, waiter);
     }
-  }
-
-  private static Thread closingWaiter(
-      OffHeapCache<String, String> cache,
-      Method awaitWriter,
-      Entry entry,
-      CountDownLatch started,
-      AtomicReference<Throwable> failure,
-      String name) {
-    return new Thread(
-        () -> {
-          started.countDown();
-          try {
-            awaitWriter.invoke(cache, entry);
-          } catch (Throwable error) {
-            failure.compareAndSet(null, error);
-          }
-        },
-        name);
   }
 }

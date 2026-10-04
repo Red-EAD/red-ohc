@@ -62,14 +62,23 @@ public class CapacityAccountingTest {
             .keySerializer(BYTES)
             .valueSerializer(BYTES)
             .buildTyped();
-    try {
-      cache.put(new byte[keyLength], new byte[valueLength]);
-      cache.flushAsync().join();
+    {
+      Throwable explicitCacheFailure3 = null;
+      try {
 
-      assertEquals(cache.stats().liveWeight(), logicalEntryBytes);
-      assertTrue(cache.stats().nativeAllocatedBytes() > logicalEntryBytes);
-    } finally {
-      cache.close();
+        cache.put(new byte[keyLength], new byte[valueLength]);
+        cache.flushAsync().join();
+
+        assertEquals(cache.stats().liveWeight(), logicalEntryBytes);
+        assertTrue(cache.stats().nativeAllocatedBytes() > logicalEntryBytes);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure3 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        CacheTestSupport.stop(cache, explicitCacheFailure3);
+      }
     }
     assertEquals(cache.totalAllocatedBytes(), 0L);
   }
@@ -83,21 +92,31 @@ public class CapacityAccountingTest {
         CacheMath.logicalEntryBytes(
             Entry.keyAllocationLengthForKeyLength(keyLength),
             ValueBlock.allocationLength(valueLength));
-    try (OffHeapCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(logicalEntryBytes * 2L)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .buildTyped()) {
-      cache.put(key, new byte[valueLength]);
-      cache.flushAsync().join();
-      assertEquals(logicalAdmission(cache).logicalCharge(), logicalEntryBytes);
+    {
+      OffHeapCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(logicalEntryBytes * 2L)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .buildTyped();
+      Throwable cacheFailure9 = null;
+      try {
+        cache.put(key, new byte[valueLength]);
+        cache.flushAsync().join();
+        assertEquals(logicalAdmission(cache).logicalCharge(), logicalEntryBytes);
 
-      assertTrue(cache.removeIfPresent(key));
-      cache.flushAsync().join();
+        assertTrue(cache.removeIfPresent(key));
+        cache.flushAsync().join();
 
-      assertEquals(logicalAdmission(cache).logicalCharge(), 0L);
-      assertEquals(cache.size(), 0L);
+        assertEquals(logicalAdmission(cache).logicalCharge(), 0L);
+        assertEquals(cache.size(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure9 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure9);
+      }
     }
   }
 
@@ -109,20 +128,30 @@ public class CapacityAccountingTest {
         CacheMath.logicalEntryBytes(
             Entry.keyAllocationLengthForKeyLength(keyLength),
             ValueBlock.allocationLength(valueLength));
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(entryBytes)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(new byte[keyLength], new byte[valueLength]);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(entryBytes)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure8 = null;
+      try {
+        cache.put(new byte[keyLength], new byte[valueLength]);
 
-      byte[] secondKey = new byte[keyLength];
-      secondKey[0] = 1;
-      cache.put(secondKey, new byte[valueLength]);
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.get(secondKey) != null);
+        byte[] secondKey = new byte[keyLength];
+        secondKey[0] = 1;
+        cache.put(secondKey, new byte[valueLength]);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.get(secondKey) != null);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure8 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure8);
+      }
     }
   }
 
@@ -134,24 +163,34 @@ public class CapacityAccountingTest {
         CacheMath.logicalEntryBytes(
             Entry.keyAllocationLengthForKeyLength(keyLength),
             ValueBlock.allocationLength(valueLength));
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(entryBytes)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      byte[] firstKey = new byte[keyLength];
-      byte[] secondKey = new byte[keyLength];
-      secondKey[0] = 1;
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(entryBytes)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure7 = null;
+      try {
+        byte[] firstKey = new byte[keyLength];
+        byte[] secondKey = new byte[keyLength];
+        secondKey[0] = 1;
 
-      cache.put(firstKey, new byte[valueLength]);
-      cache.put(secondKey, new byte[valueLength]);
+        cache.put(firstKey, new byte[valueLength]);
+        cache.put(secondKey, new byte[valueLength]);
 
-      assertTrue(cache.size() >= 1L);
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.get(firstKey) == null);
-      assertTrue(cache.get(secondKey) != null);
+        assertTrue(cache.size() >= 1L);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.get(firstKey) == null);
+        assertTrue(cache.get(secondKey) != null);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure7 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure7);
+      }
     }
   }
 
@@ -172,34 +211,52 @@ public class CapacityAccountingTest {
     CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch releaseActor = new CountDownLatch(1);
     ExecutorService writer = Executors.newSingleThreadExecutor();
-    try {
-      pauseMaintenance(cache, actorPaused, releaseActor);
-      cache.put(new byte[keyLength], new byte[valueLength]);
+    {
+      Throwable explicitCacheFailure2 = null;
+      try {
 
-      byte[] secondKey = new byte[keyLength];
-      secondKey[0] = 1;
-      Future<?> second = writer.submit(() -> cache.put(secondKey, new byte[valueLength]));
+        pauseMaintenance(cache, actorPaused, releaseActor);
+        cache.put(new byte[keyLength], new byte[valueLength]);
 
-      second.get(1L, TimeUnit.SECONDS);
-      assertEquals(cache.size(), 2L);
-    } finally {
-      releaseActor.countDown();
-      writer.shutdownNow();
-      cache.close();
+        byte[] secondKey = new byte[keyLength];
+        secondKey[0] = 1;
+        Future<?> second = writer.submit(() -> cache.put(secondKey, new byte[valueLength]));
+
+        second.get(1L, TimeUnit.SECONDS);
+        assertEquals(cache.size(), 2L);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure2 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        releaseActor.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure2, writer);
+      }
     }
   }
 
   @Test
   public void oversizedEntryIsPublishedAndEvictedAfterFlush() {
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(80L)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(new byte[32], new byte[128]);
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 0L);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(80L)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure6 = null;
+      try {
+        cache.put(new byte[32], new byte[128]);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure6 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure6);
+      }
     }
   }
 
@@ -210,22 +267,32 @@ public class CapacityAccountingTest {
     long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyLength);
     long valueAllocation = ValueBlock.allocationLength(valueLength);
     long capacity = CacheMath.logicalEntryBytes(keyAllocation, valueAllocation);
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(capacity)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .eviction(com.red.ohc.api.Eviction.LRU)
-            .build()) {
-      cache.put(new byte[keyLength], new byte[valueLength]);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(capacity)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .eviction(com.red.ohc.api.Eviction.LRU)
+              .build();
+      Throwable cacheFailure5 = null;
+      try {
+        cache.put(new byte[keyLength], new byte[valueLength]);
 
-      byte[] secondKey = new byte[keyLength];
-      secondKey[0] = 1;
-      cache.put(secondKey, new byte[valueLength]);
+        byte[] secondKey = new byte[keyLength];
+        secondKey[0] = 1;
+        cache.put(secondKey, new byte[valueLength]);
 
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.get(secondKey) != null);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.get(secondKey) != null);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure5 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure5);
+      }
     }
   }
 
@@ -242,25 +309,35 @@ public class CapacityAccountingTest {
     long capacity = smallWeight * 2L;
     assertTrue(largeWeight < capacity);
 
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(capacity)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .eviction(com.red.ohc.api.Eviction.LRU)
-            .build()) {
-      byte[] firstKey = new byte[keyLength];
-      byte[] secondKey = new byte[keyLength];
-      secondKey[0] = 1;
-      byte[] thirdKey = new byte[keyLength];
-      thirdKey[0] = 2;
-      cache.put(firstKey, new byte[smallValueLength]);
-      cache.put(secondKey, new byte[smallValueLength]);
-      cache.put(thirdKey, new byte[largeValueLength]);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(capacity)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .eviction(com.red.ohc.api.Eviction.LRU)
+              .build();
+      Throwable cacheFailure4 = null;
+      try {
+        byte[] firstKey = new byte[keyLength];
+        byte[] secondKey = new byte[keyLength];
+        secondKey[0] = 1;
+        byte[] thirdKey = new byte[keyLength];
+        thirdKey[0] = 2;
+        cache.put(firstKey, new byte[smallValueLength]);
+        cache.put(secondKey, new byte[smallValueLength]);
+        cache.put(thirdKey, new byte[largeValueLength]);
 
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.get(thirdKey) != null);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.get(thirdKey) != null);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure4 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure4);
+      }
     }
   }
 
@@ -284,26 +361,35 @@ public class CapacityAccountingTest {
             .buildTyped();
     CountDownLatch actorPaused = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, actorPaused, release);
-    try {
-      for (int index = 0; index < residentCount; index++) {
-        byte[] key = new byte[keyLength];
-        key[0] = (byte) (index >>> 8);
-        key[1] = (byte) index;
-        cache.put(key, new byte[smallValueLength]);
+    {
+      Throwable explicitCacheFailure1 = null;
+      try {
+        pauseMaintenance(cache, actorPaused, release);
+
+        for (int index = 0; index < residentCount; index++) {
+          byte[] key = new byte[keyLength];
+          key[0] = (byte) (index >>> 8);
+          key[1] = (byte) index;
+          cache.put(key, new byte[smallValueLength]);
+        }
+
+        byte[] largeKey = new byte[keyLength];
+        largeKey[0] = 13;
+        release.countDown();
+        cache.put(largeKey, new byte[largeValueLength]);
+
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.get(largeKey) != null);
+
+      } catch (Throwable explicitCacheOperationFailure) {
+        explicitCacheFailure1 = explicitCacheOperationFailure;
+        throw explicitCacheOperationFailure;
+      } finally {
+
+        release.countDown();
+        CacheTestSupport.stop(cache, explicitCacheFailure1);
       }
-
-      byte[] largeKey = new byte[keyLength];
-      largeKey[0] = 13;
-      release.countDown();
-      cache.put(largeKey, new byte[largeValueLength]);
-
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.get(largeKey) != null);
-    } finally {
-      release.countDown();
-      cache.close();
     }
   }
 
@@ -318,26 +404,36 @@ public class CapacityAccountingTest {
     long capacity = smallWeight * residentCount;
     int largeValueLength = (int) (capacity - keyAllocation - 16L);
 
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(capacity)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .eviction(com.red.ohc.api.Eviction.LRU)
-            .build()) {
-      for (int index = 0; index < residentCount; index++) {
-        byte[] key = new byte[keyLength];
-        key[0] = (byte) (index >>> 8);
-        key[1] = (byte) index;
-        cache.put(key, new byte[smallValueLength]);
-      }
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(capacity)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .eviction(com.red.ohc.api.Eviction.LRU)
+              .build();
+      Throwable cacheFailure3 = null;
+      try {
+        for (int index = 0; index < residentCount; index++) {
+          byte[] key = new byte[keyLength];
+          key[0] = (byte) (index >>> 8);
+          key[1] = (byte) index;
+          cache.put(key, new byte[smallValueLength]);
+        }
 
-      byte[] largeKey = new byte[keyLength];
-      largeKey[0] = 100;
-      assertTrue(cache.putIfAbsent(largeKey, new byte[largeValueLength], 0L) == null);
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 1L);
-      assertTrue(cache.get(largeKey) != null);
+        byte[] largeKey = new byte[keyLength];
+        largeKey[0] = 100;
+        assertTrue(cache.putIfAbsent(largeKey, new byte[largeValueLength], 0L) == null);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 1L);
+        assertTrue(cache.get(largeKey) != null);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure3 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure3);
+      }
     }
   }
 
@@ -351,19 +447,29 @@ public class CapacityAccountingTest {
             Entry.keyAllocationLengthForKeyLength(key.length), ValueBlock.allocationLength(1));
     long capacity = 256L;
 
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(capacity)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, oldValue);
-      cache.flushAsync().join();
-      assertTrue(oldLogicalBytes < capacity);
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(capacity)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure2 = null;
+      try {
+        cache.put(key, oldValue);
+        cache.flushAsync().join();
+        assertTrue(oldLogicalBytes < capacity);
 
-      cache.put(key, largeValue);
-      cache.flushAsync().join();
-      assertEquals(cache.size(), 0L);
+        cache.put(key, largeValue);
+        cache.flushAsync().join();
+        assertEquals(cache.size(), 0L);
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure2 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure2);
+      }
     }
   }
 
@@ -376,23 +482,34 @@ public class CapacityAccountingTest {
     long oldAllocation = ValueBlock.allocationLength(oldValue.length);
     long newAllocation = ValueBlock.allocationLength(newValue.length);
 
-    assertEquals(WriterArena.allocationWeight(oldAllocation), WriterArena.allocationWeight(newAllocation));
+    assertEquals(
+        WriterArena.allocationWeight(oldAllocation), WriterArena.allocationWeight(newAllocation));
 
-    try (OHCache<byte[], byte[]> cache =
-        OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(512L)
-            .keySerializer(BYTES)
-            .valueSerializer(BYTES)
-            .build()) {
-      cache.put(key, oldValue);
-      cache.flushAsync().join();
-      assertEquals(
-          cache.stats().liveWeight(), CacheMath.logicalEntryBytes(keyAllocation, oldAllocation));
+    {
+      OHCache<byte[], byte[]> cache =
+          OHCacheBuilder.<byte[], byte[]>newBuilder()
+              .capacity(512L)
+              .keySerializer(BYTES)
+              .valueSerializer(BYTES)
+              .build();
+      Throwable cacheFailure1 = null;
+      try {
+        cache.put(key, oldValue);
+        cache.flushAsync().join();
+        assertEquals(
+            cache.stats().liveWeight(), CacheMath.logicalEntryBytes(keyAllocation, oldAllocation));
 
-      cache.put(key, newValue);
-      cache.flushAsync().join();
-      assertEquals(
-          cache.stats().liveWeight(), CacheMath.logicalEntryBytes(keyAllocation, newAllocation));
+        cache.put(key, newValue);
+        cache.flushAsync().join();
+        assertEquals(
+            cache.stats().liveWeight(), CacheMath.logicalEntryBytes(keyAllocation, newAllocation));
+
+      } catch (Throwable cacheOperationFailure) {
+        cacheFailure1 = cacheOperationFailure;
+        throw cacheOperationFailure;
+      } finally {
+        CacheTestSupport.stop(cache, cacheFailure1);
+      }
     }
   }
 
@@ -416,8 +533,7 @@ public class CapacityAccountingTest {
               throw new AssertionError(failure);
             }));
     assertTrue(
-        paused.await(2L, java.util.concurrent.TimeUnit.SECONDS),
-        "maintenance actor did not pause");
+        paused.await(2L, java.util.concurrent.TimeUnit.SECONDS), "maintenance actor did not pause");
   }
 
   private static LogicalAdmission logicalAdmission(OffHeapCache<?, ?> cache) throws Exception {
