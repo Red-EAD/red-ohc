@@ -348,11 +348,24 @@ public final class WriterLifecycleLane {
   }
 
   private void signalReady() {
-    if (!readySignalled.compareAndSet(false, true)) {
-      return;
-    }
     if (journal != null) {
-      journal.readyLaneSignalled(this);
+      // Count the set before the marker becomes visible: a racing finishReadyDrain can otherwise
+      // clear the marker between the CAS and the journal count, decrementing an uncounted set.
+      for (;;) {
+        if (readySignalled.get()) {
+          return;
+        }
+        journal.beginReadyLaneSignal();
+        if (readySignalled.compareAndSet(false, true)) {
+          break;
+        }
+        journal.retractReadyLaneSignal();
+      }
+      journal.publishReadyLane(this);
+    } else {
+      if (!readySignalled.compareAndSet(false, true)) {
+        return;
+      }
     }
     notifyReadinessChanged();
     Runnable signal = readySignal;

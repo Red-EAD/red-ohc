@@ -210,9 +210,18 @@ public final class WriterLifecycleJournal {
     readinessGeneration.incrementAndGet();
   }
 
-  /** Producer edge: the lane's ready marker flipped to set, so it joins the dirty set. */
-  void readyLaneSignalled(WriterLifecycleLane lane) {
+  /** Producer edge: tentatively counts a set before the marker CAS; retracted on CAS loss. */
+  void beginReadyLaneSignal() {
     readyLaneCount.incrementAndGet();
+  }
+
+  /** Producer edge: the marker CAS lost a race; removes the tentative count. */
+  void retractReadyLaneSignal() {
+    readyLaneCount.decrementAndGet();
+  }
+
+  /** Producer edge: the marker CAS won, so the lane joins the drained set. */
+  void publishReadyLane(WriterLifecycleLane lane) {
     readyLanes.offer(lane);
   }
 
