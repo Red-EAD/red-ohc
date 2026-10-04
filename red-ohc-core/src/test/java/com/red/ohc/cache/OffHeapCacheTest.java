@@ -1099,7 +1099,7 @@ public class OffHeapCacheTest {
   private static void pauseMaintenance(
       OffHeapCache<?, ?> cache, CountDownLatch paused, CountDownLatch release) throws Exception {
     assertTrue(
-        worker(cache).submitAsyncMutation(
+        worker(cache).submitActorTaskForTest(
             () -> {
               paused.countDown();
               try {

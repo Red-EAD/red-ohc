@@ -1470,7 +1470,7 @@ public class BulkCacheTest {
     workerField.setAccessible(true);
     MaintenanceEventLoop worker = (MaintenanceEventLoop) workerField.get(cache);
     assertTrue(
-        worker.submitAsyncMutation(
+        worker.submitActorTaskForTest(
             () -> {
               paused.countDown();
               await(release);

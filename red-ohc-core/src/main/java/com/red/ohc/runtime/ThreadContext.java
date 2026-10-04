@@ -609,12 +609,6 @@ public final class ThreadContext {
     return slot.registry != null;
   }
 
-  public int readerSlotIndex() {
-    if (slot.registry == null || slot.registryIndex < 0) {
-      throw new IllegalStateException("reader slot is not registered");
-    }
-    return slot.registryIndex;
-  }
 
   public int readerDepth() {
     return readerDepth;
@@ -841,6 +835,8 @@ public final class ThreadContext {
     }
     bulkReadChanged = false;
   }
+
+  /** Delivers every sampled hit to this thread's actor-owned access ring. */
 
   /** Delivers every sampled hit to this thread's actor-owned access ring. */
   public void access(Entry entry) {

@@ -11,10 +11,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.AbstractMap;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.ConcurrentModificationException;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -22,7 +20,6 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -586,8 +583,6 @@ public final class ConcurrentMapBehaviorTest {
       assertTrue(entry != null);
       assertEquals(entry.setValue("new"), "old");
 
-      assertTrue(cache.keySet("mapped").add("mapped"));
-
       ticker.setMillis(2_001L);
       assertFalse(cache.containsKey("if-absent"));
       assertFalse(cache.containsKey("replace"));
@@ -617,7 +612,7 @@ public final class ConcurrentMapBehaviorTest {
       cache.put("bulk", "value");
       expectThrows(
           IllegalStateException.class,
-          () -> cache.forEach(0L, (key, value) -> cache.close()));
+          () -> cache.forEach((key, value) -> cache.close()));
       cache.put("after-bulk", "value");
       assertEquals(cache.get("after-bulk"), "value");
     }
@@ -631,7 +626,6 @@ public final class ConcurrentMapBehaviorTest {
           IllegalStateException.class,
           () ->
               cache.forEach(
-                  1L,
                   (key, value) -> {
                     callbackSeen.set(true);
                     cache.close();
@@ -686,13 +680,6 @@ public final class ConcurrentMapBehaviorTest {
       }
       assertFalse(cache.containsKey("a"));
 
-      Set<String> mappedKeys = cache.keySet("mapped");
-      assertTrue(mappedKeys.add("c"));
-      assertFalse(mappedKeys.add("c"));
-      assertEquals(cache.get("c"), "mapped");
-      assertTrue(cache.values().remove("mapped"));
-      assertFalse(cache.containsKey("c"));
-
       assertTrue(cache.entrySet().contains(new AbstractMap.SimpleEntry<>("b", "2")));
       Map.Entry<String, String> snapshot = cache.entrySet().iterator().next();
       String snapshotKey = snapshot.getKey();
@@ -708,57 +695,6 @@ public final class ConcurrentMapBehaviorTest {
     }
   }
 
-  @Test
-  public void mapAndChmBulkMethodsExposeHeapSnapshots() {
-    try (OHCache<String, String> cache = newCache()) {
-      cache.put("1", "10");
-      cache.put("2", "20");
-      cache.put("3", "30");
-      cache.flushAsync().join();
-
-      Set<String> visited = ConcurrentHashMap.newKeySet();
-      cache.forEach(0L, (key, value) -> visited.add(key + value));
-      assertEquals(visited, new HashSet<>(Arrays.asList("110", "220", "330")));
-
-      List<String> transformed = new CopyOnWriteArrayList<>();
-      cache.forEach(
-          Long.MAX_VALUE,
-          (key, value) -> key + "=" + value,
-          transformed::add);
-      assertEquals(new HashSet<>(transformed), new HashSet<>(Arrays.asList("1=10", "2=20", "3=30")));
-
-      String found = cache.search(1L, (key, value) -> "2".equals(key) ? value : null);
-      assertEquals(found, "20");
-      assertEquals(cache.reduceToInt(0L, (key, value) -> Integer.parseInt(value), 7, Integer::sum), 67);
-      assertEquals(cache.reduceToLong(Long.MAX_VALUE, (key, value) -> Long.parseLong(value), 7L, Long::sum), 67L);
-      assertEquals(cache.reduceToDouble(0L, (key, value) -> Double.parseDouble(value), 7d, Double::sum), 67d, 0d);
-
-      Set<String> keyValues = ConcurrentHashMap.newKeySet();
-      cache.forEachKey(0L, keyValues::add);
-      assertEquals(keyValues, new HashSet<>(Arrays.asList("1", "2", "3")));
-      assertEquals(cache.searchKeys(Long.MAX_VALUE, key -> "3".equals(key) ? key : null), "3");
-      assertEquals(cache.reduceKeysToInt(1L, Integer::parseInt, 7, Integer::sum), 13);
-
-      Set<String> values = ConcurrentHashMap.newKeySet();
-      cache.forEachValue(0L, values::add);
-      assertEquals(values, new HashSet<>(Arrays.asList("10", "20", "30")));
-      assertEquals(cache.searchValues(Long.MAX_VALUE, value -> "20".equals(value) ? value : null), "20");
-      assertEquals(cache.reduceValues(1L, (left, right) -> left + "," + right).split(",").length, 3);
-
-      AtomicInteger entryCount = new AtomicInteger();
-      cache.forEachEntry(0L, entry -> {
-        assertTrue(entry.getKey() instanceof String);
-        assertTrue(entry.getValue() instanceof String);
-        entryCount.incrementAndGet();
-      });
-      assertEquals(entryCount.get(), 3);
-      assertEquals(
-          cache.searchEntries(Long.MAX_VALUE, entry -> "1".equals(entry.getKey()) ? entry.getValue() : null),
-          "10");
-      assertEquals(cache.reduceEntriesToInt(0L, entry -> Integer.parseInt(entry.getValue()), 7, Integer::sum), 67);
-    }
-  }
-
   @Test(timeOut = 5_000L)
   public void bulkCallbackCanRemoveThenFlush() throws Exception {
     try (OHCache<String, String> cache = newCache()) {
@@ -766,7 +702,6 @@ public final class ConcurrentMapBehaviorTest {
       cache.flushAsync().join();
       AtomicInteger callbacks = new AtomicInteger();
       cache.forEach(
-          0L,
           (key, value) -> {
             cache.remove(key);
             assertFalse(cache.containsKey(key));
@@ -816,7 +751,7 @@ public final class ConcurrentMapBehaviorTest {
       cache.remove("expired");
       assertFalse(cache.containsKey("expired"));
       AtomicInteger callbacks = new AtomicInteger();
-      cache.forEach(0L, (key, value) -> callbacks.incrementAndGet());
+      cache.forEach((key, value) -> callbacks.incrementAndGet());
       assertEquals(callbacks.get(), 0);
 
       assertFalse(cache.replace("expired", "value", "new"));

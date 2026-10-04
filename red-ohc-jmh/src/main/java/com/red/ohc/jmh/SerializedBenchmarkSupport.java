@@ -210,6 +210,10 @@ public final class SerializedBenchmarkSupport {
       return new RawKey(Arrays.copyOf(source, source.length));
     }
 
+    public int length() {
+      return bytes.length;
+    }
+
     @Override
     public boolean equals(Object other) {
       return other == this

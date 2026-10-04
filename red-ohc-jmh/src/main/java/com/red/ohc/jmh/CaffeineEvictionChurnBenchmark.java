@@ -22,7 +22,7 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
-import com.red.ohc.api.EncodedKey;
+import com.red.ohc.jmh.SerializedBenchmarkSupport.RawKey;
 
 /**
  * External-throughput counterpart to {@code OHCEvictionChurnBenchmark}. Caffeine has only its
@@ -47,24 +47,24 @@ public class CaffeineEvictionChurnBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-  private EncodedKey[] keys;
+  private RawKey[] keys;
   private byte[][] values;
-  private Cache<EncodedKey, byte[]> cache;
+  private Cache<RawKey, byte[]> cache;
   private long maximumWeight;
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new EncodedKey[WORKING_SET];
+    keys = new RawKey[WORKING_SET];
     values = new byte[WORKING_SET][];
     // Caffeine's weigher is payload-only; choose the same target live-entry cardinality as OHC.
     maximumWeight = (long) CAPACITY_ENTRIES * (keyBytes + valueBytes);
     cache =
-        Caffeine.<EncodedKey, byte[]>newBuilder()
+        Caffeine.<RawKey, byte[]>newBuilder()
             .maximumWeight(maximumWeight)
-            .weigher((EncodedKey key, byte[] value) -> key.length() + value.length)
+            .weigher((RawKey key, byte[] value) -> key.length() + value.length)
             .build();
     for (int index = 0; index < WORKING_SET; index++) {
-      keys[index] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, index));
+      keys[index] = RawKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, index));
       values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
       if (index < CAPACITY_ENTRIES) {
         cache.put(keys[index], Arrays.copyOf(values[index], values[index].length));

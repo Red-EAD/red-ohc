@@ -151,6 +151,20 @@ public final class Entry {
   }
 
   /** Snapshot of pending flags stored in the native state word. */
+  public boolean isMutationRetryRequested() {
+    return (pendingFlags() & PENDING_RETRY) != 0;
+  }
+
+  /** True when the maintenance actor has this entry linked into an eviction policy. */
+  public boolean policyPresent() {
+    return (pendingFlags() & POLICY_PRESENT) != 0;
+  }
+
+  /** A negative timer level encodes the worker-owned overflow heap index. */
+  public boolean timerInOverflowHeap() {
+    return timerLocation() <= TIMER_HEAP_BASE;
+  }
+
   public int pendingFlags() {
     return pendingFlags(NativeMemory.getLongVolatile(stateWordAddress()));
   }
@@ -452,9 +466,6 @@ public final class Entry {
   }
 
   /** A negative timer level encodes the worker-owned overflow heap index. */
-  public boolean timerInOverflowHeap() {
-    return timerLocation() <= TIMER_HEAP_BASE;
-  }
 
   public int timerHeapIndex() {
     int location = timerLocation();
@@ -497,15 +508,6 @@ public final class Entry {
   }
 
   /** Attempts a reliable-removal claim once; callers must not wait for another producer. */
-  public boolean tryBeginPending(int flags) {
-    if (flags != PENDING_REMOVE) {
-      throw new IllegalArgumentException("invalid pending flags: " + flags);
-    }
-    int current = pendingFlags();
-    return (current & PENDING_CLAIMED) == 0
-        && compareAndSetPending(
-            current, current | PENDING_CLAIMED | (flags << PENDING_CLAIM_SHIFT));
-  }
 
   /** Releases a successful reliable removal claim after its retirement records are visible. */
   public void completePendingClaim() {
@@ -637,29 +639,7 @@ public final class Entry {
   }
 
   /** Cancels a reliable removal claim before its associated mapping becomes invisible. */
-  public boolean cancelPendingClaim() {
-    while (true) {
-      int current = pendingFlags();
-      if ((current & PENDING_CLAIMED) == 0) {
-        throw new IllegalStateException("missing pending claim");
-      }
-      if (compareAndSetPending(current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
-        return true;
-      }
-    }
-  }
 
-  public boolean cancelPendingClaimIfPresent() {
-    while (true) {
-      int current = pendingFlags();
-      if ((current & PENDING_CLAIMED) == 0) {
-        return false;
-      }
-      if (compareAndSetPending(current, current & ~(PENDING_CLAIMED | PENDING_CLAIM_MASK))) {
-        return true;
-      }
-    }
-  }
 
   /** Retains an advisory mutation for the next publication after the actor observed a lock. */
   public boolean requestMutationRetry(int flags) {
@@ -699,13 +679,7 @@ public final class Entry {
     }
   }
 
-  public boolean isPendingQueued() {
-    return (pendingFlags() & PENDING_QUEUED) != 0;
-  }
 
-  public boolean isMutationRetryRequested() {
-    return (pendingFlags() & PENDING_RETRY) != 0;
-  }
 
   /**
    * Clears advisory state before the native key block is retired.
@@ -765,9 +739,6 @@ public final class Entry {
   }
 
   /** True when the maintenance actor has this entry linked into an eviction policy. */
-  public boolean policyPresent() {
-    return (pendingFlags() & POLICY_PRESENT) != 0;
-  }
 
   /** Clears a stale actor hint without touching it while the actor still owns a live policy. */
   public boolean clearPolicyPresentIfNone() {

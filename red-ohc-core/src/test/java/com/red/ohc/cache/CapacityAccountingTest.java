@@ -402,7 +402,7 @@ public class CapacityAccountingTest {
     workerField.setAccessible(true);
     MaintenanceEventLoop worker = (MaintenanceEventLoop) workerField.get(cache);
     assertTrue(
-        worker.submitAsyncMutation(
+        worker.submitActorTaskForTest(
             () -> {
               paused.countDown();
               try {

@@ -218,9 +218,6 @@ public final class NativeMemory {
       return rawAllocations.get();
     }
 
-    public long entryAllocationCount() {
-      return entryAllocations.get();
-    }
 
     public long pageAllocatedCount() {
       return pageAllocatedCount.get();
@@ -1392,14 +1389,8 @@ public final class NativeMemory {
     return U;
   }
 
-  public static long byteArrayBaseOffset() {
-    return BYTE_ARRAY_BASE;
-  }
 
   /** The actual heap reference width used by this HotSpot process (compressed or wide OOPs). */
-  public static int objectReferenceSize() {
-    return U.arrayIndexScale(Object[].class);
-  }
 
   public static long getLongVolatile(long address) {
     return U.getLongVolatile(null, address);
@@ -1429,9 +1420,6 @@ public final class NativeMemory {
     return U.getIntVolatile(null, address);
   }
 
-  public static boolean compareAndSwapInt(long address, int expected, int update) {
-    return U.compareAndSwapInt(null, address, expected, update);
-  }
 
   public static void putInt(long address, int value) {
     U.putInt(address, value);

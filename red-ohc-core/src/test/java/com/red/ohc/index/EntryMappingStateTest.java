@@ -56,27 +56,7 @@ public final class EntryMappingStateTest {
     assertFalse(entry.claimWriter());
   }
 
-  @Test(timeOut = 2_000L)
-  public void reliableRemovalClaimFailsImmediatelyWhenAnotherRemovalOwnsTheEntry() {
-    Entry entry = EntryTestSupport.entry(1, 7, 0L);
-    assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
-    assertFalse(entry.tryBeginPending(Entry.PENDING_REMOVE));
-    entry.completePendingClaim();
-  }
 
-  @Test
-  public void completedPendingPublicationAdvancesTheMutationVersion() {
-    Entry entry = EntryTestSupport.entry(1, 7, 0L);
-
-    assertEquals(entry.mutationVersion(), 0L);
-    assertTrue(entry.tryBeginPending(Entry.PENDING_REMOVE));
-    entry.completePendingClaim();
-    assertEquals(entry.mutationVersion(), 1L);
-    assertEquals(
-        entry.appliedVersion(), 0L, "the maintenance worker must publish the applied version");
-    assertTrue(entry.markAppliedVersion(1L));
-    assertEquals(entry.appliedVersion(), 1L);
-  }
 
   @Test
   public void appliedVersionDoesNotAdvanceAfterAConcurrentMutation() {
@@ -149,33 +129,7 @@ public final class EntryMappingStateTest {
     assertEquals(entry.appliedVersion(), 2L);
   }
 
-  @Test
-  public void writerPublicationConsumesTheActorRetryMarker() {
-    Entry entry = EntryTestSupport.entry(1, 7, 0L);
 
-    assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
-    assertEquals(entry.takePending(), Entry.PENDING_UPDATE);
-    assertTrue(entry.requestMutationRetry(Entry.PENDING_UPDATE));
-    assertTrue(entry.isMutationRetryRequested());
-
-    assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
-    assertFalse(entry.isMutationRetryRequested());
-    assertTrue(entry.isPendingQueued());
-  }
-
-  @Test
-  public void actorRetryTransportCanBeClaimedOnlyOnce() {
-    Entry entry = EntryTestSupport.entry(1, 7, 0L);
-
-    assertTrue(entry.publishMutation(Entry.PENDING_UPDATE));
-    assertEquals(entry.takePending(), Entry.PENDING_UPDATE);
-    assertTrue(entry.requestMutationRetry(Entry.PENDING_UPDATE));
-
-    assertTrue(entry.claimMutationRetry());
-    assertFalse(entry.claimMutationRetry());
-    assertFalse(entry.isMutationRetryRequested());
-    assertTrue(entry.isPendingQueued());
-  }
 
   @Test(timeOut = 10_000L)
   public void concurrentMutationPublicationsDoNotLoseVersionIncrements() throws Exception {

@@ -234,7 +234,7 @@ public class MaintenanceAccountingTest {
     workerField.setAccessible(true);
     MaintenanceEventLoop worker = (MaintenanceEventLoop) workerField.get(cache);
     assertTrue(
-        worker.submitAsyncMutation(
+        worker.submitActorTaskForTest(
             () -> {
               paused.countDown();
               try {

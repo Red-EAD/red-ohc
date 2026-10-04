@@ -20,7 +20,7 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.ThreadParams;
 
-import com.red.ohc.api.EncodedKey;
+import com.red.ohc.jmh.SerializedBenchmarkSupport.RawKey;
 
 /** Caffeine-only admission benchmark. It intentionally starts no OHC worker threads. */
 @BenchmarkMode(Mode.SingleShotTime)
@@ -42,22 +42,22 @@ public class CaffeineWriteBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-  private EncodedKey[] keys;
+  private RawKey[] keys;
   private byte[][] values;
-  private Cache<EncodedKey, byte[]> cache;
+  private Cache<RawKey, byte[]> cache;
 
   @Setup(Level.Trial)
   public void setup() {
-    keys = new EncodedKey[KEY_COUNT];
+    keys = new RawKey[KEY_COUNT];
     values = new byte[KEY_COUNT][];
     long payloadCapacity = (long) KEY_COUNT * (keyBytes + valueBytes) * 2L;
     cache =
-        Caffeine.<EncodedKey, byte[]>newBuilder()
+        Caffeine.<RawKey, byte[]>newBuilder()
             .maximumWeight(payloadCapacity)
-            .weigher((EncodedKey key, byte[] value) -> key.length() + value.length)
+            .weigher((RawKey key, byte[] value) -> key.length() + value.length)
             .build();
     for (int i = 0; i < KEY_COUNT; i++) {
-      keys[i] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, i));
+      keys[i] = RawKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, i));
       values[i] = OHCWriteAdmissionBenchmark.bytes(valueBytes, i * 31 + 7);
       cache.put(keys[i], values[i]);
     }

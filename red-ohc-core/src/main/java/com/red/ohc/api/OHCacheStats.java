@@ -4,9 +4,6 @@ package com.red.ohc.api;
 public final class OHCacheStats {
   private final long hitCount;
   private final long missCount;
-  private final long loadSuccessCount;
-  private final long loadFailureCount;
-  private final long totalLoadTime;
   private final long evictionCount;
   private final long evictionWeight;
   private final long expirationCount;
@@ -55,10 +52,6 @@ public final class OHCacheStats {
   private final long retirementAllocatedSegments;
   private final long retirementReusedSegments;
   private final long retirementTrimmedSegments;
-  private final long asyncMutationQueueDepth;
-  private final long asyncMutationPublishedRecords;
-  private final long asyncMutationCompletedRecords;
-  private final long asyncMutationLagRecords;
   private final long ghostNativeBytes;
   private final long ghostAllocationTrimCount;
   private final long ghostAllocationDropCount;
@@ -95,9 +88,6 @@ public final class OHCacheStats {
   public OHCacheStats(
       long hitCount,
       long missCount,
-      long loadSuccessCount,
-      long loadFailureCount,
-      long totalLoadTime,
       long evictionCount,
       long evictionWeight,
       long expirationCount,
@@ -146,10 +136,6 @@ public final class OHCacheStats {
       long retirementAllocatedSegments,
       long retirementReusedSegments,
       long retirementTrimmedSegments,
-      long asyncMutationQueueDepth,
-      long asyncMutationPublishedRecords,
-      long asyncMutationCompletedRecords,
-      long asyncMutationLagRecords,
       long ghostNativeBytes,
       long ghostAllocationTrimCount,
       long ghostAllocationDropCount,
@@ -184,9 +170,6 @@ public final class OHCacheStats {
       long allocatorTrimmedBytesTotal) {
     this.hitCount = hitCount;
     this.missCount = missCount;
-    this.loadSuccessCount = loadSuccessCount;
-    this.loadFailureCount = loadFailureCount;
-    this.totalLoadTime = totalLoadTime;
     this.evictionCount = evictionCount;
     this.evictionWeight = evictionWeight;
     this.expirationCount = expirationCount;
@@ -235,10 +218,6 @@ public final class OHCacheStats {
     this.retirementAllocatedSegments = retirementAllocatedSegments;
     this.retirementReusedSegments = retirementReusedSegments;
     this.retirementTrimmedSegments = retirementTrimmedSegments;
-    this.asyncMutationQueueDepth = asyncMutationQueueDepth;
-    this.asyncMutationPublishedRecords = asyncMutationPublishedRecords;
-    this.asyncMutationCompletedRecords = asyncMutationCompletedRecords;
-    this.asyncMutationLagRecords = asyncMutationLagRecords;
     this.ghostNativeBytes = ghostNativeBytes;
     this.ghostAllocationTrimCount = ghostAllocationTrimCount;
     this.ghostAllocationDropCount = ghostAllocationDropCount;
@@ -295,32 +274,8 @@ public final class OHCacheStats {
     return requests == 0L ? 0.0d : (double) missCount / requests;
   }
 
-  public long loadSuccessCount() {
-    return loadSuccessCount;
-  }
 
-  public long loadFailureCount() {
-    return loadFailureCount;
-  }
 
-  public long loadCount() {
-    return saturatedAdd(loadSuccessCount, loadFailureCount);
-  }
-
-  public double loadFailureRate() {
-    long loads = loadCount();
-    return loads == 0L ? 0.0d : (double) loadFailureCount / loads;
-  }
-
-  /** Total loader execution time in nanoseconds. */
-  public long totalLoadTime() {
-    return totalLoadTime;
-  }
-
-  public double averageLoadPenalty() {
-    long loads = loadCount();
-    return loads == 0L ? 0.0d : (double) totalLoadTime / loads;
-  }
 
   public long evictionCount() {
     return evictionCount;
@@ -517,21 +472,9 @@ public final class OHCacheStats {
     return retirementTrimmedSegments;
   }
 
-  public long asyncMutationQueueDepth() {
-    return asyncMutationQueueDepth;
-  }
 
-  public long asyncMutationPublishedRecords() {
-    return asyncMutationPublishedRecords;
-  }
 
-  public long asyncMutationCompletedRecords() {
-    return asyncMutationCompletedRecords;
-  }
 
-  public long asyncMutationLagRecords() {
-    return asyncMutationLagRecords;
-  }
 
   /** Native bytes reserved by the S3-FIFO ghost history. */
   public long ghostNativeBytes() {

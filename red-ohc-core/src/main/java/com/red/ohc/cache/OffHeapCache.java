@@ -9,28 +9,13 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
-import java.util.function.Consumer;
-import java.util.function.DoubleBinaryOperator;
 import java.util.function.Function;
-import java.util.function.IntBinaryOperator;
-import java.util.function.LongBinaryOperator;
-import java.util.function.ToDoubleBiFunction;
-import java.util.function.ToDoubleFunction;
-import java.util.function.ToIntBiFunction;
-import java.util.function.ToIntFunction;
-import java.util.function.ToLongBiFunction;
-import java.util.function.ToLongFunction;
 
-import com.red.ohc.api.CacheLoader;
 import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.DirectEntryConsumer;
 import com.red.ohc.api.DirectValueConsumer;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.EvictionListener;
 import com.red.ohc.api.OHCache;
@@ -80,7 +65,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final MonotonicDeadlineClock deadlineClock;
   private final long defaultTtlMillis;
   private final boolean ttlEnabled;
-  private final Executor loaderExecutor;
   private final long closeTimeoutMillis;
   private final long capacity;
   private final boolean countBounded;
@@ -95,10 +79,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private final LogicalAdmission logicalAdmission;
   private final ReaderGuard readerGuard;
   private final MapViews<K, V> mapViews;
-  private final ConcurrentHashMap<EncodedKey, LoadFlight<V>> loadFlights = new ConcurrentHashMap<>();
-  private final AtomicLong loadSuccessCount = new AtomicLong();
-  private final AtomicLong loadFailureCount = new AtomicLong();
-  private final AtomicLong totalLoadTime = new AtomicLong();
   private final Object lifecycleLock = new Object();
   private final AtomicInteger closeState = new AtomicInteger(OPEN);
   private final AtomicInteger activeBulkOperations = new AtomicInteger();
@@ -110,7 +90,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       CacheSerializer<K> keySerializer,
       CacheSerializer<V> valueSerializer,
       long defaultTtlMillis,
-      java.util.concurrent.Executor loaderExecutor,
       long closeTimeoutMillis,
       Ticker ticker,
       Eviction eviction,
@@ -126,7 +105,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.deadlineClock = new MonotonicDeadlineClock(ticker);
     this.defaultTtlMillis = defaultTtlMillis;
     this.ttlEnabled = defaultTtlMillis > 0L;
-    this.loaderExecutor = loaderExecutor;
     this.closeTimeoutMillis = closeTimeoutMillis;
     boolean countBounded = maxSize > 0L;
     this.countBounded = countBounded;
@@ -251,23 +229,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     private synchronized void invalidate() {
       active = false;
       delegate = null;
-    }
-  }
-
-  private static final class LoadFlight<T> {
-    private final CompletableFuture<T> shared = new CompletableFuture<>();
-
-    private CompletableFuture<T> waiter() {
-      CompletableFuture<T> waiter = new CompletableFuture<>();
-      shared.whenComplete(
-          (value, failure) -> {
-            if (failure != null) {
-              waiter.completeExceptionally(failure);
-            } else {
-              waiter.complete(value);
-            }
-          });
-      return waiter;
     }
   }
 
@@ -448,7 +409,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 context,
                 entry,
                 value,
-                null,
                 valueLength,
                 deadlineNanos,
                 false,
@@ -571,7 +531,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 context,
                 entry,
                 value,
-                null,
                 valueLength,
                 deadlineNanos,
                 false,
@@ -999,7 +958,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     try {
       initializeValueBlock(context, address, deadlineNanos, valueLength);
-      writeValue(context, ValueBlock.payloadAddress(address), value, null, valueLength);
+      writeValue(context, ValueBlock.payloadAddress(address), value, valueLength);
       long taggedValue =
           Entry.tagValueAddress(
               address, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE);
@@ -1031,7 +990,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
       long replacement =
           allocateReplacement(
-              context, attempt.replacement, null, valueLength, deadlineNanos, newAllocation);
+              context, attempt.replacement, valueLength, deadlineNanos, newAllocation);
       if (replacement == 0L) {
         nativeAllocationRejected();
         throw new IllegalStateException("native allocation failed while replacing computed value");
@@ -1459,7 +1418,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             context,
             existing,
             value,
-            null,
             valueLength,
             valueAllocation,
             deadlineNanos,
@@ -1479,7 +1437,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           keyBytes,
           keyLength,
           value,
-          null,
           valueLength,
           keyAllocation,
           valueAllocation,
@@ -1495,7 +1452,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ThreadContext context,
       Entry existing,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long newAllocation,
       long deadlineNanos,
@@ -1506,7 +1462,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             context,
             existing,
             value,
-            valueBytes,
             valueLength,
             deadlineNanos,
             deferMaintenanceWake,
@@ -1524,7 +1479,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       byte[] keyBytes,
       int keyLength,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long keyAllocation,
       long valueAllocation,
@@ -1538,7 +1492,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             keyBytes,
             keyLength,
             value,
-            valueBytes,
             valueLength,
             deadlineNanos,
             keyAllocation,
@@ -1551,7 +1504,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         candidate,
         hash,
         value,
-        valueBytes,
         valueLength,
         valueAllocation,
         charge,
@@ -1565,7 +1517,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry candidate,
       int keyHash,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long valueAllocation,
       long charge,
@@ -1576,7 +1527,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         candidate,
         keyHash,
         value,
-        valueBytes,
         valueLength,
         valueAllocation,
         charge,
@@ -1590,7 +1540,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry candidate,
       int keyHash,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long valueAllocation,
       long charge,
@@ -1649,7 +1598,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           context,
           winner,
           value,
-          valueBytes,
           valueLength,
           valueAllocation,
           deadlineNanos,
@@ -1988,7 +1936,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ThreadContext context,
       Entry entry,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       boolean deferMaintenanceWake,
@@ -1998,7 +1945,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context,
         entry,
         value,
-        valueBytes,
         valueLength,
         deadlineNanos,
         deferMaintenanceWake,
@@ -2009,37 +1955,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         -1L);
   }
 
-  private int replaceExistingReturningPrevious(
-      ThreadContext context,
-      Entry entry,
-      Object value,
-      byte[] valueBytes,
-      int valueLength,
-      long deadlineNanos,
-      boolean deferMaintenanceWake,
-      long newAllocation,
-      long preparedReplacement,
-      PreviousValue<Object> previous) {
-    return replaceExistingOnce(
-        context,
-        entry,
-        value,
-        valueBytes,
-        valueLength,
-        deadlineNanos,
-        deferMaintenanceWake,
-        newAllocation,
-        preparedReplacement,
-        previous,
-        0L,
-        -1L);
-  }
 
   private int replaceExistingVersioned(
       ThreadContext context,
       Entry entry,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       boolean deferMaintenanceWake,
@@ -2051,7 +1971,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context,
         entry,
         value,
-        valueBytes,
         valueLength,
         deadlineNanos,
         deferMaintenanceWake,
@@ -2066,7 +1985,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ThreadContext context,
       Entry entry,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       boolean deferMaintenanceWake,
@@ -2079,7 +1997,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context,
         entry,
         value,
-        valueBytes,
         valueLength,
         deadlineNanos,
         deferMaintenanceWake,
@@ -2094,7 +2011,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ThreadContext context,
       Entry entry,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       boolean deferMaintenanceWake,
@@ -2119,7 +2035,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           prepareReplacementValue(
               context,
               value,
-              valueBytes,
               valueLength,
               deadlineNanos,
               newAllocation,
@@ -2254,7 +2169,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private long prepareReplacementValue(
       ThreadContext context,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       long newAllocation,
@@ -2263,7 +2177,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return preparedReplacement;
     }
     long replacement =
-        allocateReplacement(context, value, valueBytes, valueLength, deadlineNanos, newAllocation);
+        allocateReplacement(context, value, valueLength, deadlineNanos, newAllocation);
     if (replacement == 0L) {
       nativeAllocationRejected();
       throw new IllegalStateException("native allocation failed while replacing cache entry");
@@ -2643,7 +2557,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private long allocateReplacement(
       ThreadContext context,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       long allocation) {
@@ -2654,7 +2567,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return 0L;
       }
       initializeValueBlock(context, replacement, deadlineNanos, valueLength);
-      writeValue(context, ValueBlock.payloadAddress(replacement), value, valueBytes, valueLength);
+      writeValue(context, ValueBlock.payloadAddress(replacement), value, valueLength);
       return replacement;
     } catch (Throwable failure) {
       if (replacement != 0L) {
@@ -2676,7 +2589,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       byte[] keyBytes,
       int keyLength,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       long keyAllocation,
@@ -2688,7 +2600,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         keyBytes,
         keyLength,
         value,
-        valueBytes,
         valueLength,
         deadlineNanos,
         keyAllocation,
@@ -2701,7 +2612,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       byte[] keyBytes,
       int keyLength,
       Object value,
-      byte[] valueBytes,
       int valueLength,
       long deadlineNanos,
       long keyAllocation,
@@ -2723,7 +2633,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         return null;
       }
       initializeValueBlock(context, valueAddress, deadlineNanos, valueLength);
-      writeValue(context, ValueBlock.payloadAddress(valueAddress), value, valueBytes, valueLength);
+      writeValue(context, ValueBlock.payloadAddress(valueAddress), value, valueLength);
       Entry entry =
           new Entry(
               keyAddress,
@@ -2871,11 +2781,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         throw new IllegalStateException("cache is closed");
       }
       readerEntered = true;
-      if (!entry.isAlive()
-          || data.get(entry) != entry
-          || (expectedTaggedValue != 0L
-              && (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)
-                  || entry.generation() != expectedGeneration))) {
+      // A mapping-state change completed while this thread waited for the writer claim is
+      // caught by removeEntryIfSame's identity gate inside the removal transaction; the
+      // per-entry claim already serializes every unlink, retire, and replace.
+      if (expectedTaggedValue != 0L
+          && (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)
+              || entry.generation() != expectedGeneration)) {
         return false;
       }
       // Expired mappings are logically absent. Do not report a successful user removal for one;
@@ -3171,21 +3082,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
   }
 
-  private void bindEncodedKey(ThreadContext context, EncodedKey key) {
-    context.ensureKey(key.length());
-    context.lookupKey.set(context.keyBytes, key);
-  }
-
-  private V getEncoded(EncodedKey key) {
-    return getEncoded(key, true);
-  }
-
-  private V getEncoded(EncodedKey key, boolean recordStats) {
-    ThreadContext context = contexts.get();
-    bindEncodedKey(context, key);
-    return getEncoded(context, recordStats);
-  }
-
   @Override
   public boolean containsKey(Object key) {
     Objects.requireNonNull(key, "key");
@@ -3241,18 +3137,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   @Override
-  public boolean contains(Object value) {
-    return containsValue(value);
-  }
-
-  @Override
   public Set<K> keySet() {
     return mapViews.keySet();
-  }
-
-  @Override
-  public Set<K> keySet(V mappedValue) {
-    return mapViews.mappedKeySet(mappedValue);
   }
 
   @Override
@@ -3266,16 +3152,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   @Override
-  public java.util.Enumeration<K> keys() {
-    return java.util.Collections.enumeration(keySet());
-  }
-
-  @Override
-  public java.util.Enumeration<V> elements() {
-    return java.util.Collections.enumeration(values());
-  }
-
-  @Override
   public V getOrDefault(Object key, V defaultValue) {
     Objects.requireNonNull(key, "key");
     V value = get(key);
@@ -3284,7 +3160,21 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   @Override
   public void forEach(java.util.function.BiConsumer<? super K, ? super V> action) {
-    forEach(Long.MAX_VALUE, action);
+    Objects.requireNonNull(action, "action");
+    if (!beginBulkOperation()) {
+      return;
+    }
+    try {
+      data.forEach(
+          (ignored, entry) -> {
+            Map.Entry<K, V> snapshot = snapshotEntryForView(entry);
+            if (snapshot != null) {
+              invokeUserCallback(() -> action.accept(snapshot.getKey(), snapshot.getValue()));
+            }
+          });
+    } finally {
+      endBulkOperation();
+    }
   }
 
   @Override
@@ -3477,780 +3367,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         context.releaseBulkEntries(uniqueEntries);
       }
       return hits;
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public void forEach(long parallelismThreshold, BiConsumer<? super K, ? super V> action) {
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEach(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            if (snapshot != null) {
-              invokeUserCallback(() -> action.accept(snapshot.getKey(), snapshot.getValue()));
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> void forEach(
-      long parallelismThreshold,
-      BiFunction<? super K, ? super V, ? extends U> transformer,
-      Consumer<? super U> action) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEach(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            if (snapshot != null) {
-              invokeUserCallback(
-                  () -> {
-                    U transformed = transformer.apply(snapshot.getKey(), snapshot.getValue());
-                    if (transformed != null) {
-                      action.accept(transformed);
-                    }
-                  });
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U search(
-      long parallelismThreshold,
-      BiFunction<? super K, ? super V, ? extends U> searchFunction) {
-    Objects.requireNonNull(searchFunction, "searchFunction");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.search(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            return snapshot == null
-                ? null
-                : invokeUserCallback(
-                    () -> searchFunction.apply(snapshot.getKey(), snapshot.getValue()));
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U reduce(
-      long parallelismThreshold,
-      BiFunction<? super K, ? super V, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            return snapshot == null
-                ? null
-                : this.<U>invokeUserCallback(
-                    () -> transformer.apply(snapshot.getKey(), snapshot.getValue()));
-          },
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public double reduceToDouble(
-      long parallelismThreshold,
-      ToDoubleBiFunction<? super K, ? super V> transformer,
-      double basis,
-      DoubleBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Double reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-                return snapshot == null
-                    ? null
-                    : invokeUserCallback(
-                        () -> transformer.applyAsDouble(snapshot.getKey(), snapshot.getValue()));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsDouble(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsDouble(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public long reduceToLong(
-      long parallelismThreshold,
-      ToLongBiFunction<? super K, ? super V> transformer,
-      long basis,
-      LongBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Long reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-                return snapshot == null
-                    ? null
-                    : invokeUserCallback(
-                        () -> transformer.applyAsLong(snapshot.getKey(), snapshot.getValue()));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsLong(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsLong(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public int reduceToInt(
-      long parallelismThreshold,
-      ToIntBiFunction<? super K, ? super V> transformer,
-      int basis,
-      IntBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Integer reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-                return snapshot == null
-                    ? null
-                    : invokeUserCallback(
-                        () -> transformer.applyAsInt(snapshot.getKey(), snapshot.getValue()));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsInt(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsInt(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public void forEachKey(long parallelismThreshold, Consumer<? super K> action) {
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEachKey(
-          parallelismThreshold,
-          entry -> {
-            K key = snapshotKeyForBulk(entry);
-            if (key != null) {
-              invokeUserCallback(() -> action.accept(key));
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> void forEachKey(
-      long parallelismThreshold, Function<? super K, ? extends U> transformer, Consumer<? super U> action) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEachKey(
-          parallelismThreshold,
-          entry -> {
-            K key = snapshotKeyForBulk(entry);
-            return key == null ? null : this.<U>invokeUserCallback(() -> transformer.apply(key));
-          },
-          transformed -> {
-            if (transformed != null) {
-              invokeUserCallback(() -> action.accept(transformed));
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U searchKeys(
-      long parallelismThreshold, Function<? super K, ? extends U> searchFunction) {
-    Objects.requireNonNull(searchFunction, "searchFunction");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.searchKeys(
-          parallelismThreshold,
-          entry -> {
-            K key = snapshotKeyForBulk(entry);
-            return key == null ? null : invokeUserCallback(() -> searchFunction.apply(key));
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public K reduceKeys(
-      long parallelismThreshold, BiFunction<? super K, ? super K, ? extends K> reducer) {
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (entry, ignored) -> snapshotKeyForBulk(entry),
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U reduceKeys(
-      long parallelismThreshold,
-      Function<? super K, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (entry, ignored) -> {
-            K key = snapshotKeyForBulk(entry);
-            return key == null ? null : this.<U>invokeUserCallback(() -> transformer.apply(key));
-          },
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public double reduceKeysToDouble(
-      long parallelismThreshold,
-      ToDoubleFunction<? super K> transformer,
-      double basis,
-      DoubleBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Double reduced =
-          data.reduce(
-              parallelismThreshold,
-              (entry, ignored) -> {
-                K key = snapshotKeyForBulk(entry);
-                return key == null ? null : invokeUserCallback(() -> transformer.applyAsDouble(key));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsDouble(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsDouble(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public long reduceKeysToLong(
-      long parallelismThreshold,
-      ToLongFunction<? super K> transformer,
-      long basis,
-      LongBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Long reduced =
-          data.reduce(
-              parallelismThreshold,
-              (entry, ignored) -> {
-                K key = snapshotKeyForBulk(entry);
-                return key == null ? null : invokeUserCallback(() -> transformer.applyAsLong(key));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsLong(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsLong(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public int reduceKeysToInt(
-      long parallelismThreshold,
-      ToIntFunction<? super K> transformer,
-      int basis,
-      IntBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Integer reduced =
-          data.reduce(
-              parallelismThreshold,
-              (entry, ignored) -> {
-                K key = snapshotKeyForBulk(entry);
-                return key == null ? null : invokeUserCallback(() -> transformer.applyAsInt(key));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsInt(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsInt(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public void forEachValue(long parallelismThreshold, Consumer<? super V> action) {
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEachValue(
-          parallelismThreshold,
-          entry -> {
-            V value = snapshotValueForBulk(entry);
-            if (value != null) {
-              invokeUserCallback(() -> action.accept(value));
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> void forEachValue(
-      long parallelismThreshold, Function<? super V, ? extends U> transformer, Consumer<? super U> action) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEachValue(
-          parallelismThreshold,
-          entry -> {
-            V value = snapshotValueForBulk(entry);
-            return value == null ? null : this.<U>invokeUserCallback(() -> transformer.apply(value));
-          },
-          transformed -> {
-            if (transformed != null) {
-              invokeUserCallback(() -> action.accept(transformed));
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U searchValues(
-      long parallelismThreshold, Function<? super V, ? extends U> searchFunction) {
-    Objects.requireNonNull(searchFunction, "searchFunction");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.searchValues(
-          parallelismThreshold,
-          entry -> {
-            V value = snapshotValueForBulk(entry);
-            return value == null ? null : invokeUserCallback(() -> searchFunction.apply(value));
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public V reduceValues(
-      long parallelismThreshold, BiFunction<? super V, ? super V, ? extends V> reducer) {
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (ignored, entry) -> snapshotValueForBulk(entry),
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U reduceValues(
-      long parallelismThreshold,
-      Function<? super V, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            V value = snapshotValueForBulk(entry);
-            return value == null ? null : this.<U>invokeUserCallback(() -> transformer.apply(value));
-          },
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public double reduceValuesToDouble(
-      long parallelismThreshold,
-      ToDoubleFunction<? super V> transformer,
-      double basis,
-      DoubleBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Double reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                V value = snapshotValueForBulk(entry);
-                return value == null ? null : invokeUserCallback(() -> transformer.applyAsDouble(value));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsDouble(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsDouble(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public long reduceValuesToLong(
-      long parallelismThreshold,
-      ToLongFunction<? super V> transformer,
-      long basis,
-      LongBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Long reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                V value = snapshotValueForBulk(entry);
-                return value == null ? null : invokeUserCallback(() -> transformer.applyAsLong(value));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsLong(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsLong(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public int reduceValuesToInt(
-      long parallelismThreshold,
-      ToIntFunction<? super V> transformer,
-      int basis,
-      IntBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Integer reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                V value = snapshotValueForBulk(entry);
-                return value == null ? null : invokeUserCallback(() -> transformer.applyAsInt(value));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsInt(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsInt(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public void forEachEntry(
-      long parallelismThreshold, Consumer<? super Map.Entry<K, V>> action) {
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEach(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            if (snapshot != null) {
-              invokeUserCallback(() -> action.accept(snapshot));
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> void forEachEntry(
-      long parallelismThreshold,
-      Function<Map.Entry<K, V>, ? extends U> transformer,
-      Consumer<? super U> action) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(action, "action");
-    if (!beginBulkOperation()) {
-      return;
-    }
-    try {
-      data.forEach(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            if (snapshot != null) {
-              invokeUserCallback(
-                  () -> {
-                    U transformed = transformer.apply(snapshot);
-                    if (transformed != null) {
-                      action.accept(transformed);
-                    }
-                  });
-            }
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U searchEntries(
-      long parallelismThreshold,
-      Function<Map.Entry<K, V>, ? extends U> searchFunction) {
-    Objects.requireNonNull(searchFunction, "searchFunction");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.search(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            return snapshot == null
-                ? null
-                : invokeUserCallback(() -> searchFunction.apply(snapshot));
-          });
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public Map.Entry<K, V> reduceEntries(
-      long parallelismThreshold,
-      BiFunction<Map.Entry<K, V>, Map.Entry<K, V>, ? extends Map.Entry<K, V>> reducer) {
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (ignored, entry) -> snapshotEntryForBulk(entry),
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public <U> U reduceEntries(
-      long parallelismThreshold,
-      Function<Map.Entry<K, V>, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return null;
-    }
-    try {
-      return data.reduce(
-          parallelismThreshold,
-          (ignored, entry) -> {
-            Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-            return snapshot == null
-                ? null
-                : this.<U>invokeUserCallback(() -> transformer.apply(snapshot));
-          },
-          (left, right) -> invokeUserCallback(() -> reducer.apply(left, right)));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public double reduceEntriesToDouble(
-      long parallelismThreshold,
-      ToDoubleFunction<Map.Entry<K, V>> transformer,
-      double basis,
-      DoubleBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Double reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-                return snapshot == null
-                    ? null
-                    : invokeUserCallback(() -> transformer.applyAsDouble(snapshot));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsDouble(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsDouble(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public long reduceEntriesToLong(
-      long parallelismThreshold,
-      ToLongFunction<Map.Entry<K, V>> transformer,
-      long basis,
-      LongBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Long reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-                return snapshot == null
-                    ? null
-                    : invokeUserCallback(() -> transformer.applyAsLong(snapshot));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsLong(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsLong(basis, reduced));
-    } finally {
-      endBulkOperation();
-    }
-  }
-
-  @Override
-  public int reduceEntriesToInt(
-      long parallelismThreshold,
-      ToIntFunction<Map.Entry<K, V>> transformer,
-      int basis,
-      IntBinaryOperator reducer) {
-    Objects.requireNonNull(transformer, "transformer");
-    Objects.requireNonNull(reducer, "reducer");
-    if (!beginBulkOperation()) {
-      return basis;
-    }
-    try {
-      Integer reduced =
-          data.reduce(
-              parallelismThreshold,
-              (ignored, entry) -> {
-                Map.Entry<K, V> snapshot = snapshotEntryForBulk(entry);
-                return snapshot == null
-                    ? null
-                    : invokeUserCallback(() -> transformer.applyAsInt(snapshot));
-              },
-              (left, right) -> invokeUserCallback(() -> reducer.applyAsInt(left, right)));
-      return reduced == null
-          ? basis
-          : invokeUserCallback(() -> reducer.applyAsInt(basis, reduced));
     } finally {
       endBulkOperation();
     }
@@ -4510,7 +3626,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 keyBytes,
                 keyLength,
                 value,
-                null,
                 valueLength,
                 deadlineNanos,
                 keyAllocation,
@@ -4786,113 +3901,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   @Override
-  public CompletableFuture<V> getOrLoadAsync(K key, CacheLoader<K, V> loader, long expireAtMillis) {
-    Objects.requireNonNull(key, "key");
-    Objects.requireNonNull(loader, "loader");
-    if (closing) {
-      return CompletableFuture.completedFuture(null);
-    }
-    ThreadContext context = contexts.get();
-    KeyEncoder.encode(keySerializer, key, context);
-    V existing = getEncoded(context);
-    if (existing != null) {
-      return CompletableFuture.completedFuture(existing);
-    }
-    if (loaderExecutor == null) {
-      CompletableFuture<V> failed = new CompletableFuture<>();
-      failed.completeExceptionally(new IllegalStateException("loaderExecutor is not configured"));
-      return failed;
-    }
-    EncodedKey flightKey =
-        EncodedKey.copyOf(context.keyBytes, context.lookupKey.length());
-    LoadFlight<V> created = new LoadFlight<>();
-    LoadFlight<V> previous = loadFlights.putIfAbsent(flightKey, created);
-    if (previous != null) {
-      return previous.waiter();
-    }
-    created.shared.whenComplete((value, failure) -> loadFlights.remove(flightKey, created));
-    try {
-      loaderExecutor.execute(
-          () -> loadAndPublish(key, flightKey, loader, expireAtMillis, created.shared));
-    } catch (Throwable failure) {
-      created.shared.completeExceptionally(failure);
-    }
-    return created.waiter();
-  }
-
-  private void loadAndPublish(
-      K key,
-      EncodedKey encodedKey,
-      CacheLoader<K, V> loader,
-      long expireAtMillis,
-      CompletableFuture<V> result) {
-    try {
-      V current = getEncoded(encodedKey, false);
-      if (current != null) {
-        result.complete(current);
-        return;
-      }
-      long loadStart = ticker.nanos();
-      V loaded;
-      try {
-        loaded = loader.load(key);
-      } catch (Throwable failure) {
-        recordLoad(false, ticker.nanos() - loadStart);
-        result.completeExceptionally(failure);
-        return;
-      }
-      recordLoad(loaded != null, ticker.nanos() - loadStart);
-      if (loaded == null) {
-        result.complete(null);
-        return;
-      }
-      long deadlineNanos = resolveDeadline(expireAtMillis);
-      boolean inserted = putIfAbsentEncoded(encodedKey, loaded, deadlineNanos);
-      if (inserted) {
-        result.complete(deadlineExpired(deadlineNanos) ? null : loaded);
-      } else {
-        V winner = getEncoded(encodedKey, false);
-        result.complete(
-            winner != null
-                ? winner
-                : deadlineExpired(deadlineNanos) ? null : loaded);
-      }
-    } catch (Throwable failure) {
-      result.completeExceptionally(failure);
-    }
-  }
-
-  private void recordLoad(boolean success, long elapsedNanos) {
-    if (success) {
-      loadSuccessCount.incrementAndGet();
-    } else {
-      loadFailureCount.incrementAndGet();
-    }
-    totalLoadTime.addAndGet(Math.max(0L, elapsedNanos));
-  }
-
-  private boolean putIfAbsentEncoded(EncodedKey key, V value, long deadlineNanos) {
-    ThreadContext context = enterWriter();
-    if (context == null) {
-      if (isClosing()) {
-        throw new IllegalStateException("cache is closed");
-      }
-      throw new IllegalStateException("reentrant cache write is not supported");
-    }
-    try {
-      bindEncodedKey(context, key);
-      context.writeCreatedAtMillis(
-          deadlineNanos == MonotonicDeadlineClock.NO_DEADLINE
-              ? Long.MIN_VALUE
-              : ticker.currentTimeMillis());
-      return putIfAbsentValueResolved(
-          context, context.lookupKey, context.keyBytes, key.length(), value, deadlineNanos);
-    } finally {
-      exitWriter(context);
-    }
-  }
-
-  @Override
   public CompletableFuture<Void> flushAsync() {
     if (worker.thread() == Thread.currentThread()) {
       throw new IllegalStateException("flushAsync cannot be called from the maintenance actor");
@@ -5022,9 +4030,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     return new OHCacheStats(
         snapshot.hits,
         snapshot.misses,
-        loadSuccessCount.get(),
-        loadFailureCount.get(),
-        totalLoadTime.get(),
         snapshot.evictionCount,
         snapshot.evictionWeight,
         snapshot.expirationCount,
@@ -5073,10 +4078,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         snapshot.retirementAllocatedSegments,
         snapshot.retirementReusedSegments,
         snapshot.retirementTrimmedSegments,
-        snapshot.asyncMutationQueueDepth,
-        snapshot.asyncMutationPublishedRecords,
-        snapshot.asyncMutationCompletedRecords,
-        snapshot.asyncMutationLagRecords,
         snapshot.ghostNativeBytes,
         snapshot.ghostAllocationTrimCount,
         snapshot.ghostAllocationDropCount,
@@ -5530,10 +4531,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     context.exitWriter();
   }
 
-  private static void hit(ThreadContext context, Entry entry) {
-    hit(context, entry, entry == null ? 0L : entry.valueAddress);
-  }
-
   private static void hit(
       ThreadContext context, Entry entry, long observedValueAddress) {
     long sequence = context.hit();
@@ -5750,11 +4747,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   @SuppressWarnings("rawtypes")
   private void writeValue(
-      ThreadContext context, long payloadAddress, Object value, byte[] encoded, int length) {
-    if (encoded != null) {
-      NativeMemory.copy(encoded, 0, payloadAddress, length);
-      return;
-    }
+      ThreadContext context, long payloadAddress, Object value, int length) {
     ByteBuffer buffer = context.writableValueBuffer(payloadAddress, length);
     try {
       valueSerializer.serialize((V) value, buffer);
@@ -5778,13 +4771,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             : worker.nowMillis());
   }
 
-  private long allocateScratch(ThreadContext context, long allocation) {
-    long address = allocateNative(context, allocation);
-    if (address == 0L) {
-      nativeAllocationRejected();
-    }
-    return address;
-  }
 
   private long allocateNative(ThreadContext context, long allocation) {
     try {

@@ -11,7 +11,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -138,7 +137,6 @@ public final class MaxSizeTest {
     OffHeapCache<String, String> cache =
         OHCacheBuilder.<String, String>newBuilder()
             .maxSize(8)
-            .loaderExecutor(Runnable::run)
             .keySerializer(STRING)
             .valueSerializer(STRING)
             .buildTyped();
@@ -150,9 +148,6 @@ public final class MaxSizeTest {
       assertTrue(cache.putIfAbsent("async", "async-value", 0L) == null);
       assertTrue(
           cache.replace("one", "value", "replacement", 0L));
-      assertEquals(
-          cache.getOrLoadAsync("loaded", ignored -> "loaded-value", 0L).get(2L, TimeUnit.SECONDS),
-          "loaded-value");
     } finally {
       cache.close();
     }
@@ -245,37 +240,6 @@ public final class MaxSizeTest {
     }
   }
 
-  @Test(timeOut = 10_000L)
-  public void loaderDoesNotWaitForTheMaintenanceActor() throws Exception {
-    OffHeapCache<String, String> cache =
-        (OffHeapCache<String, String>)
-            OHCacheBuilder.<String, String>newBuilder()
-                .maxSize(1)
-                .loaderExecutor(Runnable::run)
-                .keySerializer(STRING)
-                .valueSerializer(STRING)
-                .buildTyped();
-    CountDownLatch paused = new CountDownLatch(1);
-    CountDownLatch release = new CountDownLatch(1);
-    pauseMaintenance(cache, paused, release);
-    try {
-      cache.put("one", "value-one");
-      ExecutorService caller = Executors.newSingleThreadExecutor();
-      try {
-        Future<CompletableFuture<String>> request =
-            caller.submit(() -> cache.getOrLoadAsync("two", ignored -> "value-two", 0L));
-        assertEquals(request.get(1L, TimeUnit.SECONDS).get(1L, TimeUnit.SECONDS), "value-two");
-        release.countDown();
-        cache.flushAsync().join();
-      } finally {
-        caller.shutdownNow();
-      }
-      assertEquals(cache.size(), 1L);
-    } finally {
-      release.countDown();
-      cache.close();
-    }
-  }
 
   @Test(timeOut = 10_000L)
   public void newKeyPutDoesNotWaitForTheMaintenanceActor() throws Exception {
@@ -531,7 +495,7 @@ public final class MaxSizeTest {
       OffHeapCache<?, ?> cache, CountDownLatch paused, CountDownLatch release) throws Exception {
     MaintenanceEventLoop worker = worker(cache);
     assertTrue(
-        worker.submitAsyncMutation(
+        worker.submitActorTaskForTest(
             () -> {
               paused.countDown();
               await(release);

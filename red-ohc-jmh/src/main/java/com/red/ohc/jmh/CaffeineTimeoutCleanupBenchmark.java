@@ -20,7 +20,7 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 
-import com.red.ohc.api.EncodedKey;
+import com.red.ohc.jmh.SerializedBenchmarkSupport.RawKey;
 
 /**
  * Caffeine's explicitly caller-assisted expiration cleanup. It is intentionally reported beside,
@@ -48,17 +48,17 @@ public class CaffeineTimeoutCleanupBenchmark {
   @Param({"256", "1024"})
   public int valueBytes;
 
-  private EncodedKey[] keys;
+  private RawKey[] keys;
   private byte[][] values;
   private MutableTicker ticker;
-  private Cache<EncodedKey, byte[]> cache;
+  private Cache<RawKey, byte[]> cache;
 
   @Setup(Level.Trial)
   public void createPayloads() {
-    keys = new EncodedKey[entries];
+    keys = new RawKey[entries];
     values = new byte[entries][];
     for (int index = 0; index < entries; index++) {
-      keys[index] = EncodedKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, index));
+      keys[index] = RawKey.copyOf(OHCWriteAdmissionBenchmark.bytes(keyBytes, index));
       values[index] = OHCWriteAdmissionBenchmark.bytes(valueBytes, index * 31 + 7);
     }
   }
@@ -67,7 +67,7 @@ public class CaffeineTimeoutCleanupBenchmark {
   public void populateExpiredEntries() {
     ticker = new MutableTicker();
     cache =
-        Caffeine.<EncodedKey, byte[]>newBuilder()
+        Caffeine.<RawKey, byte[]>newBuilder()
             .ticker(ticker)
             .expireAfterWrite(Duration.ofMillis(TTL_MILLIS))
             .build();

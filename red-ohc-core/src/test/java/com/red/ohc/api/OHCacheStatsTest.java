@@ -15,9 +15,6 @@ public final class OHCacheStatsTest {
         new OHCacheStats(
             10L,
             5L,
-            3L,
-            1L,
-            40L,
             7L,
             9L,
             2L,
@@ -66,10 +63,6 @@ public final class OHCacheStatsTest {
             70L,
             71L,
             72L,
-            45L,
-            48L,
-            49L,
-            53L,
             50L,
             51L,
             52L,
@@ -108,12 +101,6 @@ public final class OHCacheStatsTest {
     assertEquals(stats.requestCount(), 15L);
     assertEquals(stats.hitRate(), 10.0 / 15.0, 0.000001);
     assertEquals(stats.missRate(), 5.0 / 15.0, 0.000001);
-    assertEquals(stats.loadSuccessCount(), 3L);
-    assertEquals(stats.loadFailureCount(), 1L);
-    assertEquals(stats.loadCount(), 4L);
-    assertEquals(stats.loadFailureRate(), 0.25, 0.000001);
-    assertEquals(stats.totalLoadTime(), 40L);
-    assertEquals(stats.averageLoadPenalty(), 10.0, 0.000001);
     assertEquals(stats.evictionCount(), 7L);
     assertEquals(stats.evictionWeight(), 9L);
     assertEquals(stats.expirationCount(), 2L);
@@ -162,10 +149,6 @@ public final class OHCacheStatsTest {
     assertEquals(stats.retirementAllocatedSegments(), 70L);
     assertEquals(stats.retirementReusedSegments(), 71L);
     assertEquals(stats.retirementTrimmedSegments(), 72L);
-    assertEquals(stats.asyncMutationQueueDepth(), 45L);
-    assertEquals(stats.asyncMutationPublishedRecords(), 48L);
-    assertEquals(stats.asyncMutationCompletedRecords(), 49L);
-    assertEquals(stats.asyncMutationLagRecords(), 53L);
     assertEquals(stats.ghostNativeBytes(), 50L);
     assertEquals(stats.ghostAllocationTrimCount(), 51L);
     assertEquals(stats.ghostAllocationDropCount(), 52L);
@@ -206,9 +189,6 @@ public final class OHCacheStatsTest {
         new OHCacheStats(
             0L, // hitCount
             0L, // missCount
-            0L, // loadSuccessCount
-            0L, // loadFailureCount
-            0L, // totalLoadTime
             0L, // evictionCount
             0L, // evictionWeight
             0L, // expirationCount
@@ -257,10 +237,6 @@ public final class OHCacheStatsTest {
             0L, // retirementAllocatedSegments
             0L, // retirementReusedSegments
             0L, // retirementTrimmedSegments
-            0L, // asyncMutationQueueDepth
-            0L, // asyncMutationPublishedRecords
-            0L, // asyncMutationCompletedRecords
-            0L, // asyncMutationLagRecords
             0L, // ghostNativeBytes
             0L, // ghostAllocationTrimCount
             0L, // ghostAllocationDropCount
@@ -297,9 +273,6 @@ public final class OHCacheStatsTest {
     assertEquals(stats.requestCount(), 0L);
     assertEquals(stats.hitRate(), 1.0, 0.0);
     assertEquals(stats.missRate(), 0.0, 0.0);
-    assertEquals(stats.loadCount(), 0L);
-    assertEquals(stats.loadFailureRate(), 0.0, 0.0);
-    assertEquals(stats.averageLoadPenalty(), 0.0, 0.0);
     assertEquals(stats.sampledAverageResidenceTimeMillis(), 0.0, 0.0);
   }
 
@@ -308,9 +281,6 @@ public final class OHCacheStatsTest {
     String[] expectedFields = {
       "hitCount",
       "missCount",
-      "loadSuccessCount",
-      "loadFailureCount",
-      "totalLoadTime",
       "evictionCount",
       "evictionWeight",
       "expirationCount",
@@ -359,10 +329,6 @@ public final class OHCacheStatsTest {
       "retirementAllocatedSegments",
       "retirementReusedSegments",
       "retirementTrimmedSegments",
-      "asyncMutationQueueDepth",
-      "asyncMutationPublishedRecords",
-      "asyncMutationCompletedRecords",
-      "asyncMutationLagRecords",
       "ghostNativeBytes",
       "ghostAllocationTrimCount",
       "ghostAllocationDropCount",

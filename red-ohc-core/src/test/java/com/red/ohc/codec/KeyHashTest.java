@@ -2,7 +2,6 @@ package com.red.ohc.codec;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
@@ -13,7 +12,6 @@ import java.util.Random;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.CacheSerializer;
-import com.red.ohc.api.EncodedKey;
 import com.red.ohc.index.Entry;
 import com.red.ohc.runtime.ThreadContext;
 import com.red.ohc.storage.NativeMemory;
@@ -34,23 +32,8 @@ public final class KeyHashTest {
     fresh.set(bytes.clone(), bytes.length);
     assertEquals(fresh.hash(), firstHash, "the same bytes must always hash identically");
 
-    EncodedKey encoded = EncodedKey.copyOf(bytes);
-    assertEquals(encoded.hash(), lookup.hash());
   }
 
-  @Test
-  public void encodedKeyBindingUsesItsCachedHash() {
-    byte[] bytes = "encoded-key".getBytes(StandardCharsets.US_ASCII);
-    EncodedKey encoded = EncodedKey.copyOf(bytes);
-    LookupKey lookup = new LookupKey();
-    byte[] target = new byte[bytes.length];
-
-    lookup.set(target, encoded);
-
-    assertEquals(lookup.length(), bytes.length);
-    assertEquals(lookup.hash(), encoded.hash());
-    assertEquals(target, bytes);
-  }
 
   @Test
   public void reusesTheSameLookupBackingArrayWhileRefreshingTheHash() {
@@ -62,7 +45,6 @@ public final class KeyHashTest {
     bytes[0] = 's';
     lookup.set(bytes, bytes.length);
 
-    assertSame(lookup.bytes(), bytes);
     assertTrue(lookup.hash() != firstHash, "the hash must still be refreshed for the new bytes");
     LookupKey refreshed = new LookupKey();
     refreshed.set(bytes.clone(), bytes.length);

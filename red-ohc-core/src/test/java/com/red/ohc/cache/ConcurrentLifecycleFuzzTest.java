@@ -96,9 +96,7 @@ public final class ConcurrentLifecycleFuzzTest {
               + ", ttl="
               + stats.ttlBacklog()
               + ", retirement="
-              + stats.retirementQueueDepth()
-              + ", async="
-              + stats.asyncMutationLagRecords());
+              + stats.retirementQueueDepth());
       assertTrue(
           stats.liveWeight() <= cache.capacity(),
           "liveWeight="
@@ -194,9 +192,7 @@ public final class ConcurrentLifecycleFuzzTest {
               + ", ttl="
               + stats.ttlBacklog()
               + ", retirement="
-              + stats.retirementQueueDepth()
-              + ", async="
-              + stats.asyncMutationLagRecords());
+              + stats.retirementQueueDepth());
     } finally {
       callers.shutdownNow();
       cache.close();

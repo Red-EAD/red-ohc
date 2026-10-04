@@ -159,10 +159,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     results.retirementAllocatedSegments = stats.retirementAllocatedSegments();
     results.retirementReusedSegments = stats.retirementReusedSegments();
     results.retirementTrimmedSegments = stats.retirementTrimmedSegments();
-    results.asyncMutationQueueDepth = stats.asyncMutationQueueDepth();
-    results.asyncMutationPublishedRecords = stats.asyncMutationPublishedRecords();
-    results.asyncMutationCompletedRecords = stats.asyncMutationCompletedRecords();
-    results.asyncMutationLagRecords = stats.asyncMutationLagRecords();
     results.lifecycleJournalPublishedRecords = stats.lifecycleJournalPublishedRecords();
     results.lifecycleJournalCompletedRecords = stats.lifecycleJournalCompletedRecords();
     results.lifecycleJournalLagRecords = stats.lifecycleJournalLagRecords();
@@ -356,10 +352,6 @@ public class OHCMaxSizeAdmissionBenchmark {
     public long retirementAllocatedSegments;
     public long retirementReusedSegments;
     public long retirementTrimmedSegments;
-    public long asyncMutationQueueDepth;
-    public long asyncMutationPublishedRecords;
-    public long asyncMutationCompletedRecords;
-    public long asyncMutationLagRecords;
     public long lifecycleJournalPublishedRecords;
     public long lifecycleJournalCompletedRecords;
     public long lifecycleJournalLagRecords;
@@ -423,10 +415,6 @@ public class OHCMaxSizeAdmissionBenchmark {
       retirementAllocatedSegments = 0L;
       retirementReusedSegments = 0L;
       retirementTrimmedSegments = 0L;
-      asyncMutationQueueDepth = 0L;
-      asyncMutationPublishedRecords = 0L;
-      asyncMutationCompletedRecords = 0L;
-      asyncMutationLagRecords = 0L;
       lifecycleJournalPublishedRecords = 0L;
       lifecycleJournalCompletedRecords = 0L;
       lifecycleJournalLagRecords = 0L;

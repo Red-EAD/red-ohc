@@ -1,23 +1,12 @@
 package com.red.ohc.api;
 
 import java.util.Collection;
-import java.util.Enumeration;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
-import java.util.function.Consumer;
-import java.util.function.DoubleBinaryOperator;
 import java.util.function.Function;
-import java.util.function.IntBinaryOperator;
-import java.util.function.LongBinaryOperator;
-import java.util.function.ToDoubleBiFunction;
-import java.util.function.ToDoubleFunction;
-import java.util.function.ToIntBiFunction;
-import java.util.function.ToIntFunction;
-import java.util.function.ToLongBiFunction;
-import java.util.function.ToLongFunction;
 
 /**
  * A weakly-consistent off-heap cache with synchronous data-plane writes and asynchronous target
@@ -135,166 +124,6 @@ public interface OHCache<K, V> extends AutoCloseable {
   V compute(K key, BiFunction<? super K, ? super V, ? extends V> function);
 
   V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> function);
-  boolean contains(Object value);
-
-  Enumeration<K> keys();
-
-  Enumeration<V> elements();
-
-  Set<K> keySet(V mappedValue);
-
-  /**
-   * Runs a CHM-style weakly-consistent bulk traversal. Every callback receives heap snapshots and
-   * never a native buffer or an object retaining a native address. As with
-   * {@link java.util.concurrent.ConcurrentHashMap}, a caller-supplied parallelism threshold may
-   * execute callbacks on the JDK common pool; OHC does not submit maintenance or reclaim tasks to
-   * that pool.
-   */
-  void forEach(long parallelismThreshold, BiConsumer<? super K, ? super V> action);
-
-  <U> void forEach(
-      long parallelismThreshold,
-      BiFunction<? super K, ? super V, ? extends U> transformer,
-      Consumer<? super U> action);
-
-  <U> U search(
-      long parallelismThreshold,
-      BiFunction<? super K, ? super V, ? extends U> searchFunction);
-
-  <U> U reduce(
-      long parallelismThreshold,
-      BiFunction<? super K, ? super V, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer);
-
-  double reduceToDouble(
-      long parallelismThreshold,
-      ToDoubleBiFunction<? super K, ? super V> transformer,
-      double basis,
-      DoubleBinaryOperator reducer);
-
-  long reduceToLong(
-      long parallelismThreshold,
-      ToLongBiFunction<? super K, ? super V> transformer,
-      long basis,
-      LongBinaryOperator reducer);
-
-  int reduceToInt(
-      long parallelismThreshold,
-      ToIntBiFunction<? super K, ? super V> transformer,
-      int basis,
-      IntBinaryOperator reducer);
-
-  void forEachKey(long parallelismThreshold, Consumer<? super K> action);
-
-  <U> void forEachKey(
-      long parallelismThreshold,
-      Function<? super K, ? extends U> transformer,
-      Consumer<? super U> action);
-
-  <U> U searchKeys(
-      long parallelismThreshold, Function<? super K, ? extends U> searchFunction);
-
-  K reduceKeys(
-      long parallelismThreshold, BiFunction<? super K, ? super K, ? extends K> reducer);
-
-  <U> U reduceKeys(
-      long parallelismThreshold,
-      Function<? super K, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer);
-
-  double reduceKeysToDouble(
-      long parallelismThreshold,
-      ToDoubleFunction<? super K> transformer,
-      double basis,
-      DoubleBinaryOperator reducer);
-
-  long reduceKeysToLong(
-      long parallelismThreshold,
-      ToLongFunction<? super K> transformer,
-      long basis,
-      LongBinaryOperator reducer);
-
-  int reduceKeysToInt(
-      long parallelismThreshold,
-      ToIntFunction<? super K> transformer,
-      int basis,
-      IntBinaryOperator reducer);
-
-  void forEachValue(long parallelismThreshold, Consumer<? super V> action);
-
-  <U> void forEachValue(
-      long parallelismThreshold,
-      Function<? super V, ? extends U> transformer,
-      Consumer<? super U> action);
-
-  <U> U searchValues(
-      long parallelismThreshold, Function<? super V, ? extends U> searchFunction);
-
-  V reduceValues(
-      long parallelismThreshold, BiFunction<? super V, ? super V, ? extends V> reducer);
-
-  <U> U reduceValues(
-      long parallelismThreshold,
-      Function<? super V, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer);
-
-  double reduceValuesToDouble(
-      long parallelismThreshold,
-      ToDoubleFunction<? super V> transformer,
-      double basis,
-      DoubleBinaryOperator reducer);
-
-  long reduceValuesToLong(
-      long parallelismThreshold,
-      ToLongFunction<? super V> transformer,
-      long basis,
-      LongBinaryOperator reducer);
-
-  int reduceValuesToInt(
-      long parallelismThreshold,
-      ToIntFunction<? super V> transformer,
-      int basis,
-      IntBinaryOperator reducer);
-
-  void forEachEntry(
-      long parallelismThreshold, Consumer<? super Map.Entry<K, V>> action);
-
-  <U> void forEachEntry(
-      long parallelismThreshold,
-      Function<Map.Entry<K, V>, ? extends U> transformer,
-      Consumer<? super U> action);
-
-  <U> U searchEntries(
-      long parallelismThreshold,
-      Function<Map.Entry<K, V>, ? extends U> searchFunction);
-
-  Map.Entry<K, V> reduceEntries(
-      long parallelismThreshold,
-      BiFunction<Map.Entry<K, V>, Map.Entry<K, V>, ? extends Map.Entry<K, V>> reducer);
-
-  <U> U reduceEntries(
-      long parallelismThreshold,
-      Function<Map.Entry<K, V>, ? extends U> transformer,
-      BiFunction<? super U, ? super U, ? extends U> reducer);
-
-  double reduceEntriesToDouble(
-      long parallelismThreshold,
-      ToDoubleFunction<Map.Entry<K, V>> transformer,
-      double basis,
-      DoubleBinaryOperator reducer);
-
-  long reduceEntriesToLong(
-      long parallelismThreshold,
-      ToLongFunction<Map.Entry<K, V>> transformer,
-      long basis,
-      LongBinaryOperator reducer);
-
-  int reduceEntriesToInt(
-      long parallelismThreshold,
-      ToIntFunction<Map.Entry<K, V>> transformer,
-      int basis,
-      IntBinaryOperator reducer);
-
   Map<K, V> getAll(Collection<? extends K> keys);
 
   int removeAll(Collection<? extends K> keys);
@@ -312,8 +141,6 @@ public interface OHCache<K, V> extends AutoCloseable {
    * must not escape its callback.
    */
   int getDirectAll(Collection<? extends K> keys, DirectEntryConsumer<K> consumer);
-
-  CompletableFuture<V> getOrLoadAsync(K key, CacheLoader<K, V> loader, long expireAtMillis);
 
   /**
    * Completes after async tasks queued before the call and their maintenance work are drained. The

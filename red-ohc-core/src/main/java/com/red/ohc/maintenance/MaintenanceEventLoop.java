@@ -7,7 +7,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
@@ -73,7 +72,6 @@ public final class MaintenanceEventLoop
   private static final int WORK_REMOVAL = 1 << 1;
   private static final int WORK_ACCESS_SCAN = 1 << 2;
   private static final int WORK_RETIREMENT = 1 << 3;
-  private static final int WORK_ASYNC = 1 << 4;
   private static final int WORK_FLUSH = 1 << 5;
   private static final int WORK_CLOCK = 1 << 6;
   private static final int WORK_READER_LIFECYCLE = 1 << 7;
@@ -87,10 +85,6 @@ public final class MaintenanceEventLoop
     PENDING,
     URGENT
   }
-  private static final AtomicLongFieldUpdater<MaintenanceEventLoop>
-      ASYNC_COMPLETED_SEQUENCE_UPDATER =
-          AtomicLongFieldUpdater.newUpdater(MaintenanceEventLoop.class, "asyncCompletedSequence");
-
   private final ConcurrentHashMap<Entry, Entry> data;
   private final NativeMemory.Memory memory;
   private final Ticker ticker;
@@ -104,7 +98,6 @@ public final class MaintenanceEventLoop
   /** Durable messages only; coalesced advisory markers do not represent queued business work. */
   private final AtomicLong durableMailboxDepth = new AtomicLong();
   /** Actor-local marker set when the head message is held behind the active flush fence. */
-  private boolean mailboxFenceBlocked;
   /** The most recent flush marker consumed by the actor; extensions reuse its future. */
   private FlushRequest lastConsumedFlushMarker;
   /**
@@ -120,12 +113,7 @@ public final class MaintenanceEventLoop
   // writer-hot atomic instances allocated next to durableMailboxDepth; nothing reads them
   // off the actor thread.
 
-  private final AtomicLong asyncSubmitted = new AtomicLong();
-  private final AtomicLong asyncFailed = new AtomicLong();
-  private final AtomicLong asyncRejected = new AtomicLong();
   /** Last FIFO sequence removed from the physical queue; executing work is already dequeued. */
-  private final AtomicLong asyncDequeuedSequence = new AtomicLong();
-  private volatile long asyncCompletedSequence;
 
   private final ReaderRegistry readers;
   private long[] readerSeqSnapshot = new long[ReaderRegistry.SLOT_CHUNK_SIZE];
@@ -183,8 +171,7 @@ public final class MaintenanceEventLoop
   private final AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
   private final AtomicReference<FlushRequest> flushRequest = new AtomicReference<>();
   /** Serializes control-plane publication without putting ordinary cache writes behind a lock. */
-  private final Object asyncFlushPublicationLock = new Object();
-  private volatile Runnable asyncSequenceAllocatedHookForTest;
+  private final Object flushPublicationLock = new Object();
   private volatile Runnable flushRetirementExtensionHookForTest;
   private final TurnCuts turnCuts;
   private volatile boolean closing;
@@ -471,7 +458,7 @@ public final class MaintenanceEventLoop
   }
 
   public void stop() {
-    synchronized (asyncFlushPublicationLock) {
+    synchronized (flushPublicationLock) {
       writesUnavailable = true;
       stopState.set(1L);
     }
@@ -480,7 +467,7 @@ public final class MaintenanceEventLoop
   }
 
   public void beginClosing() {
-    synchronized (asyncFlushPublicationLock) {
+    synchronized (flushPublicationLock) {
       writesUnavailable = true;
       closing = true;
     }
@@ -549,25 +536,13 @@ public final class MaintenanceEventLoop
     return retirements.retiredEntries();
   }
 
-  public long timerBytes() {
-    return wheel.bytes();
-  }
 
-  public long sketchBytes() {
-    return policy.sketchBytes();
-  }
 
   public long ghostNativeBytes() {
     return policy.ghostNativeBytes();
   }
 
-  public long ghostAllocationTrims() {
-    return policy.ghostAllocationTrims();
-  }
 
-  public long ghostAllocationDrops() {
-    return policy.ghostAllocationDrops();
-  }
 
   /** Number of sampled accesses intentionally suppressed while their producer snapshot was Skip. */
   public long skipSuppressedAccesses() {
@@ -584,17 +559,11 @@ public final class MaintenanceEventLoop
   }
 
 
-  public long admissionGhostNativeBytes() {
-    return policy.ghostNativeBytes();
-  }
 
   public long ttlBacklog() {
     return wheel.scheduled();
   }
 
-  public long ledgerBytes() {
-    return retirements.allocatedBytes();
-  }
 
   public long retirementQueueDepth() {
     return retirements.queuedRecords();
@@ -614,85 +583,6 @@ public final class MaintenanceEventLoop
 
   public long mailboxHeadUnpublishedCount() {
     return mailboxHeadUnpublishedCount;
-  }
-
-  public long asyncMutationQueueDepth() {
-    long depth = asyncSubmitted.get() - asyncDequeuedSequence.get();
-    return Math.max(0L, depth);
-  }
-
-  public long asyncMutationPublishedRecords() {
-    return asyncSubmitted.get();
-  }
-
-  public long asyncMutationCompletedRecords() {
-    return asyncCompletedSequence;
-  }
-
-  public long asyncMutationLagRecords() {
-    long lag = asyncSubmitted.get() - asyncCompletedSequence;
-    return Math.max(0L, lag);
-  }
-
-  public long asyncMutationFailedCount() {
-    return asyncFailed.get();
-  }
-
-  public long asyncMutationRejectedCount() {
-    return asyncRejected.get();
-  }
-
-  /** Adds a mutation task without executing it on the calling thread. */
-  public boolean submitAsyncMutation(Runnable action, Consumer<Throwable> reject) {
-    if (action == null || reject == null) {
-      throw new NullPointerException("action/reject");
-    }
-    Throwable rejection = null;
-    boolean rejectionCounted = false;
-    synchronized (asyncFlushPublicationLock) {
-      if (closing || isStopping()) {
-        rejection = new IllegalStateException("cache is closing");
-      } else {
-        Throwable unavailable = terminalFailure.get();
-        if (unavailable != null) {
-          rejection = new CacheMaintenanceException(unavailable);
-        } else {
-          // Sequence allocation and the corresponding MPSC offer are one publication
-          // linearization point. A producer cannot reserve a sequence and then let a later
-          // producer enqueue its task first.
-          long sequence = asyncSubmitted.incrementAndGet();
-          boolean offered = false;
-          try {
-            Runnable sequenceHook = asyncSequenceAllocatedHookForTest;
-            if (sequenceHook != null) {
-              sequenceHook.run();
-            }
-            offerDurable(ActorMessage.async(new AsyncMutationTask(sequence, action, reject)));
-            offered = true;
-          } catch (Throwable failure) {
-            asyncRejected.incrementAndGet();
-            rejectionCounted = true;
-            if (!offered) {
-              // A failed publication consumed a sequence number but has no mailbox node. Mark it
-              // completed before entering terminal state so the observable prefix has no hole.
-              advanceAsyncDequeuedSequence(sequence);
-              advanceAsyncCompletedSequence(sequence);
-            }
-            recordTerminalFailure(failure);
-            rejection = failure;
-          }
-        }
-      }
-    }
-    if (rejection != null) {
-      if (!rejectionCounted) {
-        asyncRejected.incrementAndGet();
-      }
-      notifyAsyncRejection(reject, rejection);
-      return false;
-    }
-    signal();
-    return true;
   }
 
   public int registerReader(ReaderSlot slot) {
@@ -776,7 +666,7 @@ public final class MaintenanceEventLoop
       throw new NullPointerException("failure");
     }
     FlushRequest request;
-    synchronized (asyncFlushPublicationLock) {
+    synchronized (flushPublicationLock) {
       writesUnavailable = true;
       if (!terminalFailure.compareAndSet(null, failure)) {
         return;
@@ -801,24 +691,11 @@ public final class MaintenanceEventLoop
     LockSupport.unpark(thread);
   }
 
-  void setAsyncSequenceAllocatedHookForTest(Runnable hook) {
-    asyncSequenceAllocatedHookForTest = hook;
-  }
-
   void setFlushRetirementExtensionHookForTest(Runnable hook) {
     flushRetirementExtensionHookForTest = hook;
   }
 
   /** Reliable removal only: ADD/UPDATE are published after their data-plane mutation. */
-  public boolean reserveMutation(Entry entry, int flags) {
-    if (flags != Entry.PENDING_REMOVE) {
-      throw new IllegalArgumentException("only removal mutations require a reservation");
-    }
-    if (unhealthy.get()) {
-      return false;
-    }
-    return entry.tryBeginPending(flags);
-  }
 
   /** Publishes an ADD/UPDATE hint after the associated CHM/value mutation is visible. */
   public void publishMutation(Entry entry, int flags) {
@@ -864,18 +741,6 @@ public final class MaintenanceEventLoop
    * location. A caller must hold the Entry writer claim and must have proved that the old value is
    * live and that the new deadline is an extension.
    */
-  public boolean canMergeTtlUpdate(
-      Entry entry, long oldDeadlineNanos, long newDeadlineNanos, long writerNowNanos) {
-    if (entry == null
-        || oldDeadlineNanos == NO_DEADLINE
-        || newDeadlineNanos == NO_DEADLINE
-        || newDeadlineNanos < oldDeadlineNanos
-        || writerNowNanos == Long.MIN_VALUE
-        || oldDeadlineNanos <= writerNowNanos) {
-      return false;
-    }
-    return wheel.hasSameScheduledSlot(entry, newDeadlineNanos);
-  }
 
   /** Publishes a writer mutation through its lane slot and the ready-lane wake channel. */
   public void enqueueWriterMutationHint(
@@ -928,31 +793,49 @@ public final class MaintenanceEventLoop
   }
 
   /** Cancels a reliable removal reservation before CHM visibility changes. */
-  public void cancelMutation(Entry entry) {
-    entry.cancelPendingClaim();
-  }
 
   /** Wakes the actor after the lifecycle commit has become visible. */
   public void requestLifecycleMaintenance() {
     requestWork(WORK_REMOVAL);
   }
 
-  private boolean isPostFlushAsync(Object candidate, FlushRequest batchFlush) {
-    if (!(candidate instanceof ActorMessage)) {
+  /** Test seam: runs the action on the actor thread via the durable control mailbox. */
+  public boolean submitActorTaskForTest(Runnable action, Consumer<Throwable> reject) {
+    if (action == null || reject == null) {
+      throw new NullPointerException();
+    }
+    try {
+      offerDurable(ActorMessage.task(action));
+    } catch (Throwable failure) {
+      recordTerminalFailure(failure);
+      reject.accept(failure);
       return false;
     }
-    ActorMessage message = (ActorMessage) candidate;
-    if (message.kind != ActorMessage.ASYNC) {
-      return false;
+    signal();
+    return true;
+  }
+
+  private int failPendingMailbox(Throwable failure) {
+    int failed = 0;
+    Object message;
+    while ((message = pollMailbox()) != null) {
+      failed++;
+      failMailboxMessage(message, failure);
     }
-    return batchFlush != null && sequenceAfter(message.async.sequence, batchFlush.sequence);
+    return failed;
+  }
+
+  private void failMailboxMessage(Object message, Throwable failure) {
+    ActorMessage actorMessage = (ActorMessage) message;
+    if (actorMessage.flush != null) {
+      actorMessage.flush.future.completeExceptionally(failure);
+    }
+    // Advisory, mutation-hint, and test tasks intentionally have no failure-side action.
   }
 
   private int drainMailbox(int limit) {
     int processed = 0;
     long durableConsumed = 0L;
-    FlushRequest batchFlush = flushRequest.get();
-    mailboxFenceBlocked = false;
     mailboxHeadUnpublished = false;
     int budget = Math.min(limit, MAILBOX_MAX_PER_TURN);
     try {
@@ -975,10 +858,6 @@ public final class MaintenanceEventLoop
           }
           break;
         }
-        if (isPostFlushAsync(next, batchFlush)) {
-          mailboxFenceBlocked = true;
-          break;
-        }
         Object message = mailbox.relaxedPoll();
         if (message == null) {
           if (durableMailboxDepth.get() != 0L) {
@@ -992,15 +871,6 @@ public final class MaintenanceEventLoop
           durableConsumed++;
         }
         processed++;
-        terminal = terminalFailure.get();
-        if (terminal != null) {
-          failMailboxMessage(
-              message, new CacheMaintenanceException(terminal));
-          processed +=
-              failPendingMailbox(
-                  new CacheMaintenanceException(terminal));
-          break;
-        }
         switch (actorMessage.kind) {
           case ActorMessage.ADVISORY:
             // The coalesced work bits are already visible in requestedWork. The marker only keeps
@@ -1011,16 +881,11 @@ public final class MaintenanceEventLoop
               processEntry(actorMessage.entry);
             }
             break;
-          case ActorMessage.ASYNC:
-            processAsyncMutation(actorMessage.async);
-            break;
           case ActorMessage.FLUSH:
             lastConsumedFlushMarker = actorMessage.flush;
-            // A flush can be published while an earlier mailbox action is running.  The
-            // marker is the FIFO boundary for that publication, so refresh the batch fence at
-            // this single boundary rather than reading flushRequest for every mailbox item.
-            FlushRequest currentFlush = flushRequest.get();
-            batchFlush = currentFlush == null ? actorMessage.flush : currentFlush;
+            break;
+          case ActorMessage.TASK:
+            actorMessage.task.run();
             break;
           default:
             throw new AssertionError("unknown actor message kind: " + actorMessage.kind);
@@ -1033,7 +898,6 @@ public final class MaintenanceEventLoop
     }
     if (terminalFailure.get() == null) {
       extendPendingFlushForActorRetirements();
-      publishLiveWeight();
       completeFlushIfIdle();
     }
     return processed;
@@ -1092,7 +956,7 @@ public final class MaintenanceEventLoop
 
   /** Control-plane barrier; the marker is ordered with all earlier mailbox messages. */
   public CompletableFuture<Void> flush() {
-    synchronized (asyncFlushPublicationLock) {
+    synchronized (flushPublicationLock) {
       for (;;) {
         Throwable failure = terminalFailure.get();
         if (failure != null) {
@@ -1106,7 +970,6 @@ public final class MaintenanceEventLoop
         long[] lifecycleWatermark = lifecycle == null ? null : lifecycle.captureWatermark();
         FlushRequest created =
             new FlushRequest(
-                asyncSubmitted.get(),
                 existing == null ? new CompletableFuture<>() : existing.future,
                 lifecycleWatermark,
                 retirements.captureAndCutWatermark());
@@ -1184,10 +1047,6 @@ public final class MaintenanceEventLoop
         retirements.allocatedSegments(),
         retirements.reusedSegments(),
         retirements.trimmedSegments(),
-        asyncMutationQueueDepth(),
-        asyncMutationPublishedRecords(),
-        asyncMutationCompletedRecords(),
-        asyncMutationLagRecords(),
         policy.ghostNativeBytes(),
         policy.ghostAllocationTrims(),
         policy.ghostAllocationDrops(),
@@ -1273,7 +1132,6 @@ public final class MaintenanceEventLoop
           maintenancePassWorkNanos = elapsed;
           maintenanceActiveNanosTotal = saturatingAdd(maintenanceActiveNanosTotal, elapsed);
           advancePageAudit();
-          publishActorSnapshots();
         }
         if (mailboxProcessed > 0) {
           maintenanceCollectedRecordsTotal =
@@ -1932,6 +1790,7 @@ public final class MaintenanceEventLoop
   }
 
   private WorkDecision captureWorkDecision(boolean consumeRequestedWork) {
+    boolean stopping = isStopping();
     WorkDecision decision = workDecision;
     decision.readersChecked = false;
     decision.activeReaders = false;
@@ -1962,21 +1821,21 @@ public final class MaintenanceEventLoop
         writerResources != null && writerResources.hasRetirementWork();
     decision.ghostRehash = policy.ghostRehashPending();
     boolean accessHintRequested = (decision.requested & WORK_ACCESS_SCAN) != 0;
-    boolean accessDeadlineDue = !isStopping() && accessDeadlineDue();
-    boolean accessImmediate = !isStopping() && accessScanActive;
+    boolean accessDeadlineDue = !stopping && accessDeadlineDue();
+    boolean accessImmediate = !stopping && accessScanActive;
     if (!accessImmediate && (accessHintRequested || accessDeadlineDue)) {
       accessImmediate = scanAccessState(true) == AccessScanState.URGENT;
     }
     boolean accessUrgent =
-        !isStopping() && (accessImmediate || accessDeadlineDue);
+        !stopping && (accessImmediate || accessDeadlineDue);
     decision.accessImmediate = accessImmediate;
     decision.accessScanActive =
         accessUrgent;
     decision.readerLifecycleWork =
         readerLifecycleWork(
             (decision.requested & WORK_READER_LIFECYCLE) != 0
-                || isStopping());
-    decision.durableMailboxWork = durableMailboxReady() && !mailboxFenceBlocked;
+                || stopping);
+    decision.durableMailboxWork = durableMailboxReady();
     decision.ttlDue = ttlWorkDue();
     decision.pendingSealed =
         (decision.retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
@@ -1997,12 +1856,12 @@ public final class MaintenanceEventLoop
     plan.resourceRetirements = decision.writerResourceWork;
     plan.mutations = (plan.requested & WORK_MUTATION) != 0;
     plan.ghostRehash = decision.ghostRehash;
-    plan.access = plan.flush || (!isStopping() && decision.accessScanActive);
+    plan.access = plan.flush || (!stopping && decision.accessScanActive);
     plan.accessUrgent = decision.accessImmediate;
     plan.readerLifecycle =
         (plan.requested & WORK_READER_LIFECYCLE) != 0
             || plan.flush
-            || isStopping()
+            || stopping
             || decision.readerLifecycleWork;
     plan.ttl = decision.ttlDue && (!isStopping() || plan.flush);
     plan.seal =
@@ -2013,7 +1872,6 @@ public final class MaintenanceEventLoop
                     & (RetirementJournal.WORK_STATE_READY | RetirementJournal.WORK_STATE_SEALED))
                 != 0;
     plan.safe = decision.pendingSafe;
-    plan.async = (plan.requested & WORK_ASYNC) != 0;
     plan.refreshClock =
         (plan.requested & WORK_CLOCK) != 0
             || plan.flush
@@ -2386,7 +2244,7 @@ public final class MaintenanceEventLoop
       stale |= WORK_CAPACITY;
     }
     if (durableMailboxDepth.get() == 0L && flushRequest.get() == null) {
-      stale |= WORK_ASYNC | WORK_FLUSH;
+      stale |= WORK_FLUSH;
     }
     int current;
     do {
@@ -2524,7 +2382,7 @@ public final class MaintenanceEventLoop
     }
     // Serialize the actor watermark extension with flush() publication so a newer request cannot
     // replace the request after the actor has read it.
-    synchronized (asyncFlushPublicationLock) {
+    synchronized (flushPublicationLock) {
       if (!actorRetirementNeedsFlushFence) {
         return false;
       }
@@ -2566,7 +2424,6 @@ public final class MaintenanceEventLoop
     boolean retirementWatermarkPending =
         retirementJournal != null
             && !retirementJournal.watermarkComplete(request.retirementWatermark);
-    boolean sequencePending = sequenceAfter(request.sequence, asyncCompletedSequence);
     boolean accessPending = hasPendingAccessReadOnly();
     boolean ttlPending = ttlWorkDue();
     boolean capacityPending =
@@ -2574,13 +2431,12 @@ public final class MaintenanceEventLoop
     if (writerLifecyclePending
         || readerLifecyclePending
         || retirementWatermarkPending
-        || sequencePending
         || accessPending
         || ttlPending
         || capacityPending) {
       return;
     }
-    synchronized (asyncFlushPublicationLock) {
+    synchronized (flushPublicationLock) {
       // Flush publication, terminal transition, and actor completion share one control-plane
       // boundary. A producer can therefore either extend this exact request or observe it already
       // completed; it cannot leave a future behind a cleared request pointer.
@@ -2592,7 +2448,6 @@ public final class MaintenanceEventLoop
           || readerLifecycleFlushRequest != request
           || (retirementJournal != null
               && !retirementJournal.watermarkComplete(request.retirementWatermark))
-          || sequenceAfter(request.sequence, asyncCompletedSequence)
           || hasPendingAccessReadOnly()
           || ttlWorkDue()
           || (logicalAdmission != null && logicalAdmission.isOverTarget())) {
@@ -2623,84 +2478,6 @@ public final class MaintenanceEventLoop
         && actorMessage.flush.future == request.future;
   }
 
-
-  private void processAsyncMutation(AsyncMutationTask task) {
-    advanceAsyncDequeuedSequence(task.sequence);
-    Throwable unavailable = terminalFailure.get();
-    if (unavailable != null) {
-      asyncRejected.incrementAndGet();
-      notifyAsyncRejection(
-          task.reject, new CacheMaintenanceException(unavailable));
-    } else if (closing || isStopping()) {
-      asyncRejected.incrementAndGet();
-      notifyAsyncRejection(task.reject, new IllegalStateException("cache is closing"));
-    } else {
-      try {
-        task.action.run();
-      } catch (Throwable failure) {
-        asyncFailed.incrementAndGet();
-        notifyAsyncRejection(task.reject, failure);
-      }
-    }
-    advanceAsyncCompletedSequence(task.sequence);
-  }
-
-  private int failPendingMailbox(Throwable failure) {
-    int failed = 0;
-    Object message;
-    while ((message = pollMailbox()) != null) {
-      failed++;
-      failMailboxMessage(message, failure);
-    }
-    return failed;
-  }
-
-  private void failMailboxMessage(Object message, Throwable failure) {
-    ActorMessage actorMessage = (ActorMessage) message;
-    if (actorMessage.async != null) {
-      advanceAsyncDequeuedSequence(actorMessage.async.sequence);
-      advanceAsyncCompletedSequence(actorMessage.async.sequence);
-      asyncRejected.incrementAndGet();
-      notifyAsyncRejection(actorMessage.async.reject, failure);
-    } else if (actorMessage.flush != null) {
-      actorMessage.flush.future.completeExceptionally(failure);
-    }
-  }
-
-  private static void notifyAsyncRejection(Consumer<Throwable> reject, Throwable failure) {
-    try {
-      reject.accept(failure);
-    } catch (Throwable callbackFailure) {
-      if (callbackFailure != failure) {
-        failure.addSuppressed(callbackFailure);
-      }
-    }
-  }
-
-  /** Sequence ordering modulo 2^64; live async backlog is always far below half the sequence space. */
-  private static boolean sequenceAfter(long sequence, long reference) {
-    return sequence != reference && sequence - reference > 0L;
-  }
-
-  private void advanceAsyncDequeuedSequence(long sequence) {
-    long current = asyncDequeuedSequence.get();
-    while (sequenceAfter(sequence, current)) {
-      if (asyncDequeuedSequence.compareAndSet(current, sequence)) {
-        return;
-      }
-      current = asyncDequeuedSequence.get();
-    }
-  }
-
-  private void advanceAsyncCompletedSequence(long sequence) {
-    long current = asyncCompletedSequence;
-    while (sequenceAfter(sequence, current)) {
-      if (ASYNC_COMPLETED_SEQUENCE_UPDATER.compareAndSet(this, current, sequence)) {
-        return;
-      }
-      current = asyncCompletedSequence;
-    }
-  }
 
   private int drainWriterLifecycleJournal(long[] watermark, int maximumRecords) {
     WriterLifecycleJournal journal = writerLifecycleJournal;
@@ -2857,14 +2634,6 @@ public final class MaintenanceEventLoop
       return;
     }
     int flags = entry.takePending();
-    // tryBeginPending() holds this claim from reservation through pointer publication. It is
-    // stronger than observing the writer mutex: a racing actor can never clear the merged
-    // flags after a writer started but before the writer publishes its new value pointer.
-    if (flags == Entry.PENDING_BUSY) {
-      // Reliable removal owns this entry's lifecycle record. There is no advisory mutation to
-      // retry while the removal claim is active.
-      return;
-    }
     if (flags == 0) {
       entry.tryRolloverMaintenanceVersion();
       return;
@@ -3997,7 +3766,6 @@ public final class MaintenanceEventLoop
     private boolean ttl;
     private boolean seal;
     private boolean safe;
-    private boolean async;
     private boolean ghostRehash;
     private boolean flush;
     private boolean refreshClock;
@@ -4022,7 +3790,6 @@ public final class MaintenanceEventLoop
       ttl = false;
       seal = false;
       safe = false;
-      async = false;
       ghostRehash = false;
       flush = false;
       refreshClock = false;
@@ -4050,7 +3817,6 @@ public final class MaintenanceEventLoop
           || ttl
           || seal
           || safe
-          || async
           || ghostRehash
           || flush;
     }
@@ -4082,41 +3848,29 @@ public final class MaintenanceEventLoop
     }
   }
 
-  private static final class AsyncMutationTask {
-    private final long sequence;
-    private final Runnable action;
-    private final Consumer<Throwable> reject;
-
-    private AsyncMutationTask(long sequence, Runnable action, Consumer<Throwable> reject) {
-      this.sequence = sequence;
-      this.action = action;
-      this.reject = reject;
-    }
-  }
-
   /** FIFO mailbox item; only the actor consumes the message payload. */
   private static final class ActorMessage {
     private static final int ADVISORY = 1;
     private static final int MUTATION = 2;
-    private static final int ASYNC = 4;
-    private static final int FLUSH = 5;
+    private static final int FLUSH = 3;
+    private static final int TASK = 4;
     private static final ActorMessage ADVISORY_MESSAGE =
         new ActorMessage(ADVISORY, null, null, null);
 
     private final int kind;
     private final Entry entry;
-    private final AsyncMutationTask async;
     private final FlushRequest flush;
+    private final Runnable task;
 
     private ActorMessage(
         int kind,
         Entry entry,
-        AsyncMutationTask async,
-        FlushRequest flush) {
+        FlushRequest flush,
+        Runnable task) {
       this.kind = kind;
       this.entry = entry;
-      this.async = async;
       this.flush = flush;
+      this.task = task;
     }
 
     private static ActorMessage advisory() {
@@ -4127,28 +3881,26 @@ public final class MaintenanceEventLoop
       return new ActorMessage(MUTATION, entry, null, null);
     }
 
-    private static ActorMessage async(AsyncMutationTask task) {
-      return new ActorMessage(ASYNC, null, task, null);
-    }
 
     private static ActorMessage flush(FlushRequest flush) {
-      return new ActorMessage(FLUSH, null, null, flush);
+      return new ActorMessage(FLUSH, null, flush, null);
+    }
+
+    private static ActorMessage task(Runnable task) {
+      return new ActorMessage(TASK, null, null, task);
     }
 
   }
 
   private static final class FlushRequest {
-    private final long sequence;
     private final CompletableFuture<Void> future;
     private final long[] lifecycleWatermark;
     private final long[] retirementWatermark;
 
     private FlushRequest(
-        long sequence,
         CompletableFuture<Void> future,
         long[] lifecycleWatermark,
         long[] retirementWatermark) {
-      this.sequence = sequence;
       this.future = future;
       this.lifecycleWatermark = lifecycleWatermark;
       this.retirementWatermark = retirementWatermark;
@@ -4202,10 +3954,6 @@ public final class MaintenanceEventLoop
     public final long retirementAllocatedSegments;
     public final long retirementReusedSegments;
     public final long retirementTrimmedSegments;
-    public final long asyncMutationQueueDepth;
-    public final long asyncMutationPublishedRecords;
-    public final long asyncMutationCompletedRecords;
-    public final long asyncMutationLagRecords;
     public final long ghostNativeBytes;
     public final long ghostAllocationTrimCount;
     public final long ghostAllocationDropCount;
@@ -4288,10 +4036,6 @@ public final class MaintenanceEventLoop
         long retirementAllocatedSegments,
         long retirementReusedSegments,
         long retirementTrimmedSegments,
-        long asyncMutationQueueDepth,
-        long asyncMutationPublishedRecords,
-        long asyncMutationCompletedRecords,
-        long asyncMutationLagRecords,
         long ghostNativeBytes,
         long ghostAllocationTrimCount,
         long ghostAllocationDropCount,
@@ -4372,10 +4116,6 @@ public final class MaintenanceEventLoop
       this.retirementAllocatedSegments = retirementAllocatedSegments;
       this.retirementReusedSegments = retirementReusedSegments;
       this.retirementTrimmedSegments = retirementTrimmedSegments;
-      this.asyncMutationQueueDepth = asyncMutationQueueDepth;
-      this.asyncMutationPublishedRecords = asyncMutationPublishedRecords;
-      this.asyncMutationCompletedRecords = asyncMutationCompletedRecords;
-      this.asyncMutationLagRecords = asyncMutationLagRecords;
       this.ghostNativeBytes = ghostNativeBytes;
       this.ghostAllocationTrimCount = ghostAllocationTrimCount;
       this.ghostAllocationDropCount = ghostAllocationDropCount;

@@ -66,7 +66,6 @@ public final class MaintenanceStatsTest {
       assertTrue(stats.maintenanceWakeCount() >= 0L);
       assertTrue(stats.maintenanceCollectedRecordsTotal() >= 0L);
       assertTrue(stats.activeReaderCount() >= 0L);
-      assertTrue(stats.asyncMutationQueueDepth() >= 0L);
       assertTrue(stats.nativeDebtBudgetBytes() > 0L);
       assertTrue(stats.nativeDebtHeadroomBytes() >= 0L);
     }
