@@ -351,7 +351,7 @@ public final class WriterLifecycleLane {
     if (journal != null) {
       // Count the set before the marker becomes visible: a racing finishReadyDrain can otherwise
       // clear the marker between the CAS and the journal count, decrementing an uncounted set.
-      for (;;) {
+      while (true) {
         if (readySignalled.get()) {
           return;
         }

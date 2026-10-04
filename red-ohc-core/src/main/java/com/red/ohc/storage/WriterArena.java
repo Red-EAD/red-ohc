@@ -54,7 +54,7 @@ public final class WriterArena {
     SizeClassState ownerClass = sizeClassState(sizeClass);
     boolean pressureAttempted = false;
     OutOfMemoryError firstAllocationFailure = null;
-    for (;;) {
+    while (true) {
       Page page = ownerClass.currentPage;
       if (page == null) {
         page = pollRetainedOwnerPage(ownerClass);
@@ -268,7 +268,7 @@ public final class WriterArena {
     /** Seals every retained slot after the owner stopped allocating; claimed pages go shared. */
     void closeRetention() {
       for (int slot = 0; slot < RETAINED_PAGE_LIMIT; slot++) {
-        for (;;) {
+        while (true) {
           Page page = retainedPages.get(slot);
           if (page == RETENTION_CLOSED_PAGE) {
             break;
@@ -669,7 +669,7 @@ public final class WriterArena {
     }
 
     boolean freePhysical(boolean force) {
-      for (;;) {
+      while (true) {
         int current = state();
         if (current == FREED) {
           return false;
@@ -698,7 +698,7 @@ public final class WriterArena {
         grabMask = mask & ~(1L << bit);
         return ((int) grabWord << 6) + bit;
       }
-      for (;;) {
+      while (true) {
         long summary = freeSummary();
         if (summary == 0L) {
           return -1;
@@ -758,7 +758,7 @@ public final class WriterArena {
 
     private void clearFreeSummaryBit(int word) {
       long bit = 1L << word;
-      for (;;) {
+      while (true) {
         long current = freeSummary();
         if ((current & bit) == 0L
             || FREE_SUMMARY.compareAndSet(this, current, current & ~bit)) {

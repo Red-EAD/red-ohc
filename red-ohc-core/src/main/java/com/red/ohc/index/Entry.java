@@ -540,7 +540,7 @@ public final class Entry {
 
   /** Advances every unsaturated publication without waiting for the actor's rollover fence. */
   private boolean tryIncrementMutationVersion() {
-    for (;;) {
+    while (true) {
       int flags = pendingFlags();
       if ((flags & (PENDING_ROLLOVER | PENDING_ROLLOVER_CLAIMED)) != 0) {
         return false;
@@ -702,7 +702,7 @@ public final class Entry {
             | PENDING_RETRY
             | PENDING_ROLLOVER
             | PENDING_ROLLOVER_CLAIMED;
-    for (;;) {
+    while (true) {
       long current = NativeMemory.getLongVolatile(address);
       int flags = pendingFlags(current);
       int nextFlags = flags & ~clearMask;
@@ -749,7 +749,7 @@ public final class Entry {
       return false;
     }
     long address = stateWordAddress();
-    for (;;) {
+    while (true) {
       if (policyState() != POLICY_NONE) {
         return false;
       }

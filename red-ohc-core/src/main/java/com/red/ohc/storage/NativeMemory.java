@@ -382,7 +382,7 @@ public final class NativeMemory {
 
     WriterArena.Page tryStealAvailablePage(
         int sizeClass, WriterArena.SizeClassState newOwner) {
-      for (;;) {
+      while (true) {
         WriterArena.Page page = popReadyPage(sizeClass);
         if (page == null) {
           return null;
@@ -456,7 +456,7 @@ public final class NativeMemory {
     private void pushReadyPage(WriterArena.Page page) {
       int sizeClass = page.sizeClass;
       int stackIndex = readyStackIndex(sizeClass);
-      for (;;) {
+      while (true) {
         long current = readyPageStacks.get(stackIndex);
         int headId = readyPageId(current);
         readyPageNext.set(page.id, headId);
@@ -470,7 +470,7 @@ public final class NativeMemory {
     /** Pops one token from the per-size-class ABA-safe LIFO stack. */
     private WriterArena.Page popReadyPage(int sizeClass) {
       int stackIndex = readyStackIndex(sizeClass);
-      for (;;) {
+      while (true) {
         long current = readyPageStacks.get(stackIndex);
         int headId = readyPageId(current);
         if (headId == 0) {

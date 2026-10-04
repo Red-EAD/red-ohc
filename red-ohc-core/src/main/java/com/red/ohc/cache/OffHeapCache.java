@@ -378,7 +378,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int valueLength = -1;
       long valueAllocation = 0L;
       long deadlineNanos = 0L;
-      for (;;) {
+      while (true) {
         Entry entry;
         long expectedTaggedValue;
         long expectedGeneration;
@@ -449,7 +449,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     try {
       KeyEncoder.encode(keySerializer, key, context);
-      for (;;) {
+      while (true) {
         if (!enterWriterValueReader(context)) {
           throw new IllegalStateException("cache is closed");
         }
@@ -503,7 +503,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int valueLength = -1;
       long valueAllocation = 0L;
       long deadlineNanos = 0L;
-      for (;;) {
+      while (true) {
         Entry entry;
         long expectedTaggedValue;
         long expectedGeneration;
@@ -616,7 +616,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean probeOwned = true;
       boolean probeMayBeMapped = false;
       try {
-        for (;;) {
+        while (true) {
           ComputeAttempt<V> attempt = new ComputeAttempt<>();
           // The callback may perform nested reads, which reuse and mutate lookupKey. Capture the
           // outer key's immutable hash before entering user code and carry it through this attempt.
@@ -1396,44 +1396,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     deadlineNanos = resolveDeadline(context, requestedExpiry);
     charge = logicalCharge(logicalKeyAllocationLength(keyLength), valueAllocation);
     hash = lookup.hash();
-    for (;;) {
-      worker.throwIfUnavailable();
-      if (isClosing()) {
-        throw new IllegalStateException("cache is closed");
-      }
-      // Get-first: probe with the encoded key before building an insert candidate; a live hit
-      // routes straight to the replace transaction. The probe runs under a reader epoch like
-      // the insert's putIfAbsent — equals reads the resident entry's native key block.
-      Entry existing;
-      if (!enterWriterReader(context)) {
-        throw new IllegalStateException("cache is closed");
-      }
-      try {
-        existing = data.get(lookup);
-      } finally {
-        exit(context);
-      }
-      if (existing != null && existing.isAlive()) {
-        if (replaceExistingResolvedResult(
-            context,
-            existing,
-            value,
-            valueLength,
-            valueAllocation,
-            deadlineNanos,
-            deferMaintenanceWake,
-            0L)) {
-          return;
-        }
-        // The replace revalidation rejected the entry (claimed, retired, or replaced
-        // concurrently); the insert path re-resolves from scratch.
-      }
-      // Prepare the value before the CHM operation and let the insertion decide whether this is
-      // a new mapping or a replacement; a collision reuses the prepared value in the existing
-      // replacement transaction.
-      if (insertNewEntry(
+    while (true) {
+      throwIfClosedForWrite();
+      if (putResolvedEntry(
           context,
-          hash,
+          lookup,
           keyBytes,
           keyLength,
           value,
@@ -1442,10 +1409,75 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           valueAllocation,
           charge,
           deadlineNanos,
-          deferMaintenanceWake)) {
+          deferMaintenanceWake,
+          hash)) {
         return;
       }
     }
+  }
+
+  private void throwIfClosedForWrite() {
+    worker.throwIfUnavailable();
+    if (isClosing()) {
+      throw new IllegalStateException("cache is closed");
+    }
+  }
+
+  private boolean putResolvedEntry(
+      ThreadContext context,
+      LookupKey lookup,
+      byte[] keyBytes,
+      int keyLength,
+      Object value,
+      int valueLength,
+      long keyAllocation,
+      long valueAllocation,
+      long charge,
+      long deadlineNanos,
+      boolean deferMaintenanceWake,
+      int hash) {
+    // Get-first: probe with the encoded key before building an insert candidate; a live hit
+    // routes straight to the replace transaction. The probe runs under a reader epoch like
+    // the insert's putIfAbsent — equals reads the resident entry's native key block.
+    Entry existing;
+    if (!enterWriterReader(context)) {
+      throw new IllegalStateException("cache is closed");
+    }
+    try {
+      existing = data.get(lookup);
+    } finally {
+      exit(context);
+    }
+    if (existing != null && existing.isAlive()) {
+      if (replaceExistingResolvedResult(
+          context,
+          existing,
+          value,
+          valueLength,
+          valueAllocation,
+          deadlineNanos,
+          deferMaintenanceWake,
+          0L)) {
+        return true;
+      }
+      // The replace revalidation rejected the entry (claimed, retired, or replaced
+      // concurrently); the insert path re-resolves from scratch.
+    }
+    // Prepare the value before the CHM operation and let the insertion decide whether this is
+    // a new mapping or a replacement; a collision reuses the prepared value in the existing
+    // replacement transaction.
+    return insertNewEntry(
+        context,
+        hash,
+        keyBytes,
+        keyLength,
+        value,
+        valueLength,
+        keyAllocation,
+        valueAllocation,
+        charge,
+        deadlineNanos,
+        deferMaintenanceWake);
   }
 
   private boolean replaceExistingResolvedResult(
@@ -2888,6 +2920,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   /** Reads an internal lookup without changing the public request counters. */
+  private long readDeadlineNanosFor(long observedTaggedValue) {
+    return Entry.hasTtl(observedTaggedValue) ? deadlineClock.nowNanos() : 0L;
+  }
+
   private V getEncoded(ThreadContext context, boolean recordStats) {
     if (!enter(context)) {
       return null;
@@ -2901,9 +2937,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               entry,
               observedTaggedValue,
               preReadValueDeadline(observedTaggedValue),
-              Entry.hasTtl(observedTaggedValue)
-                  ? deadlineClock.nowNanos()
-                  : 0L);
+              readDeadlineNanosFor(observedTaggedValue));
       if (value == 0L) {
         if (recordStats) {
           miss(context);
@@ -3182,7 +3216,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       java.util.function.BiFunction<? super K, ? super V, ? extends V> function) {
     Objects.requireNonNull(function, "function");
     for (Map.Entry<K, V> snapshot : entrySet()) {
-      for (;;) {
+      while (true) {
         Map.Entry<K, V> currentSnapshot = snapshot;
         V replacement =
             Objects.requireNonNull(
@@ -3217,7 +3251,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     try {
       Iterator<Map.Entry<Entry, Entry>> iterator =
           data.entrySet().iterator();
-      for (;;) {
+      while (true) {
         Entry entry;
         if (!enterWriterReader(context)) {
           throw new IllegalStateException("cache is closed");
@@ -3618,7 +3652,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     boolean candidateWriterHeld = false;
     boolean handoffCompleted = false;
     try {
-      for (;;) {
+      while (true) {
         candidate =
             allocateEntry(
                 context,
@@ -4329,7 +4363,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
     boolean interrupted = false;
     synchronized (entry) {
-      for (;;) {
+      while (true) {
         if (closing || !entry.isAlive()) {
           break;
         }

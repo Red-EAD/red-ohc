@@ -47,25 +47,30 @@ public final class AccessRing {
         return false;
       }
     }
-    int observedTail = consumer.tail;
-    int depthBeforePublish = current - observedTail;
     int slot = current & MASK;
     entries[slot] = entry;
     valueAddresses[slot] = observedValueAddress;
     generations[slot] = observedGeneration;
     policyStates[slot] = observedPolicyState;
     HEAD_UPDATER.lazySet(producer, current + 1);
-    boolean wake =
-        depthBeforePublish == 0
-            || (depthBeforePublish < HIGH_WATERMARK
-                && depthBeforePublish + 1 >= HIGH_WATERMARK);
-    if (wake
-        && consumer.notifyState == NOTIFY_ARMED
-        && NOTIFY_STATE_UPDATER.compareAndSet(consumer, NOTIFY_ARMED, NOTIFY_SIGNALED)
-        && nonEmptySignal != null) {
-      nonEmptySignal.run();
+    if (consumer.notifyState == NOTIFY_ARMED) {
+      maybeWakeActor(current);
     }
     return true;
+  }
+
+  private void maybeWakeActor(int current) {
+    int observedTail = consumer.tail;
+    producer.cachedTail = observedTail;
+    int depthBeforePublish = current - observedTail;
+    if (depthBeforePublish == 0
+        || (depthBeforePublish < HIGH_WATERMARK
+            && depthBeforePublish + 1 >= HIGH_WATERMARK)) {
+      if (NOTIFY_STATE_UPDATER.compareAndSet(consumer, NOTIFY_ARMED, NOTIFY_SIGNALED)
+          && nonEmptySignal != null) {
+        nonEmptySignal.run();
+      }
+    }
   }
 
   public boolean poll(AccessConsumer consumer) {

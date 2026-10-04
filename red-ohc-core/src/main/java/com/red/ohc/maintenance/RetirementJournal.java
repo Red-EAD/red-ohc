@@ -1115,7 +1115,7 @@ public final class RetirementJournal {
     if (bytes <= 0L) {
       return;
     }
-    for (;;) {
+    while (true) {
       long current = admittedRetirementBytes.get();
       if (current > Long.MAX_VALUE - bytes) {
         throw new IllegalStateException("retirement debt overflow");
@@ -1130,7 +1130,7 @@ public final class RetirementJournal {
     if (bytes <= 0L) {
       return;
     }
-    for (;;) {
+    while (true) {
       long current = admittedRetirementBytes.get();
       if (current < bytes) {
         throw new IllegalStateException("retirement debt underflow");
@@ -1215,7 +1215,7 @@ public final class RetirementJournal {
       if (reservation == null) {
         throw new NullPointerException("reservation");
       }
-      for (;;) {
+      while (true) {
         if (closed) {
           return false;
         }
@@ -1297,7 +1297,7 @@ public final class RetirementJournal {
 
     private int sealThrough(long epoch, long maximumSequenceInclusive) {
       int records = 0;
-      for (;;) {
+      while (true) {
         RetirementSegment segment = sealCursor;
         if (segment == null || !segment.isClosed() || !segment.isComplete()) {
           break;
@@ -1353,7 +1353,7 @@ public final class RetirementJournal {
     private int publishSafe(
         boolean lookupSafe, boolean valueSafe, boolean includeBoundary) {
       int published = 0;
-      for (;;) {
+      while (true) {
         RetirementSegment segment = sealedSegments.peek();
         boolean safe =
             includeBoundary
@@ -1596,7 +1596,7 @@ public final class RetirementJournal {
 
     private void drainCompletionAdvances(int missed) {
       try {
-        for (;;) {
+        while (true) {
           advanceCompletionPrefix();
           int pending = completionAdvanceWork.addAndGet(-missed);
           if (pending == 0) {
@@ -1613,7 +1613,7 @@ public final class RetirementJournal {
     }
 
     private void advanceCompletionPrefix() {
-      for (;;) {
+      while (true) {
         RetirementSegment current = completionCursor.get();
         if (current == null || !current.segmentClaimFinished()) {
           return;
@@ -1647,7 +1647,7 @@ public final class RetirementJournal {
         return published;
       }
       if (!current.beginLink()) {
-        for (;;) {
+        while (true) {
           RetirementSegment existing = current.next();
           if (existing != null) {
             producer.compareAndSet(current, existing);

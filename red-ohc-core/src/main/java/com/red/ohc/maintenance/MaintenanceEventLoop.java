@@ -610,7 +610,7 @@ public final class MaintenanceEventLoop
     // AccessRing is an advisory side queue. Publishing its coalesced bit is enough to make the
     // actor rescan it; putting a marker into the MPSC mailbox would let a read thread allocate a
     // mailbox chunk when the actor and producer cross at a queue boundary.
-    for (;;) {
+    while (true) {
       int current = requestedWork.get();
       if ((current & WORK_ACCESS_SCAN) != 0
           || requestedWork.compareAndSet(current, current | WORK_ACCESS_SCAN)) {
@@ -957,7 +957,7 @@ public final class MaintenanceEventLoop
   /** Control-plane barrier; the marker is ordered with all earlier mailbox messages. */
   public CompletableFuture<Void> flush() {
     synchronized (flushPublicationLock) {
-      for (;;) {
+      while (true) {
         Throwable failure = terminalFailure.get();
         if (failure != null) {
           CompletableFuture<Void> failed = new CompletableFuture<>();

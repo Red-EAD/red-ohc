@@ -116,7 +116,7 @@ public final class RetirementSegment {
       long expectedGeneration,
       int expectedLaneIndex,
       AtomicReference<RetirementSegment> ownerProducer) {
-    for (;;) {
+    while (true) {
       if (ownerProducer == null
           || ownerProducer.get() != this
           || laneIndex != expectedLaneIndex) {
@@ -144,7 +144,7 @@ public final class RetirementSegment {
     if (reservation == null) {
       throw new NullPointerException("reservation");
     }
-    for (;;) {
+    while (true) {
       // Capture the generation before validating ownership. Reuse after this read invalidates
       // the CAS; reuse before it is rejected by the owner check below.
       long state = reservationState();
@@ -168,7 +168,7 @@ public final class RetirementSegment {
   }
 
   int closeForSnapshot() {
-    for (;;) {
+    while (true) {
       long state = reservationState();
       if ((state & CLOSED) != 0L) {
         return (int) (state & COUNT_MASK);
@@ -536,7 +536,7 @@ public final class RetirementSegment {
   }
 
   private boolean enterOwnership() {
-    for (;;) {
+    while (true) {
       int state = (int) OWNERSHIP_GATE.getVolatile(this);
       if ((state & RECYCLE_CLOSED) != 0) {
         return false;
