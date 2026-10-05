@@ -13,10 +13,7 @@ final class MonotonicDeadlineClock implements Ticker {
 
   private final Ticker ticker;
   private final long originNanos;
-  /**
-   * Wall-clock origin paired with {@link #originNanos}; derivation is safe only for the system
-   * ticker, whose two views advance together.
-   */
+  /** Approximate wall-clock origin for relative-TTL residence statistics. */
   private final long originWallMillis;
   private final boolean systemTicker;
 
@@ -33,8 +30,8 @@ final class MonotonicDeadlineClock implements Ticker {
   }
 
   /**
-   * Wall-clock millis matching a caller-owned monotonic sample. Derived from the system ticker's
-   * single nanoTime reading (truncation error under 1ms); custom tickers keep exact dual reads.
+   * Estimated wall-clock millis for relative-TTL statistics, reusing a monotonic sample. Absolute
+   * expiries must sample currentTimeMillis instead because the system wall clock can be adjusted.
    */
   long wallMillisAt(long monotonicNowNanos) {
     if (!systemTicker) {

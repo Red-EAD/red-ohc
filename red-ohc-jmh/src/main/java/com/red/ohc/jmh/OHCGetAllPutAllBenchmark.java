@@ -223,13 +223,8 @@ public class OHCGetAllPutAllBenchmark {
     }
     Map<Integer, byte[]> present = caffeine.getAllPresent(batchKeys);
     Map<Integer, byte[]> result = new HashMap<>(present.size() * 2);
-    // OHC copies native bytes into a temporary payload and the generic deserializer copies
-    // that payload again. Keep the two ownership copies explicit on the heap side.
-    present.forEach(
-        (key, value) -> {
-          byte[] payload = Arrays.copyOf(value, value.length);
-          result.put(key, Arrays.copyOf(payload, payload.length));
-        });
+    // Both implementations return one owned payload snapshot per present value.
+    present.forEach((key, value) -> result.put(key, Arrays.copyOf(value, value.length)));
     blackhole.consume(result);
   }
 

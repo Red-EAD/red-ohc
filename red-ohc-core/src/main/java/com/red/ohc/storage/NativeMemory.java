@@ -1146,9 +1146,7 @@ public final class NativeMemory {
       long pageKey = 0L;
       long address = 0L;
       int pageBytes = SizeClasses.pageBytes(sizeClass);
-      // Anonymous mappings keep page frees OS-visible; the budget bounds vm.max_map_count use.
-      boolean directMapped =
-          allocator.pageMappingsAvailable() && directMappedPageCount.get() < PAGE_MAPPING_BUDGET;
+      boolean directMapped = false;
       try {
         pageKey = nextPageKey();
         if (pageKey == 0) {
@@ -1159,9 +1157,14 @@ public final class NativeMemory {
         // Ready publication happens after the Page leaves its owner. Materialize the sparse link
         // chunk while acquisition can still unwind, so that publication itself cannot allocate.
         readyPageNext.prepare(pageId);
+        // Reserve before mapping so concurrent acquisitions cannot exceed the mapping budget.
+        directMapped = allocator.pageMappingsAvailable() && reserveMappedPage();
         address =
             directMapped ? allocateDirectMappedPage(pageBytes) : allocateEntryPage(pageBytes);
         if (address == 0L) {
+          if (directMapped) {
+            directMappedPageCount.decrementAndGet();
+          }
           recyclePageId(pageId);
           pooledPageCount.decrementAndGet();
           return null;
@@ -1188,12 +1191,26 @@ public final class NativeMemory {
             long rawAddress = U.getLong(address - Long.BYTES);
             free(rawAddress, pageBytes + ALIGNMENT_PADDING_BYTES);
           }
+        } else if (directMapped) {
+          directMappedPageCount.decrementAndGet();
         }
         if (pageKey != 0) {
           recyclePageId((int) (pageKey & WriterArena.PAGE_ID_MASK));
         }
         pooledPageCount.decrementAndGet();
         throw failure;
+      }
+    }
+
+    private boolean reserveMappedPage() {
+      while (true) {
+        long current = directMappedPageCount.get();
+        if (current >= PAGE_MAPPING_BUDGET) {
+          return false;
+        }
+        if (directMappedPageCount.compareAndSet(current, current + 1L)) {
+          return true;
+        }
       }
     }
 

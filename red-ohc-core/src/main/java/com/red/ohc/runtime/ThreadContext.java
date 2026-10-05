@@ -26,6 +26,8 @@ public final class ThreadContext {
   public byte[] keyBytes = new byte[64];
   public ByteBuffer keyBuffer = ByteBuffer.wrap(keyBytes);
   public LookupKey lookupKey = new LookupKey();
+  private KeyScratch[] keyScratch;
+  private int keyDepth;
   public final ReaderSlot slot = new ReaderSlot();
   private DirectValueView topLevelDirectView;
   private DirectValueView[] directViews;
@@ -139,6 +141,62 @@ public final class ThreadContext {
     if (keyBytes.length < length) {
       keyBytes = new byte[round(length)];
       keyBuffer = ByteBuffer.wrap(keyBytes);
+    }
+  }
+
+  /** Keeps serializer callbacks and nested reads from overwriting an active operation's key. */
+  public void enterKey() {
+    if (keyDepth == 0) {
+      keyDepth = 1;
+      return;
+    }
+    if (keyScratch == null) {
+      keyScratch = new KeyScratch[4];
+    } else if (keyDepth == keyScratch.length) {
+      KeyScratch[] expanded = new KeyScratch[keyScratch.length << 1];
+      System.arraycopy(keyScratch, 0, expanded, 0, keyScratch.length);
+      keyScratch = expanded;
+    }
+    KeyScratch outer = keyScratch[keyDepth - 1];
+    if (outer == null) {
+      outer = new KeyScratch();
+      keyScratch[keyDepth - 1] = outer;
+    }
+    KeyScratch inner = keyScratch[keyDepth];
+    if (inner == null) {
+      inner = new KeyScratch();
+      keyScratch[keyDepth] = inner;
+    }
+    outer.save(this);
+    inner.restore(this);
+    keyDepth++;
+  }
+
+  public void exitKey() {
+    if (keyDepth <= 0) {
+      throw new IllegalStateException("key scratch is not entered");
+    }
+    if (--keyDepth != 0) {
+      keyScratch[keyDepth].save(this);
+      keyScratch[keyDepth - 1].restore(this);
+    }
+  }
+
+  private static final class KeyScratch {
+    private byte[] bytes = new byte[64];
+    private ByteBuffer buffer = ByteBuffer.wrap(bytes);
+    private LookupKey lookup = new LookupKey();
+
+    private void save(ThreadContext context) {
+      bytes = context.keyBytes;
+      buffer = context.keyBuffer;
+      lookup = context.lookupKey;
+    }
+
+    private void restore(ThreadContext context) {
+      context.keyBytes = bytes;
+      context.keyBuffer = buffer;
+      context.lookupKey = lookup;
     }
   }
 

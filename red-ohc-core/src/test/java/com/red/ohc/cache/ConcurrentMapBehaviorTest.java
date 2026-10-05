@@ -121,6 +121,118 @@ public final class ConcurrentMapBehaviorTest {
     }
   }
 
+  @Test(timeOut = 15_000L)
+  public void computeRetryDoesNotReuseAnUnlinkedRetiredKey() throws Exception {
+    OffHeapCache<String, String> cache = newCache();
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    PausedStaleComputeMap map = new PausedStaleComputeMap();
+    Throwable primary = null;
+    try {
+      replaceDataMaps(cache, map);
+      cache.put("key", "old");
+      cache.flushAsync().join();
+      map.retired = cache.data.values().iterator().next();
+      ThreadContext pinned = context(cache);
+      ReaderGuard guard = new ReaderGuard(worker(cache));
+      // Keep retired memory mapped so an invalid key use fails deterministically, not the JVM.
+      guard.enter(pinned);
+      Throwable callerFailure = null;
+      try {
+        Future<String> computed =
+            callers.submit(
+                () -> {
+                  map.computeThread = Thread.currentThread();
+                  return cache.computeIfAbsent("key", ignored -> "new");
+                });
+        assertTrue(map.computeEntered.await(2L, TimeUnit.SECONDS));
+        Future<?> removed =
+            callers.submit(
+                () -> {
+                  map.removeThread = Thread.currentThread();
+                  try {
+                    cache.remove("key");
+                  } finally {
+                    map.removeDone.countDown();
+                  }
+                });
+        assertEquals(computed.get(3L, TimeUnit.SECONDS), "new");
+        removed.get(3L, TimeUnit.SECONDS);
+        assertEquals(map.retiredKeyUses.get(), 0, "retry must probe with its owned key");
+        assertEquals(cache.get("key"), "new");
+      } catch (Throwable failure) {
+        callerFailure = failure;
+        throw failure;
+      } finally {
+        map.retiredObserved.countDown();
+        map.removeDone.countDown();
+        try {
+          CacheTestSupport.awaitCallers(callers, callerFailure);
+        } finally {
+          guard.exit(pinned);
+        }
+      }
+      cache.flushAsync().join();
+    } catch (Throwable failure) {
+      primary = failure;
+      throw failure;
+    } finally {
+      CacheTestSupport.stop(cache, primary, callers);
+    }
+  }
+
+  private static final class PausedStaleComputeMap
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+    private final CountDownLatch computeEntered = new CountDownLatch(1);
+    private final CountDownLatch retiredObserved = new CountDownLatch(1);
+    private final CountDownLatch removeDone = new CountDownLatch(1);
+    private final AtomicBoolean pause = new AtomicBoolean(true);
+    private final AtomicInteger retiredKeyUses = new AtomicInteger();
+    private volatile Thread computeThread;
+    private volatile Thread removeThread;
+    private com.red.ohc.index.Entry retired;
+
+    @Override
+    public com.red.ohc.index.Entry compute(
+        com.red.ohc.index.Entry key,
+        BiFunction<
+                ? super com.red.ohc.index.Entry,
+                ? super com.red.ohc.index.Entry,
+                ? extends com.red.ohc.index.Entry>
+            action) {
+      if (Thread.currentThread() == removeThread && key == retired) {
+        assertFalse(retired.isAlive());
+        retiredObserved.countDown();
+      }
+      if (Thread.currentThread() == computeThread) {
+        if (key == retired && !retired.isAlive()) {
+          retiredKeyUses.incrementAndGet();
+        }
+        if (pause.compareAndSet(true, false)) {
+          com.red.ohc.index.Entry result =
+              super.compute(
+                  key,
+                  (ignored, current) -> {
+                    computeEntered.countDown();
+                    await(retiredObserved);
+                    return action.apply(ignored, current);
+                  });
+          await(removeDone);
+          return result;
+        }
+      }
+      return super.compute(key, action);
+    }
+
+    private static void await(CountDownLatch latch) {
+      try {
+        assertTrue(latch.await(3L, TimeUnit.SECONDS));
+      } catch (InterruptedException interruption) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError(interruption);
+      }
+    }
+  }
+
   @Test
   public void ordinaryNewPutProbesOnceThenPublishesWithOnePutIfAbsent() throws Exception {
     {

@@ -366,12 +366,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           if (entry == null || valueIfLive(entry) == 0L) {
             return false;
           }
-          V current = snapshotValueEntered(context, entry, entry.valueAddress);
+          expectedTaggedValue = entry.valueAddress;
+          expectedGeneration = entry.generation();
+          V current = snapshotValueEntered(context, entry, expectedTaggedValue);
           if (!Objects.equals(expected, current)) {
             return false;
           }
-          expectedTaggedValue = entry.valueAddress;
-          expectedGeneration = entry.generation();
         } finally {
           exit(context);
         }
@@ -432,12 +432,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           if (entry == null || valueIfLive(entry) == 0L) {
             return false;
           }
-          V current = snapshotValueEntered(context, entry, entry.valueAddress);
+          expectedTaggedValue = entry.valueAddress;
+          expectedGeneration = entry.generation();
+          V current = snapshotValueEntered(context, entry, expectedTaggedValue);
           if (!Objects.equals(value, current)) {
             return false;
           }
-          expectedTaggedValue = entry.valueAddress;
-          expectedGeneration = entry.generation();
         } finally {
           exit(context);
         }
@@ -578,7 +578,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           try {
             runComputePass(context, key, probe, kind, action, attempt, false);
             if (attempt.retry) {
-              handleComputeRetry(context, attempt);
+              handleComputeRetry(context, probe, attempt);
               continue;
             }
 
@@ -590,7 +590,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
               runComputePass(context, key, probe, kind, action, attempt, true);
               if (attempt.retry) {
                 discardPreparedComputeAttempt(context, attempt, probe);
-                handleComputeRetry(context, attempt);
+                handleComputeRetry(context, probe, attempt);
                 continue;
               }
             }
@@ -667,14 +667,21 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     }
   }
 
-  private void handleComputeRetry(ThreadContext context, ComputeAttempt<V> attempt) {
+  private void handleComputeRetry(ThreadContext context, Entry probe, ComputeAttempt<V> attempt) {
     if (attempt.entry != null) {
       awaitWriterRelease(attempt.entry);
     }
     if (attempt.stale) {
-      // A concurrent remove owns the retired Entry until its CHM unlink and lifecycle commit
-      // finish. The wait above is event-driven when that removal still owns the writer.
-      removeStaleComputeEntry(context, attempt.entry);
+      // The old Entry may have been reclaimed since the CHM pass. Revalidate with our private
+      // probe before reading its native metadata or using it as an identity-removal key.
+      enterWriterReader(context);
+      try {
+        if (data.get(probe) == attempt.entry) {
+          removeStaleLookupEntry(context, attempt.entry);
+        }
+      } finally {
+        exit(context);
+      }
     }
   }
 
@@ -1055,7 +1062,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
       }
       try {
-        if (attempt.mutationPrepared || entry.claimMutationRetry()) {
+        if (attempt.mutationPrepared || claimMutationRetryProtected(context, entry)) {
           enqueueWriterMutationHint(
               context,
               entry,
@@ -1227,13 +1234,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       enterWriterValueReader(context);
       attempt.readerEntered = true;
     }
-  }
-
-  private boolean removeStaleComputeEntry(ThreadContext context, Entry entry) {
-    if (entry == null || entry.isAlive() || entry.isWriterLocked()) {
-      return false;
-    }
-    return context.removeEntryIfSame(data, entry);
   }
 
   private boolean removeStaleLookupEntry(ThreadContext context, Entry entry) {
@@ -2250,16 +2250,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         cleanupFailure = appendFailure(cleanupFailure, failure);
       }
     }
-    if (writerHeld) {
+    if (!published && allocationUpdated) {
       try {
-        releaseWriter(entry, deferMaintenanceWake);
+        entry.currentValueAllocation(oldAllocation);
       } catch (Throwable failure) {
         cleanupFailure = appendFailure(cleanupFailure, failure);
       }
     }
-    if (!published && allocationUpdated) {
+    if (writerHeld) {
       try {
-        entry.currentValueAllocation(oldAllocation);
+        releaseWriter(entry, deferMaintenanceWake);
       } catch (Throwable failure) {
         cleanupFailure = appendFailure(cleanupFailure, failure);
       }
@@ -2272,7 +2272,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       }
     }
     try {
-      if (mutationPrepared || entry.claimMutationRetry()) {
+      if (mutationPrepared || claimMutationRetryProtected(context, entry)) {
         enqueueWriterMutationHint(
             context,
             entry,
@@ -2393,6 +2393,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           cleanupFailure = appendFailure(cleanupFailure, failure);
         }
       }
+      if (!published && allocationUpdated) {
+        try {
+          entry.currentValueAllocation(oldAllocation);
+        } catch (Throwable failure) {
+          cleanupFailure = appendFailure(cleanupFailure, failure);
+        }
+      }
       if (writerHeld) {
         try {
           releaseWriter(entry, deferMaintenanceWake);
@@ -2401,15 +2408,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
       }
       try {
-        boolean retryRequested;
-        if (releasedStateWord == 0L) {
-          retryRequested = entry.claimMutationRetry();
-        } else {
-          retryRequested = Entry.mutationRetryRequestedInReleasedWord(releasedStateWord);
-          if (retryRequested) {
-            entry.claimMutationRetry();
-          }
-        }
+        boolean retryRequested =
+            (releasedStateWord == 0L
+                    || Entry.mutationRetryRequestedInReleasedWord(releasedStateWord))
+                && claimMutationRetryProtected(context, entry);
         if (retryRequested) {
           enqueueWriterMutationHint(
               context,
@@ -2421,13 +2423,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         }
       } catch (Throwable failure) {
         cleanupFailure = appendFailure(cleanupFailure, failure);
-      }
-      if (!published && allocationUpdated) {
-        try {
-          entry.currentValueAllocation(oldAllocation);
-        } catch (Throwable failure) {
-          cleanupFailure = appendFailure(cleanupFailure, failure);
-        }
       }
       if (!published) {
         try {
@@ -2737,8 +2732,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   public V get(Object key) {
     Objects.requireNonNull(key, "key");
     ThreadContext context = contexts.get();
-    KeyEncoder.encode(keySerializer, key, context);
-    return getEncoded(context);
+    context.enterKey();
+    try {
+      KeyEncoder.encode(keySerializer, key, context);
+      return getEncoded(context);
+    } finally {
+      context.exitKey();
+    }
   }
 
   /** Reads the lookup key already installed in the supplied thread context. */
@@ -2904,7 +2904,16 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   public boolean containsKey(Object key) {
     Objects.requireNonNull(key, "key");
     ThreadContext context = contexts.get();
-    KeyEncoder.encode(keySerializer, key, context);
+    context.enterKey();
+    try {
+      KeyEncoder.encode(keySerializer, key, context);
+      return containsKeyEncoded(context);
+    } finally {
+      context.exitKey();
+    }
+  }
+
+  private boolean containsKeyEncoded(ThreadContext context) {
     enter(context);
     Entry expiredEntry = null;
     long expiredTaggedValue = 0L;
@@ -3041,8 +3050,13 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(consumer, "consumer");
     ThreadContext context = contexts.get();
-    KeyEncoder.encode(keySerializer, key, context);
-    return getDirectInContext(context, consumer);
+    context.enterKey();
+    try {
+      KeyEncoder.encode(keySerializer, key, context);
+      return getDirectInContext(context, consumer);
+    } finally {
+      context.exitKey();
+    }
   }
 
   private boolean getDirectInContext(ThreadContext context, DirectValueConsumer consumer) {
@@ -3096,55 +3110,60 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     int expected = keys.size();
     Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
     try {
-      Iterator<? extends K> iterator = keys.iterator();
-      while (iterator.hasNext()) {
-        enter(context);
-        context.beginBulkRead();
-        try {
-          int processed = 0;
-          long bulkNowNanos = 0L;
-          boolean bulkClockRead = false;
-          while (processed < BULK_READ_CHUNK_SIZE && iterator.hasNext()) {
-            processed++;
-            K key = Objects.requireNonNull(iterator.next(), "key");
-            KeyEncoder.encode(keySerializer, key, context);
-            Entry entry = data.get(context.lookupKey);
-            long observedTaggedValue = entry == null ? 0L : entry.valueAddress;
-            long value;
-            if (Entry.hasTtl(observedTaggedValue)) {
-              if (!bulkClockRead) {
-                bulkNowNanos = deadlineClock.nowNanos();
-                bulkClockRead = true;
-              }
-            }
-            value = valueIfLive(entry, observedTaggedValue, bulkNowNanos);
-            if (value == 0L) {
-              context.bulkMiss();
-            } else {
-              if (!uniqueEntries.add(entry)) {
-                continue;
-              }
-              context.bulkHit(entry);
-              DirectValueView view =
-                  context.pushDirectView(
-                      ValueBlock.payloadAddress(value), ValueBlock.length(value));
-              try {
-                enterUserCallback(context);
-                try {
-                  consumer.accept(key, view);
-                } finally {
-                  exitUserCallback(context);
+      context.enterKey();
+      try {
+        Iterator<? extends K> iterator = keys.iterator();
+        while (iterator.hasNext()) {
+          enter(context);
+          context.beginBulkRead();
+          try {
+            int processed = 0;
+            long bulkNowNanos = 0L;
+            boolean bulkClockRead = false;
+            while (processed < BULK_READ_CHUNK_SIZE && iterator.hasNext()) {
+              processed++;
+              K key = Objects.requireNonNull(iterator.next(), "key");
+              KeyEncoder.encode(keySerializer, key, context);
+              Entry entry = data.get(context.lookupKey);
+              long observedTaggedValue = entry == null ? 0L : entry.valueAddress;
+              long value;
+              if (Entry.hasTtl(observedTaggedValue)) {
+                if (!bulkClockRead) {
+                  bulkNowNanos = deadlineClock.nowNanos();
+                  bulkClockRead = true;
                 }
-                hits++;
-              } finally {
-                context.popDirectView();
+              }
+              value = valueIfLive(entry, observedTaggedValue, bulkNowNanos);
+              if (value == 0L) {
+                context.bulkMiss();
+              } else {
+                if (!uniqueEntries.add(entry)) {
+                  continue;
+                }
+                context.bulkHit(entry);
+                DirectValueView view =
+                    context.pushDirectView(
+                        ValueBlock.payloadAddress(value), ValueBlock.length(value));
+                try {
+                  enterUserCallback(context);
+                  try {
+                    consumer.accept(key, view);
+                  } finally {
+                    exitUserCallback(context);
+                  }
+                  hits++;
+                } finally {
+                  context.popDirectView();
+                }
               }
             }
+          } finally {
+            context.finishBulkRead();
+            exit(context);
           }
-        } finally {
-          context.finishBulkRead();
-          exit(context);
         }
+      } finally {
+        context.exitKey();
       }
     } finally {
       context.releaseBulkEntries(uniqueEntries);
@@ -3162,20 +3181,30 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (context == null) {
       throw new IllegalStateException("reentrant cache write is not supported");
     }
-    Iterator<? extends Map.Entry<? extends K, ? extends V>> iterator =
-        entries.entrySet().iterator();
+    Throwable operationFailure = null;
     try {
+      Iterator<? extends Map.Entry<? extends K, ? extends V>> iterator =
+          entries.entrySet().iterator();
       while (iterator.hasNext()) {
         Map.Entry<? extends K, ? extends V> entry = iterator.next();
         K key = Objects.requireNonNull(entry.getKey(), "key");
         V value = Objects.requireNonNull(entry.getValue(), "value");
         putOne(context, key, value, DEFAULT_TTL, true);
       }
+    } catch (Throwable failure) {
+      operationFailure = failure;
+      throw failure;
     } finally {
-      if (!entries.isEmpty()) {
+      try {
         worker.requestMutationMaintenance();
+      } catch (Throwable cleanupFailure) {
+        if (operationFailure == null) {
+          throw cleanupFailure;
+        }
+        operationFailure.addSuppressed(cleanupFailure);
+      } finally {
+        exitWriter(context);
       }
-      exitWriter(context);
     }
   }
 
@@ -3191,49 +3220,54 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     ThreadContext context = contexts.get();
     Set<Entry> uniqueEntries = context.acquireBulkEntries(expected);
     try {
-      Iterator<? extends K> iterator = keys.iterator();
-      while (iterator.hasNext()) {
-        enter(context);
-        context.beginBulkRead();
-        try {
-          int processed = 0;
-          long bulkNowNanos = 0L;
-          boolean bulkClockRead = false;
-          while (processed < BULK_READ_CHUNK_SIZE && iterator.hasNext()) {
-            processed++;
-            K key = Objects.requireNonNull(iterator.next(), "key");
-            KeyEncoder.encode(keySerializer, key, context);
-            Entry entry = data.get(context.lookupKey);
-            long observedTaggedValue = entry == null ? 0L : entry.valueAddress;
-            long value;
-            if (Entry.hasTtl(observedTaggedValue)) {
-              if (!bulkClockRead) {
-                bulkNowNanos = deadlineClock.nowNanos();
-                bulkClockRead = true;
+      context.enterKey();
+      try {
+        Iterator<? extends K> iterator = keys.iterator();
+        while (iterator.hasNext()) {
+          enter(context);
+          context.beginBulkRead();
+          try {
+            int processed = 0;
+            long bulkNowNanos = 0L;
+            boolean bulkClockRead = false;
+            while (processed < BULK_READ_CHUNK_SIZE && iterator.hasNext()) {
+              processed++;
+              K key = Objects.requireNonNull(iterator.next(), "key");
+              KeyEncoder.encode(keySerializer, key, context);
+              Entry entry = data.get(context.lookupKey);
+              long observedTaggedValue = entry == null ? 0L : entry.valueAddress;
+              long value;
+              if (Entry.hasTtl(observedTaggedValue)) {
+                if (!bulkClockRead) {
+                  bulkNowNanos = deadlineClock.nowNanos();
+                  bulkClockRead = true;
+                }
+              }
+              value = valueIfLive(entry, observedTaggedValue, bulkNowNanos);
+              if (value == 0L) {
+                context.bulkMiss();
+              } else {
+                if (!uniqueEntries.add(entry)) {
+                  continue;
+                }
+                context.bulkHit(entry);
+                int length = ValueBlock.length(value);
+                ByteBuffer serializedValue =
+                    context.readOnlyValueBuffer(ValueBlock.payloadAddress(value), length);
+                try {
+                  result.put(key, valueSerializer.deserialize(serializedValue));
+                } finally {
+                  context.releaseReadOnlyValueBuffer();
+                }
               }
             }
-            value = valueIfLive(entry, observedTaggedValue, bulkNowNanos);
-            if (value == 0L) {
-              context.bulkMiss();
-            } else {
-              if (!uniqueEntries.add(entry)) {
-                continue;
-              }
-              context.bulkHit(entry);
-              int length = ValueBlock.length(value);
-              ByteBuffer serializedValue =
-                  context.readOnlyValueBuffer(ValueBlock.payloadAddress(value), length);
-              try {
-                result.put(key, valueSerializer.deserialize(serializedValue));
-              } finally {
-                context.releaseReadOnlyValueBuffer();
-              }
-            }
+          } finally {
+            context.finishBulkRead();
+            exit(context);
           }
-        } finally {
-          context.finishBulkRead();
-          exit(context);
         }
+      } finally {
+        context.exitKey();
       }
     } finally {
       context.releaseBulkEntries(uniqueEntries);
@@ -3429,7 +3463,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         candidate = null;
 
         if (!winner.isAlive()) {
-          boolean staleRemovalPending = !removeStaleComputeEntry(context, winner);
+          boolean staleRemovalPending;
+          enterWriterReader(context);
+          try {
+            staleRemovalPending =
+                data.get(lookup) == winner && !removeStaleLookupEntry(context, winner);
+          } finally {
+            exit(context);
+          }
           if (staleRemovalPending) {
             awaitWriterRelease(winner);
           }
@@ -3438,49 +3479,43 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
         enterWriterValueReader(context);
         long taggedValue;
-        long liveValue;
-        boolean logicallyAbsent;
+        long generation;
+        boolean writerBusy;
+        boolean expired;
+        boolean empty;
         try {
+          if (!winner.isAlive()) {
+            continue;
+          }
           taggedValue = winner.valueAddress;
-          logicallyAbsent = winner.isLogicallyAbsent();
-          liveValue = valueIfLive(winner, taggedValue, deadlineClock.nowNanos());
+          generation = winner.generation();
+          long nowNanos = deadlineClock.nowNanos();
+          long liveValue = valueIfLive(winner, taggedValue, nowNanos);
           if (liveValue != 0L) {
             if (previous != null) {
               previous.value = snapshotValueEntered(context, winner, taggedValue);
             }
             return false;
           }
+          long rawValue = Entry.rawValueAddress(taggedValue);
+          writerBusy = winner.isWriterLocked();
+          empty = rawValue == 0L;
+          expired =
+              !empty && Entry.hasTtl(taggedValue) && ValueBlock.expired(rawValue, nowNanos);
         } finally {
           exit(context);
         }
 
-        long rawValue = Entry.rawValueAddress(taggedValue);
-        if (logicallyAbsent) {
-          // A winning new-key placeholder owns the writer claim until its value publish handoff
-          // completes. An already-published expired mapping can be logically absent without a
-          // writer claim, however; let this writer perform the normal expired unlink so the
-          // replacement does not spin behind a stale CHM node and the listener keeps its cause.
-          if (winner.isWriterLocked()) {
-            awaitWriterRelease(winner);
-          } else if (rawValue != 0L
-              && Entry.hasTtl(taggedValue)
-              && ValueBlock.expired(rawValue, deadlineClock.nowNanos())) {
-            int expiredResult =
-                removeExpiredEntry(context, winner, winner.generation(), taggedValue);
-            if (expiredResult == EXPIRED_WRITER_BUSY) {
-              awaitWriterRelease(winner);
-            }
-          }
-        } else if (rawValue != 0L
-            && Entry.hasTtl(taggedValue)
-            && ValueBlock.expired(rawValue, deadlineClock.nowNanos())) {
-          int expiredResult = removeExpiredEntry(context, winner, winner.generation(), taggedValue);
+        if (writerBusy) {
+          awaitWriterRelease(winner);
+        } else if (expired) {
+          int expiredResult = removeExpiredEntry(context, winner, generation, taggedValue);
           if (expiredResult == EXPIRED_WRITER_BUSY) {
             awaitWriterRelease(winner);
           }
-        } else if (rawValue == 0L) {
+        } else if (empty) {
           if (!removeEntryByIdentity(
-              context, winner, false, null, taggedValue, winner.generation(), false)) {
+              context, winner, false, null, taggedValue, generation, false)) {
             awaitWriterRelease(winner);
           }
         }
@@ -3556,7 +3591,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         if (!entry.isAlive()) {
           return EXPIRED_NOOP;
         }
-        return entry.isWriterLocked() ? EXPIRED_WRITER_BUSY : EXPIRED_NOOP;
+        return writerLockedProtected(context, entry) ? EXPIRED_WRITER_BUSY : EXPIRED_NOOP;
       }
       writerHeld = true;
 
@@ -3977,62 +4012,108 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
    * race without adding a field to Entry. Returns the post-claim state word, or 0 on failure.
    */
   private long awaitWriter(Entry entry) {
-    if (entry == null || !entry.isAlive()) {
+    if (entry == null) {
       return 0L;
     }
-    long claimed = entry.claimWriterStateWord();
-    if (claimed != 0L) {
+    ThreadContext context = contexts.get();
+    long claimed = claimWriterStateWordProtected(context, entry);
+    if (claimed != 0L || !entry.isAlive()) {
       return claimed;
     }
     boolean interrupted = false;
-    synchronized (entry) {
-      while (true) {
-        if (!entry.isAlive()) {
-          break;
-        }
-        claimed = entry.claimWriterStateWord();
-        if (claimed != 0L) {
-          if (interrupted) {
-            Thread.currentThread().interrupt();
+    try {
+      synchronized (entry) {
+        while (true) {
+          boolean wait;
+          enterWriterReader(context);
+          try {
+            if (!entry.isAlive()) {
+              return 0L;
+            }
+            claimed = entry.claimWriterStateWord();
+            if (claimed != 0L) {
+              return claimed;
+            }
+            wait = entry.markWriterWaiter();
+          } finally {
+            exit(context);
           }
-          return claimed;
-        }
-        if (!entry.markWriterWaiter()) {
-          continue;
-        }
-        try {
-          entry.wait();
-        } catch (InterruptedException interruption) {
-          interrupted = true;
+          if (wait) {
+            try {
+              entry.wait();
+            } catch (InterruptedException interruption) {
+              interrupted = true;
+            }
+          }
         }
       }
+    } finally {
+      if (interrupted) {
+        Thread.currentThread().interrupt();
+      }
     }
-    if (interrupted) {
-      Thread.currentThread().interrupt();
-    }
-    return 0L;
   }
 
-  /** Waits only for the current native writer owner to leave; it never claims or mutates Entry. */
+  /** Waits for the current writer without retaining native lifetime protection while parked. */
   private void awaitWriterRelease(Entry entry) {
     if (entry == null) {
       return;
     }
+    ThreadContext context = contexts.get();
     boolean interrupted = false;
-    synchronized (entry) {
-      while (entry.isAlive() && entry.isWriterLocked()) {
-        if (!entry.markWriterWaiter()) {
-          continue;
-        }
-        try {
-          entry.wait();
-        } catch (InterruptedException interruption) {
-          interrupted = true;
+    try {
+      synchronized (entry) {
+        while (true) {
+          boolean wait;
+          enterWriterReader(context);
+          try {
+            if (!entry.isAlive() || !entry.isWriterLocked()) {
+              return;
+            }
+            wait = entry.markWriterWaiter();
+          } finally {
+            exit(context);
+          }
+          if (wait) {
+            try {
+              entry.wait();
+            } catch (InterruptedException interruption) {
+              interrupted = true;
+            }
+          }
         }
       }
+    } finally {
+      if (interrupted) {
+        Thread.currentThread().interrupt();
+      }
     }
-    if (interrupted) {
-      Thread.currentThread().interrupt();
+  }
+
+  private long claimWriterStateWordProtected(ThreadContext context, Entry entry) {
+    enterWriterReader(context);
+    try {
+      return entry.isAlive() ? entry.claimWriterStateWord() : 0L;
+    } finally {
+      exit(context);
+    }
+  }
+
+  private boolean claimMutationRetryProtected(ThreadContext context, Entry entry) {
+    enterWriterReader(context);
+    try {
+      return entry.isAlive() && entry.claimMutationRetry();
+    } finally {
+      exit(context);
+    }
+  }
+
+  private boolean writerLockedProtected(ThreadContext context, Entry entry) {
+    enterWriterReader(context);
+    try {
+      return entry.isAlive() && entry.isWriterLocked();
+    } finally {
+      exit(context);
     }
   }
 
@@ -4117,8 +4198,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   private boolean claimWriter(Entry entry) {
-    boolean claimed = entry.isAlive() && entry.claimWriter();
-    return claimed;
+    return claimWriterStateWordProtected(contexts.get(), entry) != 0L;
   }
 
   @SuppressWarnings("unchecked")
@@ -4144,7 +4224,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return null;
     }
     ensureWriterResources(context);
-    return context.tryEnterWriter() ? context : null;
+    context.enterKey();
+    if (context.tryEnterWriter()) {
+      return context;
+    }
+    context.exitKey();
+    return null;
   }
 
   private void ensureWriterResources(ThreadContext context) {
@@ -4186,6 +4271,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   private void exitWriter(ThreadContext context) {
     context.exitWriter();
+    context.exitKey();
   }
 
   private static void hit(ThreadContext context, Entry entry, long observedValueAddress) {
@@ -4315,7 +4401,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       return MonotonicDeadlineClock.NO_DEADLINE;
     }
     long monotonicNowNanos = deadlineClock.nowNanos();
-    long wallNowMillis = deadlineClock.wallMillisAt(monotonicNowNanos);
+    long wallNowMillis = ticker.currentTimeMillis();
     context.writeCreatedAtMillis(wallNowMillis);
     context.writeMonotonicNowNanos(monotonicNowNanos);
     return deadlineClock.deadlineFromEpochMillis(requestedExpiry, wallNowMillis, monotonicNowNanos);
