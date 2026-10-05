@@ -72,6 +72,7 @@ public final class ThreadContext {
   // Turn-level merged release scratch: per-record provenance across one reclaim wave plus
   // per-segment progress outputs. Indexed by wave-relative record/segment positions.
   private int[] releaseTurnSegmentIndexes;
+  private int[] releaseTurnSegmentBases;
   private long[] releaseTurnEntryWeights;
   private int[] releaseTurnClearedRecords;
   private long[] releaseTurnClearedBytes;
@@ -383,6 +384,8 @@ public final class ThreadContext {
     if (releaseTurnSegmentIndexes != null
         && releaseTurnSegmentIndexes.length >= recordCapacity
         && releaseTurnEntryWeights.length >= recordCapacity
+        && releaseTurnSegmentBases != null
+        && releaseTurnSegmentBases.length >= segmentCapacity
         && releaseTurnClearedRecords != null
         && releaseTurnClearedRecords.length >= segmentCapacity
         && releaseTurnClearedBytes.length >= segmentCapacity
@@ -393,7 +396,11 @@ public final class ThreadContext {
       releaseTurnSegmentIndexes = new int[recordCapacity];
       releaseTurnEntryWeights = new long[recordCapacity];
     }
-    if (releaseTurnClearedRecords == null || releaseTurnClearedRecords.length < segmentCapacity) {
+    if (releaseTurnClearedRecords == null
+        || releaseTurnClearedRecords.length < segmentCapacity
+        || releaseTurnSegmentBases == null
+        || releaseTurnSegmentBases.length < segmentCapacity) {
+      releaseTurnSegmentBases = new int[segmentCapacity];
       releaseTurnClearedRecords = new int[segmentCapacity];
       releaseTurnClearedBytes = new long[segmentCapacity];
       releaseTurnPreZeroRecords = new int[segmentCapacity];
@@ -402,7 +409,11 @@ public final class ThreadContext {
 
   /** Zeroes the wave's per-segment progress outputs; self-ensuring (fresh arrays are zeroed). */
   public void resetReleaseTurnProgress(int segmentCount) {
-    if (releaseTurnClearedRecords == null || releaseTurnClearedRecords.length < segmentCount) {
+    if (releaseTurnClearedRecords == null
+        || releaseTurnClearedRecords.length < segmentCount
+        || releaseTurnSegmentBases == null
+        || releaseTurnSegmentBases.length < segmentCount) {
+      releaseTurnSegmentBases = new int[segmentCount];
       releaseTurnClearedRecords = new int[segmentCount];
       releaseTurnClearedBytes = new long[segmentCount];
       releaseTurnPreZeroRecords = new int[segmentCount];
@@ -417,6 +428,10 @@ public final class ThreadContext {
 
   public int[] releaseTurnSegmentIndexes() {
     return releaseTurnSegmentIndexes;
+  }
+
+  public int[] releaseTurnSegmentBases() {
+    return releaseTurnSegmentBases;
   }
 
   public long[] releaseTurnEntryWeights() {

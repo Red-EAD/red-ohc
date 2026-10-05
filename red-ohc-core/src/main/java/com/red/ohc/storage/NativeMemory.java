@@ -853,16 +853,15 @@ public final class NativeMemory {
         throw new IllegalArgumentException("invalid merged native release wave");
       }
       int total = 0;
-      int[] segmentBases = new int[segmentCount];
       for (int segment = 0; segment < segmentCount; segment++) {
         int tail = segmentTails[segment];
         if (tail < 0) {
           throw new IllegalArgumentException("invalid merged native release tail");
         }
-        segmentBases[segment] = total;
         total += tail;
       }
       context.ensureReleaseTurnScratch(Math.max(1, total), segmentCount);
+      int[] segmentBases = context.releaseTurnSegmentBases();
       context.resetReleaseTurnProgress(segmentCount);
       if (total == 0) {
         return;
@@ -894,6 +893,7 @@ public final class NativeMemory {
         // Phase A: decode every segment's columns into the shared grouping. No side effects.
         int record = 0;
         for (int segment = 0; segment < segmentCount; segment++) {
+          segmentBases[segment] = record;
           int tail = segmentTails[segment];
           long addressesColumn = segmentAddressesColumns[segment];
           long allocationsColumn = segmentAllocationsColumns[segment];

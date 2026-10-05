@@ -886,9 +886,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   private void allocateProbeValue(
-      ThreadContext context, Entry probe, V value, long deadlineNanos, ComputeAttempt<V> attempt) {
-    int valueLength = serializedSize(valueSerializer, value);
-    long allocation = ValueBlock.allocationLength(valueLength);
+      ThreadContext context,
+      Entry probe,
+      V value,
+      int valueLength,
+      long deadlineNanos,
+      long allocation) {
     long address = allocateNative(context, allocation);
     if (address == 0L) {
       nativeAllocationRejected();
@@ -914,9 +917,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     long newAllocation = ValueBlock.allocationLength(valueLength);
     try {
       if (attempt.insertion) {
-        allocateProbeValue(context, entryProbe, attempt.replacement, deadlineNanos, attempt);
+        allocateProbeValue(
+            context, entryProbe, attempt.replacement, valueLength, deadlineNanos, newAllocation);
         attempt.deadlineNanos = deadlineNanos;
-        attempt.replacementAllocation = currentValueAllocation(entryProbe);
+        attempt.replacementAllocation = newAllocation;
         return;
       }
       long replacementLogicalCharge =
