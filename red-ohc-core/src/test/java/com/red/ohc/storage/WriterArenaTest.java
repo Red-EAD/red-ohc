@@ -599,8 +599,8 @@ public class WriterArenaTest {
   public void fiveKiBValuesUseAnExactPooledSizeClass() {
     long valueAllocation = ValueBlock.allocationLength(5_120);
     int sizeClass = SizeClasses.indexForEntry(valueAllocation);
-    Assert.assertEquals(SizeClasses.slotBytes(sizeClass), 5_632);
-    Assert.assertEquals(SizeClasses.pageBytes(sizeClass), 1_441_792);
+    Assert.assertEquals(SizeClasses.slotBytes(sizeClass), 5_248);
+    Assert.assertEquals(SizeClasses.pageBytes(sizeClass), 1_343_488);
     Assert.assertEquals(
         SizeClasses.pageBytes(sizeClass) / SizeClasses.slotBytes(sizeClass), 256);
   }

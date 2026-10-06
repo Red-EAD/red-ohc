@@ -53,7 +53,7 @@ public final class SizeClasses {
   }
 
   private static int[] createSlots() {
-    int[] slots = new int[87];
+    int[] slots = new int[111];
     int cursor = 0;
     for (int value = 128; value <= 1024; value += 32) {
       slots[cursor++] = value;
@@ -62,13 +62,14 @@ public final class SizeClasses {
       slots[cursor++] = value;
     }
     slots[cursor++] = 4128;
-    for (int value = 4608; value <= 5120; value += 512) {
+    for (int value = 4608; value <= 5120; value += 256) {
       slots[cursor++] = value;
     }
     slots[cursor++] = 5152;
-    for (int value = 5632; value <= 16384; value += 512) {
+    for (int value = 5248; value <= 16384; value += 256) {
       slots[cursor++] = value;
     }
+    slots[cursor++] = 16384;
     for (int value = 18432; value <= 32768; value += 2048) {
       slots[cursor++] = value;
     }
