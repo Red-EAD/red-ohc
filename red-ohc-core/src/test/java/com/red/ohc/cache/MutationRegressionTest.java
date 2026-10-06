@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.annotations.DataProvider;
@@ -81,6 +82,119 @@ public final class MutationRegressionTest {
     Field field = owner.getClass().getDeclaredField(name);
     field.setAccessible(true);
     return field.get(owner);
+  }
+
+  @DataProvider
+  public Object[][] replacementExpiryModes() {
+    return new Object[][] {{false}, {true}};
+  }
+
+  @Test(dataProvider = "replacementExpiryModes", timeOut = 10_000L)
+  public void expiredContainsKeyCannotDebitAValueReplacedBeforeItsWriterClaim(boolean ttl)
+      throws Exception {
+    AtomicLong now = new AtomicLong();
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return TimeUnit.MILLISECONDS.toNanos(now.get());
+          }
+
+          @Override
+          public long currentTimeMillis() {
+            return now.get();
+          }
+        };
+    ExecutorService caller = Executors.newSingleThreadExecutor();
+    withCache(
+        STRING,
+        ticker,
+        cache -> {
+          cache.put("a", "old", 10L);
+          cache.flushAsync().join();
+          Entry entry = cache.data.values().iterator().next();
+          MaintenanceEventLoop worker = (MaintenanceEventLoop) field(cache, "worker");
+          CountDownLatch actorPaused = new CountDownLatch(1);
+          CountDownLatch resumeActor = new CountDownLatch(1);
+          CountDownLatch beforeClaim = new CountDownLatch(1);
+          CountDownLatch resumeReader = new CountDownLatch(1);
+          CompletableFuture<Void> actorDone = new CompletableFuture<>();
+          AtomicReference<Thread> reader = new AtomicReference<>();
+          AtomicBoolean armed = new AtomicBoolean(true);
+          Field contextsField = OffHeapCache.class.getDeclaredField("contexts");
+          contextsField.setAccessible(true);
+          @SuppressWarnings("unchecked")
+          ThreadLocal<ThreadContext> original =
+              (ThreadLocal<ThreadContext>) contextsField.get(cache);
+          ThreadLocal<ThreadContext> observed =
+              new ThreadLocal<ThreadContext>() {
+                @Override
+                public ThreadContext get() {
+                  if (Thread.currentThread() == reader.get() && armed.get()) {
+                    boolean completingExpiry = false;
+                    boolean claimingWriter = false;
+                    for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
+                      if (!frame.getClassName().equals(OffHeapCache.class.getName())) {
+                        continue;
+                      }
+                      completingExpiry |=
+                          frame.getMethodName().equals("completeExpiredReadAfterReader");
+                      claimingWriter |= frame.getMethodName().equals("claimWriter");
+                    }
+                    if (completingExpiry && claimingWriter && armed.compareAndSet(true, false)) {
+                      beforeClaim.countDown();
+                      await(resumeReader);
+                    }
+                  }
+                  return original.get();
+                }
+              };
+          try {
+            assertTrue(
+                worker.submitActorTaskForTest(
+                    () -> {
+                      actorPaused.countDown();
+                      try {
+                        await(resumeActor);
+                        actorDone.complete(null);
+                      } catch (Throwable failure) {
+                        actorDone.completeExceptionally(failure);
+                      }
+                    },
+                    actorDone::completeExceptionally));
+            assertTrue(actorPaused.await(2L, TimeUnit.SECONDS));
+            contextsField.set(cache, observed);
+            now.set(20L);
+            Future<Boolean> contains =
+                caller.submit(
+                    () -> {
+                      reader.set(Thread.currentThread());
+                      return cache.containsKey("a");
+                    });
+            assertTrue(beforeClaim.await(2L, TimeUnit.SECONDS));
+            if (ttl) {
+              cache.put("a", "fresh", 1_000L);
+            } else {
+              cache.put("a", "fresh");
+            }
+            assertSame(cache.data.values().iterator().next(), entry);
+            assertEquals(cache.size(), 1);
+            resumeReader.countDown();
+            assertFalse(contains.get(2L, TimeUnit.SECONDS));
+            assertEquals(cache.get("a"), "fresh", "the stale expiry must not hide the replacement");
+            assertEquals(cache.size(), 1, "the stale expiry must not debit the replacement");
+            resumeActor.countDown();
+            actorDone.get(2L, TimeUnit.SECONDS);
+            cache.flushAsync().get(2L, TimeUnit.SECONDS);
+            assertEquals(cache.get("a"), "fresh");
+            assertEquals(cache.size(), 1);
+          } finally {
+            resumeReader.countDown();
+            resumeActor.countDown();
+            contextsField.set(cache, original);
+          }
+        },
+        caller);
   }
 
   @Test(timeOut = 10_000L)

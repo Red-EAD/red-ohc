@@ -3974,6 +3974,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           return;
         }
         writerHeld = true;
+        if (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)) {
+          return;
+        }
         long value = Entry.rawValueAddress(expectedTaggedValue);
         if (Entry.hasTtl(expectedTaggedValue)
             && value != 0L

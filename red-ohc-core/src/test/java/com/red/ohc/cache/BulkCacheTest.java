@@ -1118,6 +1118,7 @@ public class BulkCacheTest {
           skippedClaimedEntry =
               secondKeySerialized.await(500L, java.util.concurrent.TimeUnit.MILLISECONDS);
         } finally {
+          claimedEntry = null;
           entry.finishWriter();
         }
         CacheTestSupport.awaitCaller(remover);
@@ -1135,10 +1136,19 @@ public class BulkCacheTest {
         cacheFailure9 = cacheOperationFailure;
         throw cacheOperationFailure;
       } finally {
-        if (claimedEntry != null && claimedEntry.isWriterLocked()) {
-          claimedEntry.finishWriter();
+        try {
+          if (claimedEntry != null) {
+            claimedEntry.finishWriter();
+          }
+        } catch (Throwable cleanupFailure) {
+          if (cacheFailure9 == null) {
+            cacheFailure9 = cleanupFailure;
+            throw cleanupFailure;
+          }
+          cacheFailure9.addSuppressed(cleanupFailure);
+        } finally {
+          CacheTestSupport.stopAfterCallers(cache, cacheFailure9, remover);
         }
-        CacheTestSupport.stopAfterCallers(cache, cacheFailure9, remover);
       }
     }
   }
