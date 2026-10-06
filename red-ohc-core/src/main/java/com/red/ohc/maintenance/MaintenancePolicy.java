@@ -17,6 +17,7 @@ public final class MaintenancePolicy implements AutoCloseable {
   private static final long S3_SMALL_TARGET_DIVISOR = 10L;
   private static final long S3_SKIP_WEIGHT_DIVISOR = 4L;
   private static final int S3_SMALL_PROMOTION_HITS = 2;
+  private static final int S3_ACCESS_COUNT_SATURATION = 3;
   private static final int S3_GHOST_TO_MAIN_HITS = 1;
   private static final int GHOST_INSERT_TRIM_ATTEMPTS = 8;
   private static final double HILL_INITIAL_STEP_PERCENT = 0.0625d;
@@ -214,7 +215,7 @@ public final class MaintenancePolicy implements AutoCloseable {
         break;
       case Entry.POLICY_S3_SMALL:
       case Entry.POLICY_S3_MAIN:
-        setPolicyAccessCount(entry, accessCountOf(entry) + 1);
+        applyS3AccessCount(entry);
         break;
       case Entry.POLICY_S4_SKIP:
         skipSuppressedAccesses++;
@@ -239,6 +240,20 @@ public final class MaintenancePolicy implements AutoCloseable {
         break;
       default:
     }
+  }
+
+  /** Applies the common S3 hit with one link resolution; saturated counts skip both mirrors. */
+  private void applyS3AccessCount(Entry entry) {
+    int linkId = entry.policyLinkId();
+    if (linkId == 0) {
+      return;
+    }
+    int count = links.policyAccessCount(linkId);
+    if (count >= S3_ACCESS_COUNT_SATURATION) {
+      return;
+    }
+    entry.policyAccessCount(count + 1);
+    links.policyAccessCount(linkId, count + 1);
   }
 
   public void remove(Entry entry, boolean eviction) {
