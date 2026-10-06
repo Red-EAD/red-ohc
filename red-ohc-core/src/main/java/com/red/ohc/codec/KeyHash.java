@@ -10,13 +10,21 @@ public final class KeyHash {
   private static final long P1 = 0xe7037ed1a0b428dbL;
   private static final long P2 = 0x8ebc6af09c88c6e3L;
   private static final long P3 = 0xa0761d6478bd642fL;
+  private static final long P4 = 0xc2b2ae3d27d4eb4fL;
 
   /**
    * Head and tail overlapping reads cover every length; middle bytes fold through a
-   * multiplyHigh pair so each chunk diffuses into all 64 bits. Only bytes inside
+   * multiplyHigh pair so each chunk diffuses into all 64 bits. Long keys run two independent
+   * lanes, halving the serial multiply chain where it dominates. Only bytes inside
    * [offset, offset+length) are read: the caller's buffer is reused.
    */
   public static int hash(byte[] bytes, int offset, int length) {
+    return length >= 64
+        ? hashLong(bytes, offset, length)
+        : hashShort(bytes, offset, length);
+  }
+
+  private static int hashShort(byte[] bytes, int offset, int length) {
     long a;
     long b;
     long m = 0L;
@@ -50,6 +58,38 @@ public final class KeyHash {
     }
     long x = a ^ m ^ P1 ^ length;
     long y = b ^ P2;
+    long folded = (x * y) ^ Math.multiplyHigh(x, y);
+    return (int) folded;
+  }
+
+  private static int hashLong(byte[] bytes, int offset, int length) {
+    long a = NativeMemory.getLong(bytes, offset);
+    long b = NativeMemory.getLong(bytes, offset + length - 8);
+    int end = offset + length - 8;
+    int index = offset + 8;
+    long m1 = 0L;
+    long m2 = 0L;
+    while (index + 16 <= end) {
+      long t1 = m1 ^ NativeMemory.getLong(bytes, index);
+      m1 = (t1 * P3) ^ Math.multiplyHigh(t1, P3);
+      long t2 = m2 ^ NativeMemory.getLong(bytes, index + 8);
+      m2 = (t2 * P4) ^ Math.multiplyHigh(t2, P4);
+      index += 16;
+    }
+    if (index + 8 <= end) {
+      long t = m1 ^ NativeMemory.getLong(bytes, index);
+      m1 = (t * P3) ^ Math.multiplyHigh(t, P3);
+      index += 8;
+    }
+    long partial = 0L;
+    for (; index < end; index++) {
+      partial = (partial << 8) | (bytes[index] & 0xffL);
+    }
+    if (partial != 0L) {
+      m1 ^= (partial * P3) ^ Math.multiplyHigh(partial, P3);
+    }
+    long x = a ^ m1 ^ P1 ^ length;
+    long y = b ^ m2 ^ P2;
     long folded = (x * y) ^ Math.multiplyHigh(x, y);
     return (int) folded;
   }

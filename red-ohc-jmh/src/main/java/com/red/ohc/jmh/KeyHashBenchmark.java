@@ -25,7 +25,7 @@ import com.red.ohc.codec.KeyHash;
 @Fork(1)
 @State(Scope.Benchmark)
 public class KeyHashBenchmark {
-  @Param({"16", "32"})
+  @Param({"16", "32", "1024"})
   public int keyBytes;
 
   private byte[][] keys;

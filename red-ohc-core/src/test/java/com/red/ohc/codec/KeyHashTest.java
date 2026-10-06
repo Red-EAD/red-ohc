@@ -262,4 +262,35 @@ public final class KeyHashTest {
       }
     }
   }
+
+  @Test
+  public void binSpreadAcrossPowerOfTwoTablesStaysNearThePoissonFloor() {
+    Random random = new Random(0x5eed);
+    int keys = 1 << 20;
+    int buckets = 1 << 20;
+    for (int keyLength : new int[] {32, 1024}) {
+      byte[] key = new byte[keyLength];
+      int[] bins = new int[buckets];
+      for (int index = 0; index < keys; index++) {
+        random.nextBytes(key);
+        int hash = KeyHash.hash(key, 0, key.length);
+        int spread = hash ^ (hash >>> 16);
+        bins[spread & (buckets - 1)]++;
+      }
+      int empty = 0;
+      int max = 0;
+      for (int count : bins) {
+        if (count == 0) {
+          empty++;
+        }
+        max = Math.max(max, count);
+      }
+      // One million draws over one million buckets: the empty fraction sits near e^-1 and the
+      // deepest bin stays in the single digits for a well-mixed 32-bit spread.
+      double emptyFraction = (double) empty / buckets;
+      assertTrue(emptyFraction > 0.34 && emptyFraction < 0.40,
+          "len=" + keyLength + " empty=" + emptyFraction);
+      assertTrue(max <= 14, "len=" + keyLength + " max=" + max);
+    }
+  }
 }
