@@ -1338,45 +1338,65 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean deferMaintenanceWake,
       int hash) {
     // Get-first: probe with the encoded key before building an insert candidate; a live hit
-    // routes straight to the replace transaction. The probe runs under a reader scope like
-    // the insert's putIfAbsent — equals reads the resident entry's native key block.
-    Entry existing;
-    enterWriterReader(context);
-    try {
-      existing = data.get(lookup);
-    } finally {
-      exit(context);
+    // routes straight to the replace transaction. The serialized value block is prepared before
+    // the probe so the probe scope can also claim the live hit's writer, and so a miss reuses
+    // the block as the insert candidate's value instead of serializing twice.
+    long prepared =
+        allocateReplacement(context, value, valueLength, deadlineNanos, valueAllocation);
+    if (prepared == 0L) {
+      nativeAllocationRejected();
+      throw new IllegalStateException("native allocation failed while writing cache entry");
     }
-    if (existing != null && existing.isAlive()) {
-      if (replaceExistingResolvedResult(
+    boolean handedOff = false;
+    try {
+      Entry existing = null;
+      long claimedStateWord = 0L;
+      enterWriterReader(context);
+      try {
+        existing = data.get(lookup);
+        if (existing != null && existing.isAlive()) {
+          claimedStateWord = existing.claimWriterStateWord();
+        }
+      } finally {
+        exit(context);
+      }
+      handedOff = true;
+      if (existing != null && existing.isAlive()) {
+        if (replaceExistingResolvedResult(
+            context,
+            existing,
+            value,
+            valueLength,
+            valueAllocation,
+            deadlineNanos,
+            deferMaintenanceWake,
+            claimedStateWord,
+            prepared)) {
+          return true;
+        }
+        // The replace revalidation rejected the entry (claimed, retired, or replaced
+        // concurrently); its rollback already freed the prepared block, so the insert path
+        // builds a fresh candidate from scratch.
+        prepared = 0L;
+      }
+      return insertNewEntry(
           context,
-          existing,
+          hash,
+          keyBytes,
+          keyLength,
           value,
           valueLength,
+          keyAllocation,
           valueAllocation,
+          charge,
           deadlineNanos,
           deferMaintenanceWake,
-          0L)) {
-        return true;
+          prepared);
+    } finally {
+      if (!handedOff) {
+        rollbackReplacement(prepared, valueAllocation);
       }
-      // The replace revalidation rejected the entry (claimed, retired, or replaced
-      // concurrently); the insert path re-resolves from scratch.
     }
-    // Prepare the value before the CHM operation and let the insertion decide whether this is
-    // a new mapping or a replacement; a collision reuses the prepared value in the existing
-    // replacement transaction.
-    return insertNewEntry(
-        context,
-        hash,
-        keyBytes,
-        keyLength,
-        value,
-        valueLength,
-        keyAllocation,
-        valueAllocation,
-        charge,
-        deadlineNanos,
-        deferMaintenanceWake);
   }
 
   private boolean replaceExistingResolvedResult(
@@ -1387,6 +1407,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long newAllocation,
       long deadlineNanos,
       boolean deferMaintenanceWake,
+      long claimedStateWord,
       long preparedReplacement) {
     int result =
         replaceExisting(
@@ -1397,6 +1418,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             deadlineNanos,
             deferMaintenanceWake,
             newAllocation,
+            claimedStateWord,
             preparedReplacement);
     if (result < 0) {
       throw new IllegalStateException("cache write failed");
@@ -1415,7 +1437,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long valueAllocation,
       long charge,
       long deadlineNanos,
-      boolean deferMaintenanceWake) {
+      boolean deferMaintenanceWake,
+      long preparedValueAddress) {
     Entry candidate =
         allocateEntry(
             context,
@@ -1426,7 +1449,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             valueLength,
             deadlineNanos,
             keyAllocation,
-            valueAllocation);
+            valueAllocation,
+            preparedValueAddress);
     if (candidate == null) {
       throw new IllegalStateException("native allocation failed while preparing cache entry");
     }
@@ -1532,6 +1556,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           valueAllocation,
           deadlineNanos,
           deferMaintenanceWake,
+          0L,
           preparedReplacement);
     } finally {
       cleanupInsertFirstCandidate(
@@ -1856,6 +1881,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long deadlineNanos,
       boolean deferMaintenanceWake,
       long newAllocation,
+      long claimedStateWord,
       long preparedReplacement) {
     return replaceExistingOnce(
         context,
@@ -1865,6 +1891,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         deadlineNanos,
         deferMaintenanceWake,
         newAllocation,
+        claimedStateWord,
         preparedReplacement,
         null,
         0L,
@@ -1890,6 +1917,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         deadlineNanos,
         deferMaintenanceWake,
         newAllocation,
+        0L,
         preparedReplacement,
         null,
         expectedTaggedValue,
@@ -1916,6 +1944,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         deadlineNanos,
         deferMaintenanceWake,
         newAllocation,
+        0L,
         preparedReplacement,
         previous,
         expectedTaggedValue,
@@ -1930,6 +1959,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long deadlineNanos,
       boolean deferMaintenanceWake,
       long newAllocation,
+      long preclaimedStateWord,
       long preparedReplacement,
       PreviousValue<Object> previous,
       long expectedTaggedValue,
@@ -1952,7 +1982,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
       long newTaggedValue =
           Entry.tagValueAddress(replacement, deadlineNanos != MonotonicDeadlineClock.NO_DEADLINE);
-      long claimedStateWord = awaitWriter(entry);
+      long claimedStateWord =
+          preclaimedStateWord != 0L ? preclaimedStateWord : awaitWriter(entry);
       if (claimedStateWord == 0L) {
         return 0;
       }
@@ -2481,7 +2512,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int valueLength,
       long deadlineNanos,
       long keyAllocation,
-      long valueAllocation) {
+      long valueAllocation,
+      long preparedValueAddress) {
     worker.throwIfUnavailable();
     return allocateEntryAfterReserve(
         context,
@@ -2492,7 +2524,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         valueLength,
         deadlineNanos,
         keyAllocation,
-        valueAllocation);
+        valueAllocation,
+        preparedValueAddress);
   }
 
   private Entry allocateEntryAfterReserve(
@@ -2504,25 +2537,29 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       int valueLength,
       long deadlineNanos,
       long keyAllocation,
-      long valueAllocation) {
+      long valueAllocation,
+      long preparedValueAddress) {
     long keyAddress = 0L;
-    long valueAddress = 0L;
+    long valueAddress = preparedValueAddress;
     try {
       keyAddress = allocateNative(context, keyAllocation);
       if (keyAddress == 0L) {
         nativeAllocationRejected();
+        rollbackReplacement(valueAddress, valueAllocation);
         return null;
       }
       NativeMemory.copy(keyBytes, 0, keyAddress, keyLength);
-      valueAddress = allocateNative(context, valueAllocation);
-      if (valueAddress == 0L) {
-        nativeAllocationRejected();
-        freeBlock(keyAddress, keyAllocation);
-        keyAddress = 0L;
-        return null;
+      if (preparedValueAddress == 0L) {
+        valueAddress = allocateNative(context, valueAllocation);
+        if (valueAddress == 0L) {
+          nativeAllocationRejected();
+          freeBlock(keyAddress, keyAllocation);
+          keyAddress = 0L;
+          return null;
+        }
+        initializeValueBlock(context, valueAddress, deadlineNanos, valueLength);
+        writeValue(context, ValueBlock.payloadAddress(valueAddress), value, valueLength);
       }
-      initializeValueBlock(context, valueAddress, deadlineNanos, valueLength);
-      writeValue(context, ValueBlock.payloadAddress(valueAddress), value, valueLength);
       Entry entry =
           new Entry(
               keyAddress,
@@ -3416,7 +3453,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                 valueLength,
                 deadlineNanos,
                 keyAllocation,
-                valueAllocation);
+                valueAllocation,
+                0L);
         if (candidate == null) {
           throw new IllegalStateException("native allocation failed while preparing cache entry");
         }
