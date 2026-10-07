@@ -648,6 +648,98 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   @Test
+  public void removalProbeProtectsReplaceableNativeValues() throws Exception {
+    OffHeapCache<String, String> cache = newCache(Ticker.DEFAULT, 1_000L);
+    Throwable failure = null;
+    try {
+      cache.put("key", "value");
+      RemovalProtectionMap map = new RemovalProtectionMap(readers(cache), context(cache), true);
+      map.putAll(cache.dataForTest());
+      replaceDataMaps(cache, map);
+
+      assertTrue(cache.removeIfPresent("key"));
+      assertTrue(map.checkedProbe);
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
+    } finally {
+      CacheTestSupport.stop(cache, failure);
+    }
+  }
+
+  @Test
+  public void removalIdentityLookupProtectsCollisionKeys() throws Exception {
+    OffHeapCache<String, String> cache = newCache();
+    Throwable failure = null;
+    try {
+      // These equal-length serialized keys share the canonical 32-bit hash.
+      String first = "085bba11604b2d7b";
+      String second = "6c3494923b494c1d";
+      cache.put(first, "first");
+      cache.put(second, "second");
+      Iterator<Entry> entries = cache.dataForTest().values().iterator();
+      assertEquals(entries.next().keyHash(), entries.next().keyHash());
+      RemovalProtectionMap map = new RemovalProtectionMap(readers(cache), context(cache), false);
+      map.putAll(cache.dataForTest());
+      replaceDataMaps(cache, map);
+
+      assertTrue(cache.removeIfPresent(second));
+      assertTrue(map.checkedIdentity);
+      assertTrue(map.checkedRemoval);
+      assertEquals(cache.get(first), "first");
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
+    } finally {
+      CacheTestSupport.stop(cache, failure);
+    }
+  }
+
+  @Test
+  public void removalSlowClaimDiscardsDeadlineFromRecycledValueAddress() throws Exception {
+    MutableTicker ticker = new MutableTicker(10_000L);
+    OffHeapCache<String, String> cache = newCache(ticker, 1_000L);
+    Throwable failure = null;
+    try {
+      cache.put("key", "fresh");
+      ticker.setMillis(10_001L);
+      Entry entry = cache.dataForTest().values().iterator().next();
+      ThreadContext context = context(cache);
+      Method remove =
+          OffHeapCache.class.getDeclaredMethod(
+              "removeEntryByIdentity",
+              ThreadContext.class,
+              Entry.class,
+              boolean.class,
+              Class.forName("com.red.ohc.cache.OffHeapCache$PreviousValue"),
+              long.class,
+              long.class,
+              long.class,
+              long.class,
+              long.class,
+              boolean.class);
+      remove.setAccessible(true);
+      // Model an ABA after a failed probe claim: the address is equal, but the cached deadline
+      // belongs to an expired previous value. The newly published value is still live.
+      assertTrue(context.tryEnterWriter());
+      try {
+        assertEquals(
+            remove.invoke(cache, context, entry, false, null, entry.valueAddress, 1L, 0L,
+                0L, -1L, true),
+            Boolean.TRUE);
+      } finally {
+        context.exitWriter();
+      }
+      assertEquals(cache.size(), 0L);
+    } catch (Throwable operationFailure) {
+      failure = operationFailure;
+      throw operationFailure;
+    } finally {
+      CacheTestSupport.stop(cache, failure);
+    }
+  }
+
+  @Test
   public void computeInsertionFailureBeforeChmPublicationDoesNotLeakLogicalCount()
       throws Exception {
     {
@@ -1485,6 +1577,55 @@ public final class ConcurrentMapBehaviorTest {
         com.red.ohc.index.Entry key, com.red.ohc.index.Entry value) {
       putIfAbsentCalls.incrementAndGet();
       return super.putIfAbsent(key, value);
+    }
+  }
+
+  private static final class RemovalProtectionMap
+      extends ConcurrentHashMap<com.red.ohc.index.Entry, com.red.ohc.index.Entry> {
+    private final ReaderRegistry readers;
+    private final ThreadContext context;
+    private final Thread owner = Thread.currentThread();
+    private final boolean checkProbe;
+    private boolean checkedProbe;
+    private boolean checkedIdentity;
+    private boolean checkedRemoval;
+
+    private RemovalProtectionMap(
+        ReaderRegistry readers, ThreadContext context, boolean checkProbe) {
+      this.readers = readers;
+      this.context = context;
+      this.checkProbe = checkProbe;
+    }
+
+    @Override
+    public com.red.ohc.index.Entry get(Object key) {
+      if (Thread.currentThread() == owner) {
+        long state = readers.readerSequence(context.slot);
+        if (key instanceof com.red.ohc.index.Entry) {
+          assertTrue((state & 1L) != 0L, "native collision lookup must be reader-protected");
+          checkedIdentity = true;
+        } else if (checkProbe) {
+          assertTrue(
+              (state & ReaderRegistry.VALUE_PROTECTION_BIT) != 0L,
+              "removal probe must protect values before capturing their address");
+          checkedProbe = true;
+        }
+      }
+      return super.get(key);
+    }
+
+    @Override
+    public com.red.ohc.index.Entry compute(
+        com.red.ohc.index.Entry key,
+        BiFunction<? super com.red.ohc.index.Entry, ? super com.red.ohc.index.Entry,
+            ? extends com.red.ohc.index.Entry> fn) {
+      if (Thread.currentThread() == owner) {
+        assertTrue(
+            (readers.readerSequence(context.slot) & 1L) != 0L,
+            "native collision removal must be reader-protected");
+        checkedRemoval = true;
+      }
+      return super.compute(key, fn);
     }
   }
 

@@ -427,12 +427,18 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         Entry entry;
         long expectedTaggedValue;
         long expectedGeneration;
+        long preReadDeadline;
         try {
           entry = data.get(context.lookupKey);
-          if (entry == null || valueIfLive(entry) == 0L) {
+          if (entry == null) {
             return false;
           }
           expectedTaggedValue = entry.valueAddress;
+          preReadDeadline = preReadValueDeadline(expectedTaggedValue);
+          if (valueIfLive(entry, expectedTaggedValue, preReadDeadline, deadlineClock.nowNanos())
+              == 0L) {
+            return false;
+          }
           expectedGeneration = entry.generation();
           V current = snapshotValueEntered(context, entry, expectedTaggedValue);
           if (!Objects.equals(value, current)) {
@@ -441,7 +447,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         } finally {
           exit(context);
         }
-        if (removeEntryByIdentity(context, entry, false, expectedTaggedValue, expectedGeneration)) {
+        if (removeEntryByIdentity(
+            context, entry, false, expectedTaggedValue, expectedGeneration, preReadDeadline)) {
           return true;
         }
         // The identity helper rejects stale versions to prevent ABA. Re-read the Java mapping
@@ -2638,11 +2645,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     Entry entry;
     long probedTaggedValue;
     long preReadDeadline;
+    long claimedStateWord;
     try {
       entry = data.get(context.lookupKey);
       probedTaggedValue = entry == null ? 0L : entry.valueAddress;
       preReadDeadline =
           entry == null ? 0L : preReadValueDeadline(probedTaggedValue);
+      // Keep the replaceable value protected until the initial writer claim is attempted.
+      claimedStateWord = entry == null ? 0L : entry.claimWriterStateWord();
     } finally {
       exit(context);
     }
@@ -2654,6 +2664,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
             previous,
             probedTaggedValue,
             preReadDeadline,
+            claimedStateWord,
             0L,
             -1L,
             true);
@@ -2662,7 +2673,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   private boolean removeEntryByIdentity(
       ThreadContext context, Entry entry, boolean deferMaintenanceWake) {
     return removeEntryByIdentity(
-        context, entry, deferMaintenanceWake, null, 0L, 0L, 0L, -1L, true);
+        context, entry, deferMaintenanceWake, null, 0L, 0L, 0L, 0L, -1L, true);
   }
 
   private boolean removeEntryByIdentity(
@@ -2671,7 +2682,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean deferMaintenanceWake,
       PreviousValue<Object> previous) {
     return removeEntryByIdentity(
-        context, entry, deferMaintenanceWake, previous, 0L, 0L, 0L, -1L, true);
+        context, entry, deferMaintenanceWake, previous, 0L, 0L, 0L, 0L, -1L, true);
   }
 
   private boolean removeEntryByIdentity(
@@ -2679,13 +2690,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry entry,
       boolean deferMaintenanceWake,
       long expectedTaggedValue,
-      long expectedGeneration) {
+      long expectedGeneration,
+      long preReadDeadline) {
     return removeEntryByIdentity(
         context,
         entry,
         deferMaintenanceWake,
         null,
-        0L,
+        expectedTaggedValue,
+        preReadDeadline,
         0L,
         expectedTaggedValue,
         expectedGeneration,
@@ -2699,11 +2712,27 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       PreviousValue<Object> previous,
       long probedTaggedValue,
       long preReadDeadline,
+      long claimedStateWord,
       long expectedTaggedValue,
       long expectedGeneration,
       boolean requireLiveMapping) {
-    enterWriterValueReader(context);
+    if (claimedStateWord == 0L) {
+      if (awaitWriter(entry) == 0L) {
+        return false;
+      }
+      if (expectedTaggedValue == 0L) {
+        // A failed probe claim ends value protection before waiting. Native addresses can be
+        // recycled in that gap; only the conditional path also validates the old generation.
+        probedTaggedValue = 0L;
+        preReadDeadline = 0L;
+      }
+    }
+    boolean removeAttemptStarted = false;
+    boolean readerEntered = false;
     try {
+      // Owning this entry does not protect other native keys traversed by a CHM collision lookup.
+      enterWriterReader(context);
+      readerEntered = true;
       if (!entry.isAlive()
           || data.get(entry) != entry
           || (expectedTaggedValue != 0L
@@ -2711,27 +2740,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
                   || entry.generation() != expectedGeneration))) {
         return false;
       }
-    } finally {
-      exit(context);
-    }
-
-    if (awaitWriter(entry) == 0L) {
-      return false;
-    }
-    if (expectedTaggedValue == 0L) {
-      // The probe protection ended before the claim; a recycled address cannot identify its
-      // previous immutable deadline without a matching generation.
-      probedTaggedValue = 0L;
-      preReadDeadline = 0L;
-    }
-    boolean removeAttemptStarted = false;
-    boolean readerEntered = false;
-    try {
-      enterWriterValueReader(context);
-      readerEntered = true;
-      // A mapping-state change completed while this thread waited for the writer claim is
-      // caught by removeEntryIfSame's identity gate inside the removal transaction; the
-      // per-entry claim already serializes every unlink, retire, and replace.
       if (expectedTaggedValue != 0L
           && (!Entry.samePublishedValue(entry.valueAddress, expectedTaggedValue)
               || entry.generation() != expectedGeneration)) {
@@ -2764,7 +2772,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   private boolean clearEntryByIdentity(ThreadContext context, Entry entry) {
-    return removeEntryByIdentity(context, entry, true, null, 0L, 0L, 0L, -1L, false);
+    return removeEntryByIdentity(context, entry, true, null, 0L, 0L, 0L, 0L, -1L, false);
   }
 
   /** Removes a claimed entry without holding a cache-wide gate across the CHM transition. */
@@ -3611,7 +3619,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           }
         } else if (empty) {
           if (!removeEntryByIdentity(
-              context, winner, false, null, 0L, 0L, taggedValue, generation, false)) {
+              context, winner, false, null, 0L, 0L, 0L, taggedValue, generation, false)) {
             awaitWriterRelease(winner);
           }
         }
