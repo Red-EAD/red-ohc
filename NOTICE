@@ -1,0 +1,11 @@
+Red OHC
+https://github.com/Red-EAD/red-ohc
+
+This project is distributed under the Apache License, Version 2.0.
+
+The byte-array serialization utility retains Apache-licensed source from
+the OHC project by Robert Stupp. Existing source copyright/license headers
+are retained. See https://github.com/snazy/ohc for that upstream project.
+
+Benchmark-only third-party dependencies are independent projects with their
+own licenses. They are not included in the published Red OHC core artifact.

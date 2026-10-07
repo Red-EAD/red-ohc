@@ -9,3 +9,8 @@ dependency-reduced-pom.xml
 hs_err_*.log
 
 batch-bench
+
+__pycache__/
+*.pyc
+benchmark-results/
+.mvn/wrapper/maven-wrapper.jar
