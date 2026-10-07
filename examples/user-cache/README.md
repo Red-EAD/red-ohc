@@ -1,16 +1,23 @@
-# User cache / 用户缓存
+# User cache
 
-This standalone Java process creates one shared cache with 128 MiB logical
-capacity, S3-FIFO and a 60-second TTL, then verifies put/get/replace/remove.
-The UTF-8 serializer owns returned strings. The process exits after the example;
-the same cache should be retained at application scope in a server.
+A standalone application creates one shared 128 MiB cache with the S3-FIFO
+selector and a 60-second default TTL. Its checks cover put/get, overwrite and
+remove, using a complete UTF-8 serializer.
 
-从仓库根目录运行，先将当前开发版安装到本机 Maven 仓库：
+Run these commands from the repository root. The example uses a separate JVM:
 
 ```bash
 ./mvnw -B -DskipTests install
 ./mvnw -B -f examples/user-cache/pom.xml compile exec:exec
 ```
 
-After the stable release is available, use `-Dred-ohc.version=1.0.0` and omit
-the local install. No custom Maven repository is needed.
+Expected output:
+
+```text
+Red OHC: put/get/replace/remove succeeded
+```
+
+Prerequisites, Windows commands, dependency setup and the complete source are in
+[quick start](../../docs/quickstart.md).
+In a server, retain the cache at application scope. This example ends by exiting
+its process; it does not expose an application cache shutdown operation.

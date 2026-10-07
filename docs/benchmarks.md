@@ -99,5 +99,4 @@ Invocation benchmarks retain their internal stop/join/native-accounting teardown
 Preparation does not establish benchmark correctness under long contention,
 cross-platform native compatibility or Linux x86-64 performance. Run dedicated
 Linux experiments after approval, retain all rounds, investigate stable regressions
-and publish limitations alongside results. No performance measurements are run
-as part of the local preparation task.
+and publish limitations alongside results. No comparative performance result is published yet.
