@@ -1,0 +1,17 @@
+name: Bug report
+description: Report a reproducible cache or tooling defect
+body:
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Problem and minimal reproducer
+      description: Include expected and actual behavior. Do not include secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Red OHC version, JDK, OS/architecture, key/value sizes and concurrency
+    validations:
+      required: true

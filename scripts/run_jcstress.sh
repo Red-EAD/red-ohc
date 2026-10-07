@@ -7,7 +7,7 @@ OUTPUT_DIR=${1:-"$REPO_ROOT/red-ohc-core/target/jcstress"}
 JAVA_BIN=${JAVA_BIN:-}
 JAVAC_BIN=${JAVAC_BIN:-}
 JAR_BIN=${JAR_BIN:-}
-MAVEN_BIN=${MAVEN_BIN:-mvn}
+MAVEN_BIN=${MAVEN_BIN:-"$REPO_ROOT/mvnw"}
 ITERATIONS=${RED_OHC_JCSTRESS_ITERATIONS:-1}
 MODE=${RED_OHC_JCSTRESS_MODE:-sanity}
 CPUS=${RED_OHC_JCSTRESS_CPUS:-2}
@@ -42,8 +42,9 @@ mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
 mkdir -p "$OUTPUT_DIR/classes" "$OUTPUT_DIR/report"
 CP_FILE="$OUTPUT_DIR/maven-classpath.txt"
-"$MAVEN_BIN" -q -pl red-ohc-core dependency:build-classpath \
-  -Dmdep.includeScope=test \
+cd "$REPO_ROOT"
+"$MAVEN_BIN" -q -pl red-ohc-core -am -DskipTests compile org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath \
+  -DincludeScope=test \
   -Dmdep.outputFile="$CP_FILE"
 MAVEN_CP=$(tr -d '\n' < "$CP_FILE")
 CORE_CLASSES="$REPO_ROOT/red-ohc-core/target/classes"
