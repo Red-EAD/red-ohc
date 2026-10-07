@@ -163,7 +163,7 @@ public class OHCGetAllPutAllBenchmark {
       }
 
     } catch (Throwable failure) {
-      SerializedBenchmarkSupport.stopOHC(ohc, failure);
+      RedOhcBenchmarkSupport.stopOHC(ohc, failure);
       ohc = null;
       throw failure;
     }
@@ -182,7 +182,7 @@ public class OHCGetAllPutAllBenchmark {
       failure = operationFailure;
       throw operationFailure;
     } finally {
-      SerializedBenchmarkSupport.stopOHC(ohc, failure);
+      RedOhcBenchmarkSupport.stopOHC(ohc, failure);
     }
   }
 

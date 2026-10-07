@@ -68,7 +68,7 @@ public class OHCSerializedBenchmark {
       newKeyShape = SerializedBenchmarkSupport.isNewKeyShape(writeShape);
       dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
       writeSequence = SerializedBenchmarkSupport.writeSequence(writeShape, distribution);
-      long capacity = SerializedBenchmarkSupport.ohcCapacityBytes(keyBytes, valueBytes);
+      long capacity = RedOhcBenchmarkSupport.ohcCapacityBytes(keyBytes, valueBytes);
       cache =
           (OffHeapCache<byte[], byte[]>)
               OHCacheBuilder.<byte[], byte[]>newBuilder()
@@ -92,7 +92,7 @@ public class OHCSerializedBenchmark {
       assertHealthy();
 
     } catch (Throwable failure) {
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
       cache = null;
       throw failure;
     }
@@ -117,7 +117,7 @@ public class OHCSerializedBenchmark {
     } finally {
       long stopStart = System.nanoTime();
       try {
-        SerializedBenchmarkSupport.stopOHC(cache, failure);
+        RedOhcBenchmarkSupport.stopOHC(cache, failure);
       } finally {
         System.out.printf(
             Locale.ROOT,

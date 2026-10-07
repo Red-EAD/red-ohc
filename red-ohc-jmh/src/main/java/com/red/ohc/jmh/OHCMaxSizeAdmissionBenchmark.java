@@ -79,7 +79,7 @@ public class OHCMaxSizeAdmissionBenchmark {
       cache.flushAsync().join();
 
     } catch (Throwable failure) {
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
       cache = null;
       throw failure;
     }
@@ -120,7 +120,7 @@ public class OHCMaxSizeAdmissionBenchmark {
       failure = operationFailure;
       throw operationFailure;
     } finally {
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
     }
   }
 

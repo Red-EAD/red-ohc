@@ -288,7 +288,7 @@ public final class CpuPerOp {
       if (procSampler != null) {
         procSampler.interrupt();
       }
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
     }
   }
 

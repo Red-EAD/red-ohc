@@ -71,7 +71,7 @@ public class OHCWriteSustainedBenchmark {
       assertHealthyAndDrained();
 
     } catch (Throwable failure) {
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
       cache = null;
       throw failure;
     }
@@ -89,7 +89,7 @@ public class OHCWriteSustainedBenchmark {
       failure = operationFailure;
       throw operationFailure;
     } finally {
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
     }
   }
 

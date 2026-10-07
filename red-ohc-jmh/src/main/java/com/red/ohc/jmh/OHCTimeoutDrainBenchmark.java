@@ -88,7 +88,7 @@ public class OHCTimeoutDrainBenchmark {
       ticker.setMillis(EXPIRED_MILLIS);
 
     } catch (Throwable failure) {
-      SerializedBenchmarkSupport.stopOHC(cache, failure);
+      RedOhcBenchmarkSupport.stopOHC(cache, failure);
       cache = null;
       throw failure;
     }
@@ -121,7 +121,7 @@ public class OHCTimeoutDrainBenchmark {
   @TearDown(Level.Invocation)
   public void stopCache() {
     if (cache != null) {
-      SerializedBenchmarkSupport.stopOHC(cache);
+      RedOhcBenchmarkSupport.stopOHC(cache);
     }
     cache = null;
   }

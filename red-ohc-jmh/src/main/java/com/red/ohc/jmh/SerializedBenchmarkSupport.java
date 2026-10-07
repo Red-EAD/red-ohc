@@ -1,151 +1,18 @@
 package com.red.ohc.jmh;
 
-import java.lang.reflect.Field;
-import java.nio.ByteBuffer;
-import java.time.Duration;
 import java.util.Arrays;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import net.openhft.chronicle.map.ChronicleMap;
-import net.openhft.chronicle.map.ChronicleMapBuilder;
-import org.ehcache.Cache;
-import org.ehcache.CacheManager;
-import org.ehcache.config.builders.CacheConfigurationBuilder;
-import org.ehcache.config.builders.CacheManagerBuilder;
-import org.ehcache.config.builders.ExpiryPolicyBuilder;
-import org.ehcache.config.builders.ResourcePoolsBuilder;
-import org.ehcache.config.units.MemoryUnit;
-import org.ehcache.spi.serialization.Serializer;
-import org.mapdb.DBMaker;
-import org.mapdb.HTreeMap;
-
-import com.red.ohc.api.OHCache;
-import com.red.ohc.cache.OffHeapCache;
-import com.red.ohc.index.Entry;
-import com.red.ohc.maintenance.LogicalAdmission;
-import com.red.ohc.maintenance.MaintenanceEventLoop;
-import com.red.ohc.storage.CacheMath;
-import com.red.ohc.storage.ValueBlock;
-
-/** Shared raw-byte serialization helpers for the OHC and Ehcache JMH states. */
+/** Backend-independent datasets and serialized workload helpers. */
 public final class SerializedBenchmarkSupport {
   public static final int WORKING_SET = 24_576;
   public static final int DEFAULT_KEY_BYTES = 32;
   public static final int DEFAULT_VALUE_BYTES = 5 * 1024;
   public static final int CAPACITY_ENTRIES = WORKING_SET * 4 / 5;
-  public static final int MAPDB_SEGMENTS = 16;
-  private static final int EHCACHE_ENTRY_OVERHEAD_BYTES = 256;
   public static final long TTL_MILLIS = TimeUnit.MINUTES.toMillis(10);
   public static final int ACCESS_SEQUENCE_LENGTH = 1 << 16;
 
   private SerializedBenchmarkSupport() {}
-
-  public static void stopOHC(OHCache<?, ?> cache) {
-    stopOHC(cache, null);
-  }
-
-  /** Stops a quiesced benchmark cache, including failed setup and invocation states. */
-  public static void stopOHC(OHCache<?, ?> cache, Throwable primaryFailure) {
-    if (cache == null) {
-      return;
-    }
-    try {
-      Field workerField = OffHeapCache.class.getDeclaredField("worker");
-      workerField.setAccessible(true);
-      MaintenanceEventLoop worker = (MaintenanceEventLoop) workerField.get(cache);
-      worker.stop();
-      boolean interrupted = false;
-      long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30L);
-      try {
-        while (worker.isAlive()) {
-          long remaining = deadline - System.nanoTime();
-          if (remaining <= 0L) {
-            break;
-          }
-          try {
-            worker.join(
-                Math.max(1L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining)));
-          } catch (InterruptedException interruption) {
-            interrupted = true;
-          }
-        }
-      } finally {
-        if (interrupted) {
-          Thread.currentThread().interrupt();
-        }
-      }
-      if (worker.isAlive()) {
-        throw new IllegalStateException("benchmark cache actor did not stop");
-      }
-      Field admissionField = OffHeapCache.class.getDeclaredField("logicalAdmission");
-      admissionField.setAccessible(true);
-      worker.assertLogicalAdmissionStable((LogicalAdmission) admissionField.get(cache));
-      if (cache.totalAllocatedBytes() != 0L) {
-        throw new IllegalStateException("benchmark cache retained native memory");
-      }
-    } catch (Throwable failure) {
-      if (primaryFailure != null) {
-        primaryFailure.addSuppressed(failure);
-      } else {
-        throw new IllegalStateException("benchmark cache teardown failed", failure);
-      }
-    }
-  }
-
-  public static EhcacheStore newEhcache(long offHeapBytes, long ttlMillis) {
-    CacheManager manager =
-        CacheManagerBuilder.newCacheManagerBuilder()
-            .withCache(
-                "serialized",
-                CacheConfigurationBuilder.newCacheConfigurationBuilder(
-                        byte[].class,
-                        byte[].class,
-                        ResourcePoolsBuilder.newResourcePoolsBuilder()
-                            .offheap(offHeapBytes, MemoryUnit.B))
-                    .withKeySerializer(new RawByteArraySerializer())
-                    .withValueSerializer(new RawByteArraySerializer())
-                    .withExpiry(
-                        ExpiryPolicyBuilder.timeToLiveExpiration(Duration.ofMillis(ttlMillis))))
-            .build(true);
-    return new EhcacheStore(manager, manager.getCache("serialized", byte[].class, byte[].class));
-  }
-
-  public static MapDbStore newMapDb(long capacityEntries, long ttlMillis) {
-    ScheduledExecutorService expiryExecutor =
-        Executors.newSingleThreadScheduledExecutor(
-            runnable -> {
-              Thread thread = new Thread(runnable, "mapdb-expiry");
-              thread.setDaemon(true);
-              return thread;
-            });
-    @SuppressWarnings("unchecked")
-    org.mapdb.DB.HashMapMaker<byte[], byte[]> maker =
-        (org.mapdb.DB.HashMapMaker<byte[], byte[]>)
-            (org.mapdb.DB.HashMapMaker<?, ?>) DBMaker.memoryShardedHashMap(MAPDB_SEGMENTS);
-    HTreeMap<byte[], byte[]> map =
-        maker
-            .keySerializer(org.mapdb.Serializer.BYTE_ARRAY)
-            .valueSerializer(org.mapdb.Serializer.BYTE_ARRAY)
-            .expireAfterCreate(ttlMillis, TimeUnit.MILLISECONDS)
-            .expireAfterUpdate(ttlMillis, TimeUnit.MILLISECONDS)
-            .expireMaxSize(capacityEntries)
-            .expireExecutor(expiryExecutor)
-            .expireExecutorPeriod(TimeUnit.SECONDS.toMillis(1L))
-            .create();
-    return new MapDbStore(map, expiryExecutor);
-  }
-
-  public static ChronicleMapStore newChronicleMap(int keyBytes, int valueBytes, long entries) {
-    ChronicleMap<byte[], byte[]> map =
-        ChronicleMapBuilder.of(byte[].class, byte[].class)
-            .entries(entries)
-            .averageKeySize(keyBytes)
-            .averageValueSize(valueBytes)
-            .create();
-    return new ChronicleMapStore(map);
-  }
 
   public static Dataset dataset(int keyBytes, int valueBytes, String distribution) {
     byte[][] keys = new byte[WORKING_SET][];
@@ -196,21 +63,6 @@ public final class SerializedBenchmarkSupport {
       throw new IllegalArgumentException("invalid thread sequence parameters");
     }
     return (int) ((long) sequenceLength * threadIndex / threadCount);
-  }
-
-  /**
-   * Ehcache's off-heap tier charges serialized mapping metadata in addition to key and value bytes.
-   * The fixed headroom keeps the target 32B/5KiB preload resident at the same entry cap.
-   */
-  public static long ehcacheCapacityBytes(int keyBytes, int valueBytes) {
-    return (long) CAPACITY_ENTRIES * (keyBytes + valueBytes + EHCACHE_ENTRY_OVERHEAD_BYTES);
-  }
-
-  /** Returns the logical serialized-byte capacity for the fixed-size OHC benchmark workload. */
-  public static long ohcCapacityBytes(int keyBytes, int valueBytes) {
-    long keyAllocation = Entry.keyAllocationLengthForKeyLength(keyBytes);
-    long valueAllocation = ValueBlock.allocationLength(valueBytes);
-    return CacheMath.logicalEntryBytes(keyAllocation, valueAllocation) * CAPACITY_ENTRIES;
   }
 
   public static int benchmarkThreadCount() {
@@ -368,95 +220,4 @@ public final class SerializedBenchmarkSupport {
     }
   }
 
-  public static final class EhcacheStore implements AutoCloseable {
-    private final CacheManager manager;
-    private final Cache<byte[], byte[]> cache;
-
-    private EhcacheStore(CacheManager manager, Cache<byte[], byte[]> cache) {
-      this.manager = manager;
-      this.cache = cache;
-    }
-
-    public Cache<byte[], byte[]> cache() {
-      return cache;
-    }
-
-    @Override
-    public void close() {
-      manager.close();
-    }
-  }
-
-  public static final class MapDbStore implements AutoCloseable {
-    private final HTreeMap<byte[], byte[]> map;
-    private final ScheduledExecutorService expiryExecutor;
-
-    private MapDbStore(HTreeMap<byte[], byte[]> map, ScheduledExecutorService expiryExecutor) {
-      this.map = map;
-      this.expiryExecutor = expiryExecutor;
-    }
-
-    public HTreeMap<byte[], byte[]> map() {
-      return map;
-    }
-
-    public int segmentCount() {
-      return map.getStores().length;
-    }
-
-    @Override
-    public void close() {
-      try {
-        map.close();
-      } finally {
-        expiryExecutor.shutdownNow();
-      }
-    }
-  }
-
-  public static final class ChronicleMapStore implements AutoCloseable {
-    private final ChronicleMap<byte[], byte[]> map;
-
-    private ChronicleMapStore(ChronicleMap<byte[], byte[]> map) {
-      this.map = map;
-    }
-
-    public ChronicleMap<byte[], byte[]> map() {
-      return map;
-    }
-
-    @Override
-    public void close() {
-      map.close();
-    }
-  }
-
-  public static final class RawByteArraySerializer implements Serializer<byte[]> {
-    @Override
-    public ByteBuffer serialize(byte[] value) {
-      return ByteBuffer.wrap(value);
-    }
-
-    @Override
-    public byte[] read(ByteBuffer binary) {
-      ByteBuffer source = binary.duplicate();
-      byte[] value = new byte[source.remaining()];
-      source.get(value);
-      return value;
-    }
-
-    @Override
-    public boolean equals(byte[] value, ByteBuffer binary) {
-      if (value.length != binary.remaining()) {
-        return false;
-      }
-      int offset = binary.position();
-      for (int i = 0; i < value.length; i++) {
-        if (value[i] != binary.get(offset + i)) {
-          return false;
-        }
-      }
-      return true;
-    }
-  }
 }

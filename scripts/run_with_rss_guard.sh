@@ -90,7 +90,7 @@ while kill -0 "$ROOT_PID" 2>/dev/null; do
       (kill -KILL -"$ROOT_PID" 2>/dev/null || kill -KILL "$ROOT_PID" 2>/dev/null || true)
     break
   fi
-  sleep "${OHC_RSS_POLL_INTERVAL_SECONDS:-0.2}"
+  sleep "${RED_OHC_RSS_POLL_INTERVAL_SECONDS:-0.2}"
 done
 
 wait "$ROOT_PID"

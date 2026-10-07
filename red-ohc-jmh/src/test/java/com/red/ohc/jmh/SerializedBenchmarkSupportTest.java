@@ -6,7 +6,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.ehcache.Cache;
 import org.openjdk.jmh.annotations.Param;
 import org.testng.Assert;
-import org.testng.SkipException;
 import org.testng.annotations.Test;
 
 import com.red.ohc.api.Eviction;
@@ -120,12 +119,12 @@ public class SerializedBenchmarkSupportTest {
     SerializedBenchmarkSupport.Dataset dataset =
         SerializedBenchmarkSupport.dataset(32, 5120, "UNIFORM");
     Assert.assertEquals(
-        SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120),
+        RedOhcBenchmarkSupport.ohcCapacityBytes(32, 5120),
         5_232L * SerializedBenchmarkSupport.CAPACITY_ENTRIES);
     {
       OHCache<byte[], byte[]> cache =
           OHCacheBuilder.<byte[], byte[]>newBuilder()
-              .capacity(SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120))
+              .capacity(RedOhcBenchmarkSupport.ohcCapacityBytes(32, 5120))
               .keySerializer(Utils.byteArraySerializer)
               .valueSerializer(Utils.byteArraySerializer)
               .eviction(Eviction.S3_FIFO)
@@ -133,7 +132,7 @@ public class SerializedBenchmarkSupportTest {
       Throwable cacheFailure1 = null;
       try {
         Assert.assertEquals(
-            cache.capacity(), SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120));
+            cache.capacity(), RedOhcBenchmarkSupport.ohcCapacityBytes(32, 5120));
         for (int index = 0; index < SerializedBenchmarkSupport.CAPACITY_ENTRIES; index++) {
           cache.put(dataset.keys[index], dataset.values[index]);
         }
@@ -147,7 +146,7 @@ public class SerializedBenchmarkSupportTest {
         cacheFailure1 = failure;
         throw failure;
       } finally {
-        SerializedBenchmarkSupport.stopOHC(cache, cacheFailure1);
+        RedOhcBenchmarkSupport.stopOHC(cache, cacheFailure1);
       }
     }
   }
@@ -158,7 +157,7 @@ public class SerializedBenchmarkSupportTest {
         SerializedBenchmarkSupport.dataset(32, 5120, "UNIFORM");
     OHCache<byte[], byte[]> cache =
         OHCacheBuilder.<byte[], byte[]>newBuilder()
-            .capacity(SerializedBenchmarkSupport.ohcCapacityBytes(32, 5120))
+            .capacity(RedOhcBenchmarkSupport.ohcCapacityBytes(32, 5120))
             .keySerializer(Utils.byteArraySerializer)
             .valueSerializer(Utils.byteArraySerializer)
             .eviction(Eviction.S3_FIFO)
@@ -186,7 +185,7 @@ public class SerializedBenchmarkSupportTest {
         throw explicitCacheOperationFailure;
       } finally {
 
-        SerializedBenchmarkSupport.stopOHC(cache, explicitCacheFailure1);
+        RedOhcBenchmarkSupport.stopOHC(cache, explicitCacheFailure1);
       }
     }
     Assert.assertEquals(cache.totalAllocatedBytes(), 0L);
@@ -264,8 +263,8 @@ public class SerializedBenchmarkSupportTest {
 
   @Test
   public void offHeapCacheRoundTripsTheRawByteCodecWithoutPersistence() {
-    SerializedBenchmarkSupport.EhcacheStore store =
-        SerializedBenchmarkSupport.newEhcache(1 << 20, SerializedBenchmarkSupport.TTL_MILLIS);
+    EhcacheBenchmarkSupport.EhcacheStore store =
+        EhcacheBenchmarkSupport.newEhcache(1 << 20, SerializedBenchmarkSupport.TTL_MILLIS);
     try {
       byte[] key = new byte[] {1, 2, 3, 4};
       byte[] value = new byte[] {5, 6, 7, 8};
@@ -285,9 +284,9 @@ public class SerializedBenchmarkSupportTest {
   public void ehcacheCapacityFitsTheTargetResidentSet() {
     SerializedBenchmarkSupport.Dataset dataset =
         SerializedBenchmarkSupport.dataset(32, 5120, "UNIFORM");
-    SerializedBenchmarkSupport.EhcacheStore store =
-        SerializedBenchmarkSupport.newEhcache(
-            SerializedBenchmarkSupport.ehcacheCapacityBytes(32, 5120),
+    EhcacheBenchmarkSupport.EhcacheStore store =
+        EhcacheBenchmarkSupport.newEhcache(
+            EhcacheBenchmarkSupport.ehcacheCapacityBytes(32, 5120),
             SerializedBenchmarkSupport.TTL_MILLIS);
     try {
       Cache<byte[], byte[]> cache = store.cache();
@@ -307,8 +306,8 @@ public class SerializedBenchmarkSupportTest {
 
   @Test
   public void mapDbDirectStoreRoundTripsTheRawByteCodecWithoutPersistence() {
-    SerializedBenchmarkSupport.MapDbStore store =
-        SerializedBenchmarkSupport.newMapDb(2, SerializedBenchmarkSupport.TTL_MILLIS);
+    MapDbBenchmarkSupport.MapDbStore store =
+        MapDbBenchmarkSupport.newMapDb(2, SerializedBenchmarkSupport.TTL_MILLIS);
     try {
       byte[] key = new byte[] {11, 12, 13, 14};
       byte[] value = new byte[] {15, 16, 17, 18};
@@ -316,7 +315,7 @@ public class SerializedBenchmarkSupportTest {
       store.map().put(key, value);
 
       Assert.assertEquals(store.map().get(key), value);
-      Assert.assertEquals(store.segmentCount(), SerializedBenchmarkSupport.MAPDB_SEGMENTS);
+      Assert.assertEquals(store.segmentCount(), MapDbBenchmarkSupport.MAPDB_SEGMENTS);
     } finally {
       store.close();
     }
@@ -324,11 +323,8 @@ public class SerializedBenchmarkSupportTest {
 
   @Test
   public void chronicleMapInMemoryStoreRoundTripsTheRawByteCodecWithoutPersistence() {
-    if (Runtime.version().feature() >= 21) {
-      throw new SkipException("Chronicle Map 3.27ea1 uses inaccessible JDK internals on JDK 21+");
-    }
-    SerializedBenchmarkSupport.ChronicleMapStore store =
-        SerializedBenchmarkSupport.newChronicleMap(64, 128, 1_024);
+    ChronicleBenchmarkSupport.ChronicleMapStore store =
+        ChronicleBenchmarkSupport.newChronicleMap(64, 128, 1_024);
     try {
       byte[] key = new byte[] {21, 22, 23, 24};
       byte[] value = new byte[] {25, 26, 27, 28};
