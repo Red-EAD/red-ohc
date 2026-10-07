@@ -230,18 +230,22 @@ public class OHCGetAllPutAllBenchmark {
 
   private void putAll(Blackhole blackhole, WriteResults results) {
     Map<Integer, byte[]> freshBatch = freshBatches.get().next(values);
-    int accepted;
-    if ("OHC".equals(implementation)) {
-      ohc.putAll(freshBatch);
-      accepted = BATCH_SIZE;
-    } else {
-      caffeine.putAll(freshBatch);
-      accepted = BATCH_SIZE;
-    }
     results.attempted += BATCH_SIZE;
-    results.accepted += accepted;
-    results.rejected += BATCH_SIZE - accepted;
-    blackhole.consume(accepted);
+    try {
+      if ("OHC".equals(implementation)) {
+        ohc.putAll(freshBatch);
+      } else {
+        caffeine.putAll(freshBatch);
+      }
+      // A completed fresh batch reports completed writes; eviction and concurrent writers make
+      // global occupancy changes unsuitable for inferring per-invocation admission.
+      results.accepted += BATCH_SIZE;
+      blackhole.consume(BATCH_SIZE);
+    } catch (Throwable failure) {
+      results.exceptions++;
+      results.incomplete += BATCH_SIZE;
+      throw failure;
+    }
   }
 
   private Map<Integer, byte[]> batch(int start, int count) {

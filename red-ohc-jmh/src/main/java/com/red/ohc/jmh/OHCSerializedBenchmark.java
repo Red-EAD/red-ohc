@@ -7,6 +7,8 @@ import org.openjdk.jmh.annotations.AuxCounters;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
+import org.openjdk.jmh.annotations.Group;
+import org.openjdk.jmh.annotations.GroupThreads;
 import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
@@ -188,6 +190,57 @@ public class OHCSerializedBenchmark {
       BenchmarkWindowResults window,
       Blackhole blackhole) {
     directAccess(state, directState, blackhole);
+  }
+
+  /** Latency-distribution variant of the generic workload; p50/p99 land in the JMH output. */
+  @Benchmark
+  @Threads(Threads.MAX)
+  @BenchmarkMode(Mode.SampleTime)
+  @OutputTimeUnit(TimeUnit.MICROSECONDS)
+  public void cpuThreadsSampleTime(
+      ThreadState state, BenchmarkWindowResults window, Blackhole blackhole) {
+    access(state, blackhole);
+  }
+
+  /** Asymmetric contention shape: six readers against two writers sharing one cache. */
+  @Group("asymmetric")
+  @GroupThreads(6)
+  @Benchmark
+  public void asymmetricRead(
+      ThreadState state, BenchmarkWindowResults window, Blackhole blackhole) {
+    state.attemptedOperations++;
+    int index = nextIndex(state, false);
+    try {
+      blackhole.consume(cache.get(dataset.keys[index]));
+      state.completedOperations++;
+    } catch (RuntimeException | Error failure) {
+      state.exceptionCount++;
+      state.incompleteOperations++;
+      throw failure;
+    }
+  }
+
+  /** Writer side of the asymmetric group; plain put against the same key space. */
+  @Group("asymmetric")
+  @GroupThreads(2)
+  @Benchmark
+  public void asymmetricWrite(
+      ThreadState state, BenchmarkWindowResults window, Blackhole blackhole) {
+    state.attemptedOperations++;
+    state.attemptedWrites++;
+    int index = nextIndex(state, true);
+    try {
+      if (write(cache, writeKey(state, index), dataset.values[index])) {
+        state.acceptedWrites++;
+      } else {
+        state.rejectedWrites++;
+      }
+      state.completedOperations++;
+    } catch (RuntimeException | Error failure) {
+      state.exceptionCount++;
+      state.incompleteOperations++;
+      throw failure;
+    }
   }
 
   private void access(ThreadState state, Blackhole blackhole) {

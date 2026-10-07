@@ -771,10 +771,14 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       enterWriterValueReader(context);
       valueReaderEntered = true;
       long observedTaggedValue = current.valueAddress;
+      // The deadline is immutable per published value; one early read serves both the pre-claim
+      // and post-claim liveness checks below (the latter revalidates with a fresh now).
+      long preReadDeadline = preReadValueDeadline(observedTaggedValue);
       long liveValue =
           valueIfLive(
               current,
               observedTaggedValue,
+              preReadDeadline,
               Entry.hasTtl(observedTaggedValue) ? deadlineClock.nowNanos() : 0L);
       if (kind == ComputeKind.IF_ABSENT && liveValue != 0L) {
         attempt.result = snapshotValueEntered(context, current, observedTaggedValue);
@@ -793,7 +797,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
       // TTL is part of the logical mapping contract. Re-read it after taking the writer claim so a
       // compute/merge started just before expiry cannot invoke user code with a dead value.
-      liveValue = valueIfLiveWhileWriterHeld(current);
+      liveValue = valueIfLiveWhileWriterHeld(current, observedTaggedValue, preReadDeadline);
 
       if (kind == ComputeKind.IF_PRESENT && liveValue == 0L) {
         prepareComputeRemoval(context, current, attempt);
@@ -2630,19 +2634,35 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       boolean deferMaintenanceWake,
       PreviousValue<Object> previous) {
     KeyEncoder.encode(keySerializer, key, context);
-    enterWriterReader(context);
+    enterWriterValueReader(context);
     Entry entry;
+    long probedTaggedValue;
+    long preReadDeadline;
     try {
       entry = data.get(context.lookupKey);
+      probedTaggedValue = entry == null ? 0L : entry.valueAddress;
+      preReadDeadline =
+          entry == null ? 0L : preReadValueDeadline(probedTaggedValue);
     } finally {
       exit(context);
     }
-    return entry != null && removeEntryByIdentity(context, entry, deferMaintenanceWake, previous);
+    return entry != null
+        && removeEntryByIdentity(
+            context,
+            entry,
+            deferMaintenanceWake,
+            previous,
+            probedTaggedValue,
+            preReadDeadline,
+            0L,
+            -1L,
+            true);
   }
 
   private boolean removeEntryByIdentity(
       ThreadContext context, Entry entry, boolean deferMaintenanceWake) {
-    return removeEntryByIdentity(context, entry, deferMaintenanceWake, null, 0L, -1L, true);
+    return removeEntryByIdentity(
+        context, entry, deferMaintenanceWake, null, 0L, 0L, 0L, -1L, true);
   }
 
   private boolean removeEntryByIdentity(
@@ -2650,7 +2670,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry entry,
       boolean deferMaintenanceWake,
       PreviousValue<Object> previous) {
-    return removeEntryByIdentity(context, entry, deferMaintenanceWake, previous, 0L, -1L, true);
+    return removeEntryByIdentity(
+        context, entry, deferMaintenanceWake, previous, 0L, 0L, 0L, -1L, true);
   }
 
   private boolean removeEntryByIdentity(
@@ -2660,7 +2681,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long expectedTaggedValue,
       long expectedGeneration) {
     return removeEntryByIdentity(
-        context, entry, deferMaintenanceWake, null, expectedTaggedValue, expectedGeneration, true);
+        context,
+        entry,
+        deferMaintenanceWake,
+        null,
+        0L,
+        0L,
+        expectedTaggedValue,
+        expectedGeneration,
+        true);
   }
 
   private boolean removeEntryByIdentity(
@@ -2668,6 +2697,8 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       Entry entry,
       boolean deferMaintenanceWake,
       PreviousValue<Object> previous,
+      long probedTaggedValue,
+      long preReadDeadline,
       long expectedTaggedValue,
       long expectedGeneration,
       boolean requireLiveMapping) {
@@ -2687,6 +2718,12 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (awaitWriter(entry) == 0L) {
       return false;
     }
+    if (expectedTaggedValue == 0L) {
+      // The probe protection ended before the claim; a recycled address cannot identify its
+      // previous immutable deadline without a matching generation.
+      probedTaggedValue = 0L;
+      preReadDeadline = 0L;
+    }
     boolean removeAttemptStarted = false;
     boolean readerEntered = false;
     try {
@@ -2702,14 +2739,20 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       }
       // Expired mappings are logically absent. Do not report a successful user removal for one;
       // the maintenance actor will perform the physical expiry retirement normally.
-      if (requireLiveMapping && valueIfLiveWhileWriterHeld(entry) == 0L) {
+      long value =
+          requireLiveMapping
+              ? valueIfLiveWhileWriterHeld(entry, probedTaggedValue, preReadDeadline)
+              : Entry.rawValueAddress(entry.valueAddress);
+      long valueAllocation = value == 0L ? 0L : currentValueAllocation(entry);
+      if (requireLiveMapping && value == 0L) {
         return false;
       }
       // The helper owns the writer release on every return/exception. Mark the handoff before
       // entering it so this finally block cannot accidentally release a writer claimed by the
       // next operation.
       removeAttemptStarted = true;
-      return removeClaimedEntryOutsideGate(context, entry, deferMaintenanceWake, previous);
+      return removeClaimedEntryOutsideGate(
+          context, entry, deferMaintenanceWake, previous, value, valueAllocation);
     } finally {
       if (readerEntered) {
         exit(context);
@@ -2721,7 +2764,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
   }
 
   private boolean clearEntryByIdentity(ThreadContext context, Entry entry) {
-    return removeEntryByIdentity(context, entry, true, null, 0L, -1L, false);
+    return removeEntryByIdentity(context, entry, true, null, 0L, 0L, 0L, -1L, false);
   }
 
   /** Removes a claimed entry without holding a cache-wide gate across the CHM transition. */
@@ -2729,7 +2772,9 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       ThreadContext context,
       Entry entry,
       boolean deferMaintenanceWake,
-      PreviousValue<Object> previous) {
+      PreviousValue<Object> previous,
+      long value,
+      long valueAllocation) {
     boolean lifecyclePrepared = false;
     boolean removedFromMap = false;
     boolean writerHeld = true;
@@ -2739,8 +2784,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       if (previous != null) {
         previous.value = snapshotValueEntered(context, entry, entry.valueAddress);
       }
-      long value = Entry.rawValueAddress(entry.valueAddress);
-      long valueAllocation = currentValueAllocation(entry);
       lifecycleSequence = lane.reserve();
       lifecyclePrepared = true;
       lane.writeRemoval(lifecycleSequence, entry, value, valueAllocation, entry.generation(), null);
@@ -3568,7 +3611,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           }
         } else if (empty) {
           if (!removeEntryByIdentity(
-              context, winner, false, null, taggedValue, generation, false)) {
+              context, winner, false, null, 0L, 0L, taggedValue, generation, false)) {
             awaitWriterRelease(winner);
           }
         }
@@ -4417,6 +4460,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   /** Returns the live value while the caller owns the Entry writer claim. */
   private long valueIfLiveWhileWriterHeld(Entry entry) {
+    return valueIfLiveWhileWriterHeld(entry, 0L, 0L);
+  }
+
+  private long valueIfLiveWhileWriterHeld(
+      Entry entry, long probedTaggedValue, long preReadDeadline) {
     long taggedValue = entry.valueAddress;
     if (taggedValue == 0L
         || !isAliveTaggedValue(taggedValue)
@@ -4427,7 +4475,11 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     if (!Entry.hasTtl(taggedValue)) {
       return value;
     }
-    if (ValueBlock.expired(value, deadlineClock.nowNanos())) {
+    boolean expired =
+        taggedValue == probedTaggedValue && preReadDeadline != 0L
+            ? ValueBlock.expiredByDeadline(preReadDeadline, deadlineClock.nowNanos())
+            : ValueBlock.expired(value, deadlineClock.nowNanos());
+    if (expired) {
       tryMarkLogicallyAbsent(entry);
       // This path already owns the Entry writer claim, so the reader-side helper cannot publish
       // the absence after releasing it. Keep the actor's policy mirror from retaining the
