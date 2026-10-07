@@ -1348,9 +1348,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       throw new IllegalStateException("native allocation failed while writing cache entry");
     }
     boolean handedOff = false;
+    Entry existing = null;
+    long claimedStateWord = 0L;
+    Throwable operationFailure = null;
     try {
-      Entry existing = null;
-      long claimedStateWord = 0L;
       enterWriterReader(context);
       try {
         existing = data.get(lookup);
@@ -1392,9 +1393,29 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
           deadlineNanos,
           deferMaintenanceWake,
           prepared);
+    } catch (Throwable failure) {
+      operationFailure = failure;
+      throw failure;
     } finally {
       if (!handedOff) {
-        rollbackReplacement(prepared, valueAllocation);
+        Throwable cleanupFailure = null;
+        if (claimedStateWord != 0L) {
+          try {
+            releaseWriter(existing, deferMaintenanceWake);
+          } catch (Throwable failure) {
+            cleanupFailure = appendFailure(cleanupFailure, failure);
+          }
+        }
+        try {
+          rollbackReplacement(prepared, valueAllocation);
+        } catch (Throwable failure) {
+          cleanupFailure = appendFailure(cleanupFailure, failure);
+        }
+        if (cleanupFailure != null && operationFailure != null) {
+          operationFailure.addSuppressed(cleanupFailure);
+        } else if (cleanupFailure != null) {
+          throwUnchecked(cleanupFailure);
+        }
       }
     }
   }
@@ -1964,18 +1985,18 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       PreviousValue<Object> previous,
       long expectedTaggedValue,
       long expectedGeneration) {
-    worker.throwIfUnavailable();
-    long replacementLogicalCharge = logicalCharge(entry.keyAllocationLength(), newAllocation);
     long replacement = preparedReplacement;
-    boolean writerHeld = false;
+    boolean writerHeld = preclaimedStateWord != 0L;
     boolean replacementTransferred = false;
     long oldAllocation = 0L;
     Throwable operationFailure = null;
-    RetirementJournal.Lane retirementLane = context.retirementLane();
-    RetirementSegment.Reservation retirementReservation = context.retirementReservation();
     boolean versioned = expectedTaggedValue != 0L;
     long chargeDelta = 0L;
     try {
+      worker.throwIfUnavailable();
+      long replacementLogicalCharge = logicalCharge(entry.keyAllocationLength(), newAllocation);
+      RetirementJournal.Lane retirementLane = context.retirementLane();
+      RetirementSegment.Reservation retirementReservation = context.retirementReservation();
       replacement =
           prepareReplacementValue(
               context, value, valueLength, deadlineNanos, newAllocation, replacement);
@@ -2514,38 +2535,15 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       long keyAllocation,
       long valueAllocation,
       long preparedValueAddress) {
-    worker.throwIfUnavailable();
-    return allocateEntryAfterReserve(
-        context,
-        hash,
-        keyBytes,
-        keyLength,
-        value,
-        valueLength,
-        deadlineNanos,
-        keyAllocation,
-        valueAllocation,
-        preparedValueAddress);
-  }
-
-  private Entry allocateEntryAfterReserve(
-      ThreadContext context,
-      int hash,
-      byte[] keyBytes,
-      int keyLength,
-      Object value,
-      int valueLength,
-      long deadlineNanos,
-      long keyAllocation,
-      long valueAllocation,
-      long preparedValueAddress) {
     long keyAddress = 0L;
     long valueAddress = preparedValueAddress;
+    boolean transferred = false;
+    Throwable operationFailure = null;
     try {
+      worker.throwIfUnavailable();
       keyAddress = allocateNative(context, keyAllocation);
       if (keyAddress == 0L) {
         nativeAllocationRejected();
-        rollbackReplacement(valueAddress, valueAllocation);
         return null;
       }
       NativeMemory.copy(keyBytes, 0, keyAddress, keyLength);
@@ -2553,8 +2551,6 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
         valueAddress = allocateNative(context, valueAllocation);
         if (valueAddress == 0L) {
           nativeAllocationRejected();
-          freeBlock(keyAddress, keyAllocation);
-          keyAddress = 0L;
           return null;
         }
         initializeValueBlock(context, valueAddress, deadlineNanos, valueLength);
@@ -2569,15 +2565,30 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
       entry.initializeKeyHash(hash);
       entry.initializeNativeMetadata();
       entry.currentValueAllocation(valueAllocation);
+      transferred = true;
       return entry;
     } catch (Throwable failure) {
-      if (valueAddress != 0L) {
-        freeBlock(valueAddress, valueAllocation);
-      }
-      if (keyAddress != 0L) {
-        freeBlock(keyAddress, keyAllocation);
-      }
+      operationFailure = failure;
       throw failure;
+    } finally {
+      if (!transferred) {
+        Throwable cleanupFailure = null;
+        try {
+          freeBlock(valueAddress, valueAllocation);
+        } catch (Throwable failure) {
+          cleanupFailure = appendFailure(cleanupFailure, failure);
+        }
+        try {
+          freeBlock(keyAddress, keyAllocation);
+        } catch (Throwable failure) {
+          cleanupFailure = appendFailure(cleanupFailure, failure);
+        }
+        if (cleanupFailure != null && operationFailure != null) {
+          operationFailure.addSuppressed(cleanupFailure);
+        } else if (cleanupFailure != null) {
+          throwUnchecked(cleanupFailure);
+        }
+      }
     }
   }
 

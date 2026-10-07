@@ -51,10 +51,11 @@ public class CapacityAccountingTest {
     long valueAllocation = ValueBlock.allocationLength(valueLength);
     long logicalEntryBytes = CacheMath.logicalEntryBytes(keyAllocation, valueAllocation);
     long physicalWeight =
-        WriterArena.allocationWeight(keyAllocation) + WriterArena.allocationWeight(valueAllocation);
+        WriterArena.allocationWeight(Entry.keyPhysicalAllocationLengthForKeyLength(keyLength))
+            + WriterArena.allocationWeight(valueAllocation);
 
     assertEquals(logicalEntryBytes, 5_232L);
-    assertEquals(physicalWeight, 5_440L);
+    assertEquals(physicalWeight, 5_376L);
 
     OffHeapCache<byte[], byte[]> cache =
         OHCacheBuilder.<byte[], byte[]>newBuilder()
