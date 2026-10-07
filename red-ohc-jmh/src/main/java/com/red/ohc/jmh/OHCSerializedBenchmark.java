@@ -59,12 +59,14 @@ public class OHCSerializedBenchmark {
   private int[] writeSequence;
   private OffHeapCache<byte[], byte[]> cache;
   private WorkloadMode workloadMode;
+  private WriteShapeMode writeShapeMode;
   private boolean newKeyShape;
 
   @Setup(Level.Trial)
   public void setup() {
     try {
       workloadMode = WorkloadMode.parse(workload);
+      writeShapeMode = WriteShapeMode.parse(writeShape);
       newKeyShape = SerializedBenchmarkSupport.isNewKeyShape(writeShape);
       dataset = SerializedBenchmarkSupport.dataset(keyBytes, valueBytes, distribution);
       writeSequence = SerializedBenchmarkSupport.writeSequence(writeShape, distribution);
@@ -195,7 +197,12 @@ public class OHCSerializedBenchmark {
     try {
       if (write) {
         state.attemptedWrites++;
-        if (write(cache, writeKey(state, index), dataset.values[index])) {
+        if (workloadMode == WorkloadMode.REMOVE_100
+            || workloadMode == WorkloadMode.READ_90_REMOVE_10) {
+          cache.remove(dataset.keys[index]);
+          cache.put(dataset.keys[index], dataset.values[index]);
+          state.acceptedWrites++;
+        } else if (write(cache, writeKey(state, index), dataset.values[index])) {
           state.acceptedWrites++;
         } else {
           state.rejectedWrites++;
@@ -218,7 +225,12 @@ public class OHCSerializedBenchmark {
     try {
       if (write) {
         state.attemptedWrites++;
-        if (write(cache, writeKey(state, index), dataset.values[index])) {
+        if (workloadMode == WorkloadMode.REMOVE_100
+            || workloadMode == WorkloadMode.READ_90_REMOVE_10) {
+          cache.remove(dataset.keys[index]);
+          cache.put(dataset.keys[index], dataset.values[index]);
+          state.acceptedWrites++;
+        } else if (write(cache, writeKey(state, index), dataset.values[index])) {
           state.acceptedWrites++;
         } else {
           state.rejectedWrites++;
@@ -246,8 +258,16 @@ public class OHCSerializedBenchmark {
   }
 
   private boolean write(OffHeapCache<byte[], byte[]> cache, byte[] key, byte[] value) {
-    cache.put(key, value);
-    return true;
+    switch (writeShapeMode) {
+      case PUT_IF_ABSENT:
+        return cache.putIfAbsent(key, value) == null;
+      case COMPUTE:
+        cache.compute(key, (k, v) -> value);
+        return true;
+      default:
+        cache.put(key, value);
+        return true;
+    }
   }
 
   static int nextIndex(ThreadState state, boolean write, int[] readSequence, int[] writeSequence) {
@@ -374,6 +394,23 @@ public class OHCSerializedBenchmark {
     }
   }
 
+  private enum WriteShapeMode {
+    MIXED,
+    REPLACE_ONLY,
+    INSERT_CHURN,
+    NEW_KEY,
+    PUT_IF_ABSENT,
+    COMPUTE;
+
+    private static WriteShapeMode parse(String value) {
+      try {
+        return valueOf(value);
+      } catch (IllegalArgumentException failure) {
+        throw new IllegalArgumentException("unsupported write shape: " + value, failure);
+      }
+    }
+  }
+
   private enum WorkloadMode {
     READ_100 {
       @Override
@@ -388,6 +425,18 @@ public class OHCSerializedBenchmark {
       }
     },
     READ_90_WRITE_10 {
+      @Override
+      boolean isWrite(long operation) {
+        return Math.floorMod(operation, 10L) == 0L;
+      }
+    },
+    REMOVE_100 {
+      @Override
+      boolean isWrite(long operation) {
+        return true;
+      }
+    },
+    READ_90_REMOVE_10 {
       @Override
       boolean isWrite(long operation) {
         return Math.floorMod(operation, 10L) == 0L;

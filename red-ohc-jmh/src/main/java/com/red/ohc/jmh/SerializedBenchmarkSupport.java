@@ -36,6 +36,9 @@ public final class SerializedBenchmarkSupport {
         // The sequence keeps value selection deterministic; the key itself is generated from the
         // writer thread and its monotonic operation ordinal by newKey().
         return sequenceForDistribution(CAPACITY_ENTRIES, distribution);
+      case "PUT_IF_ABSENT":
+      case "COMPUTE":
+        return sequenceForDistribution(WORKING_SET, distribution);
       default:
         throw new IllegalArgumentException("unsupported write shape: " + shape);
     }

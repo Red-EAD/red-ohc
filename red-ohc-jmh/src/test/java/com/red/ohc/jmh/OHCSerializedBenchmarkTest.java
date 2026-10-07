@@ -7,7 +7,9 @@ import java.util.Set;
 
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Param;
+import org.openjdk.jmh.infra.Blackhole;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class OHCSerializedBenchmarkTest {
@@ -66,6 +68,59 @@ public class OHCSerializedBenchmarkTest {
         Arrays.stream(method.getParameterTypes())
             .anyMatch(type -> type.getSimpleName().equals("DebtResults")),
         "diagnosticCpuThreads must bind the retirement debt auxiliary counters");
+  }
+
+  @DataProvider(name = "additionalWorkloads")
+  public Object[][] additionalWorkloads() {
+    return new Object[][] {
+      {"REMOVE_100", "MIXED", 100L},
+      {"READ_90_REMOVE_10", "MIXED", 10L},
+      {"WRITE_100", "PUT_IF_ABSENT", 100L},
+      {"WRITE_100", "COMPUTE", 100L}
+    };
+  }
+
+  @Test(dataProvider = "additionalWorkloads")
+  public void additionalWorkloadsCompleteAndReconcile(
+      String workload, String writeShape, long expectedWrites) {
+    OHCSerializedBenchmark benchmark = new OHCSerializedBenchmark();
+    benchmark.keyBytes = 16;
+    benchmark.valueBytes = 64;
+    benchmark.distribution = "UNIFORM";
+    benchmark.workload = workload;
+    benchmark.writeShape = writeShape;
+    boolean setupComplete = false;
+    Throwable primaryFailure = null;
+    try {
+      benchmark.setup();
+      setupComplete = true;
+      OHCSerializedBenchmark.ThreadState state = new OHCSerializedBenchmark.ThreadState();
+      Blackhole blackhole =
+          new Blackhole("Today's password is swordfish. I understand instantiating Blackholes directly is dangerous.");
+      for (int i = 0; i < 100; i++) {
+        benchmark.oneThread(state, null, blackhole);
+      }
+      Assert.assertEquals(state.attemptedOperations, 100L);
+      Assert.assertEquals(state.completedOperations, 100L);
+      Assert.assertEquals(state.attemptedWrites, expectedWrites);
+      Assert.assertEquals(state.acceptedWrites + state.rejectedWrites, expectedWrites);
+      Assert.assertEquals(state.exceptionCount, 0L);
+      Assert.assertEquals(state.incompleteOperations, 0L);
+    } catch (RuntimeException | Error failure) {
+      primaryFailure = failure;
+      throw failure;
+    } finally {
+      if (setupComplete) {
+        try {
+          benchmark.tearDown();
+        } catch (RuntimeException | Error cleanupFailure) {
+          if (primaryFailure == null) {
+            throw cleanupFailure;
+          }
+          primaryFailure.addSuppressed(cleanupFailure);
+        }
+      }
+    }
   }
 
 }
