@@ -3,6 +3,7 @@ package com.red.ohc.cache;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
@@ -11,6 +12,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.openjdk.jol.info.ClassLayout;
+import org.openjdk.jol.vm.VM;
 import org.testng.annotations.Test;
 
 import com.red.ohc.index.Entry;
@@ -20,9 +22,33 @@ import com.red.ohc.storage.WriterArena;
 
 public class HeapLayoutTest {
   @Test
+  public void requestedLayoutOptionsReachTheTestJvm() {
+    String requested = System.getProperty("argLine", "");
+    for (String option : requested.trim().split("\\s+")) {
+      if (option.startsWith("-XX:")) {
+        assertTrue(
+            ManagementFactory.getRuntimeMXBean().getInputArguments().contains(option),
+            "requested layout option must reach the test JVM: " + option);
+      }
+    }
+  }
+
+  @Test
   public void entryMetadataRemainsNativeAndLifecycleCompact() {
-    long bytes = ClassLayout.parseClass(Entry.class).instanceSize();
-    assertEquals(bytes, 32L, "Entry must keep per-mapping metadata within the compact object");
+    ClassLayout layout = ClassLayout.parseClass(Entry.class);
+    int alignment = VM.current().objectAlignment();
+    long payloadEnd = layout.headerSize() + 2L * Long.BYTES + Integer.BYTES;
+    long minimumBytes = ((payloadEnd + alignment - 1L) / alignment) * alignment;
+    assertEquals(
+        layout.instanceSize(),
+        minimumBytes,
+        "Entry must contain only its header, two longs, one int and required alignment");
+    System.out.printf(
+        "entry-layout: bytes=%d, header=%d, alignment=%d, jvmArgs=%s%n",
+        layout.instanceSize(),
+        layout.headerSize(),
+        alignment,
+        ManagementFactory.getRuntimeMXBean().getInputArguments());
   }
 
   @Test

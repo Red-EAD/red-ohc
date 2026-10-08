@@ -100,3 +100,84 @@ Preparation does not establish benchmark correctness under long contention,
 cross-platform native compatibility or Linux x86-64 performance. Run dedicated
 Linux experiments after approval, retain all rounds, investigate stable regressions
 and publish limitations alongside results. No comparative performance result is published yet.
+
+## Paired revisions across JDKs
+
+`scripts/run_paired_benchmarks.py` compares Red OHC revisions through the existing
+`OHCSerializedBenchmark` tuning entry, separately from the six-framework suite.
+BASE is fixed at `306f87b0e2d36f1e8fc02b2024cc889be9a24535`; NEW must be a clean,
+committed descendant. It exports both Git trees outside the checkout, builds both
+with the supplied Java 11, checks application class-file version 55, and copies
+the thin JMH JAR plus the existing RED runtime dependency graph into distinct
+artifact directories. The private Maven repositories keep SNAPSHOT coordinates
+from overwriting the other revision. Preparation records the compiler, source
+SHAs and every JAR checksum. Measurement checks those checksums before every run.
+Neither command rewrites the source checkout or its Git history.
+
+Preview without building or running anything:
+
+```bash
+python3 scripts/run_paired_benchmarks.py
+```
+
+On a dedicated Linux x86-64 machine, after committing the exact NEW revision:
+
+```bash
+python3 scripts/run_paired_benchmarks.py --prepare \
+  --output /srv/results/red-ohc-paired \
+  --jdk-homes /opt/jdk-11 /opt/jdk-17 /opt/jdk-21 /opt/jdk-25
+python3 scripts/run_paired_benchmarks.py --run \
+  --output /srv/results/red-ohc-paired \
+  --jdk-homes /opt/jdk-11 /opt/jdk-17 /opt/jdk-21 /opt/jdk-25
+```
+
+Preparation requires a fresh output directory. A run creates a fresh `runs/`
+directory and never overwrites an earlier experiment. It refuses execution on
+macOS, Windows or non-x86-64 Linux. `--new-ref` selects a committed revision;
+`--jvm-args` replaces the common JVM options for both revisions and all four JDKs.
+The defaults use G1, a 1 GiB heap and a 1 GiB direct-memory limit. The same
+prepared bytes run on Java 11, 17, 21 and 25; both the controller and fork use the
+selected Java binary. No benchmark runs implicitly in CI or local smoke tests.
+The runner overrides annotation append/prepend arguments and checks the actual
+fork JVM, version, arguments and workload parameters in JMH's result metadata;
+custom heap/direct-memory settings cannot silently revert to annotation defaults.
+
+| Scenario | Existing method | Threads | Workload |
+| --- | --- | --- | --- |
+| read_t1 | oneThread | 1 | READ_100 |
+| read_t32 | cpuThreads | 32 | READ_100 |
+| write_t8 | cpuThreads | 8 | WRITE_100 |
+| mix_t8 | cpuThreads | 8 | READ_90_WRITE_10 |
+
+Each scenario uses UNIFORM and MIXED with four key/value byte pairs: 32/5120,
+32/64, 32/16384 and 1024/5120. Capacity is calculated by the existing allocator
+weight formula for 19,660 resident entries; the universe remains 24,576 keys and
+TTL remains ten minutes. Generic reads use the existing lightweight first-byte
+codec. These are lookup/allocation tuning experiments, not full-value bandwidth
+or full-materialization comparisons. Use the existing direct full-scan/copy
+methods separately when investigating large-value memory bandwidth.
+
+Every case has five adjacent BASE/NEW pairs with alternating order, one fork per
+process, warmup 3 x 5s and measurement 5 x 10s. The full matrix contains 640 serial
+processes and is a dedicated-machine experiment. Keep CPU governor, NUMA/affinity,
+native allocator and background load stable and record them alongside the manifest.
+
+Each process retains the exact command, JMH JSON/log, completed/attempted counters,
+wall time, user/system child CPU, logical CPU count, affinity and sampled per-process
+CPU/RSS. Whole-process CPU includes startup, warmup and teardown. Existing measured
+CPU windows separately record the five measurement intervals; CPU per completed
+operation is an estimate from those windows and the measured completion throughput.
+Missing CPU data is reported as unavailable, not zero. RSS samples are lower bounds;
+they are not exact peaks or a per-entry heap measurement. Normalized whole-process
+CPU uses the machine logical CPU count; affinity is recorded separately.
+
+The runner rejects errors, reported rejections, partial measurements and
+attempted/completed or attempted/accepted write mismatches in any iteration,
+even if their aggregate averages agree. A 300-second per-process limit, interrupt
+handling and process-group termination prevent abandoned forks. Completed pairs
+are retained in `summary.json`; incomplete cases are marked incomplete. No fixed
+regression threshold or automatic acceptance verdict is generated. Evaluate
+throughput, CPU per completed operation and memory separately for each JDK and
+size; investigate repeatable regressions without cancelling them against gains
+elsewhere. Cross-platform CI and passing layout tests do not establish Linux
+performance. Linux performance acceptance remains pending until actual results exist.

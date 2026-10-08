@@ -47,3 +47,16 @@ availability; private export mappings and approval records remain outside the re
 
 To build with only the repository's public Maven settings, add
 `-s config/maven/settings.xml -gs config/maven/settings.xml` to root Wrapper commands.
+
+Layout tests use in-process field offsets. The core test JVM disables JOL dynamic
+attach and Serviceability Agent attach so CI does not need debugger privileges or
+spawn an external attach process. These settings do not skip the layout assertions.
+
+Core Surefire appends `-DargLine` to its required module access option. CI checks
+that requested `-XX` layout flags actually reach the forked test JVM, then checks
+field isolation and minimum Entry size using that JVM's header and alignment.
+The existing OS/JDK jobs also test 16-byte alignment, uncompressed pointers and
+their combination. JDK 25 runs core tests with compact object headers enabled.
+These are test configurations; production code does not select an implementation
+by JDK version. See [paired JDK measurements](docs/benchmarks.md#paired-revisions-across-jdks)
+for the separate Linux performance protocol.

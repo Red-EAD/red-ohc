@@ -583,6 +583,61 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
+  public void expiredReaderBlockedRetryRunsABoundedPassAndReschedules() throws Exception {
+    AtomicLong nowNanos = new AtomicLong();
+    Ticker ticker =
+        new Ticker() {
+          @Override
+          public long nanos() {
+            return nowNanos.get();
+          }
+
+          @Override
+          public long currentTimeMillis() {
+            return 0L;
+          }
+        };
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ReaderRegistry readers = newReaderRegistry(memory);
+    ReaderSlot reader = new ReaderSlot();
+    readers.register(reader);
+    readers.beginOpForTest(reader, true);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, ticker, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+    RetirementJournal journal = loop.retirementJournal();
+    try {
+      journal.append(0L, 0L);
+      CompletableFuture<Void> flush = loop.flush();
+      invokeMaintenancePass(loop);
+      assertFalse(flush.isDone());
+      assertFalse(invokeBooleanMethod(loop, "hasRunnableWork"));
+
+      nowNanos.set(getLongField(loop, "reclaimRetryNanos"));
+      // Model the next actor turn: its clock sample is reset before deciding whether to run.
+      setBooleanField(loop, "monotonicSampledThisPass", false);
+      assertTrue(
+          invokeBooleanMethod(loop, "hasRunnableWork"),
+          "an expired retry must run a bounded pass instead of repeatedly refusing to park");
+      invokeMaintenancePass(loop);
+      assertTrue(getLongField(loop, "reclaimRetryNanos") > nowNanos.get());
+      assertFalse(invokeBooleanMethod(loop, "hasRunnableWork"));
+      assertFalse(flush.isDone(), "a retry must not reclaim a reader-pinned segment");
+
+      readers.endOpForTest(reader);
+      loop.readerQuiescent(reader);
+      assertTrue(invokeBooleanMethod(loop, "hasRunnableWork"));
+      invokeMaintenancePass(loop);
+      assertTrue(flush.isDone(), "reader exit must let the original flush finish");
+      assertEquals(journal.completedRecordsTotal(), 1L);
+    } finally {
+      readers.endOpForTest(reader);
+      journal.close();
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void idleRetryDeadlineExposesTheScheduledRetryWhileReaderActive() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     RetirementJournal journal = new RetirementJournal(memory);
