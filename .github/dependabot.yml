@@ -1,11 +1,17 @@
 version: 2
 updates:
   - package-ecosystem: maven
+    # Core dependency versions are managed by the root POM.
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
+    exclude-paths:
+      - red-ohc-jmh/**
+      - examples/**
+    allow:
+      - dependency-name: net.java.dev.jna:jna
+      - dependency-name: org.jctools:jctools-core
+      - dependency-name: org.testng:testng
+      - dependency-name: org.openjdk.jol:jol-core
+      - dependency-name: org.openjdk.jcstress:jcstress-core
