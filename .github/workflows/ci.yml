@@ -27,6 +27,27 @@ jobs:
       - name: Verify core and benchmark sources
         shell: bash
         run: ./mvnw -B -s config/maven/settings.xml -gs config/maven/settings.xml -Pbenchmarks -pl red-ohc-core,red-ohc-jmh -am clean verify
+      - name: Verify alternative heap layouts
+        shell: bash
+        run: |
+          for options in \
+            '-XX:ObjectAlignmentInBytes=16' \
+            '-XX:-UseCompressedOops -XX:-UseCompressedClassPointers' \
+            '-XX:ObjectAlignmentInBytes=16 -XX:-UseCompressedOops -XX:-UseCompressedClassPointers'; do
+            ./mvnw -B -s config/maven/settings.xml -gs config/maven/settings.xml \
+              -pl red-ohc-core -am \
+              '-Dtest=HeapLayoutTest#requestedLayoutOptionsReachTheTestJvm+entryMetadataRemainsNativeAndLifecycleCompact+entryContainsOnlyAdmissionAndNativeFields+entryHasOnlyNativeAndLifecycleFields,WriterArenaTest#pageCountersUseSeparateCacheLinesForOwnerAndReclaimerState' \
+              -Dsurefire.failIfNoSpecifiedTests=false "-DargLine=$options" test
+          done
+      - name: Verify core with compact object headers
+        if: matrix.java == '25'
+        shell: bash
+        run: |
+          ./mvnw -B -s config/maven/settings.xml -gs config/maven/settings.xml \
+            -pl red-ohc-core -am -DargLine=-XX:+UseCompactObjectHeaders test
+      - name: Verify paired benchmark tooling
+        if: matrix.os == 'ubuntu-latest' && matrix.java == '11'
+        run: python3 -m unittest discover -s scripts -p 'test_run_paired_benchmarks.py' -v
       - name: Check whitespace
         shell: bash
         run: git diff --check

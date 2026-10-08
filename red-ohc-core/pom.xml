@@ -10,6 +10,9 @@
     <artifactId>red-ohc-core</artifactId>
     <name>Red OHC Core</name>
     <description>Off-heap concurrent hash map with async architecture - Red OHC</description>
+    <properties>
+        <argLine></argLine>
+    </properties>
     <dependencies>
         <dependency>
             <groupId>org.jctools</groupId>
@@ -55,7 +58,12 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <forkCount>1</forkCount>
-                    <argLine>--add-opens java.base/java.util.concurrent=ALL-UNNAMED</argLine>
+                    <argLine>--add-opens java.base/java.util.concurrent=ALL-UNNAMED ${argLine}</argLine>
+                    <!-- Layout tests use in-process field offsets; external attach is unnecessary. -->
+                    <systemPropertyVariables>
+                        <jol.skipDynamicAttach>true</jol.skipDynamicAttach>
+                        <jol.skipHotspotSAAttach>true</jol.skipHotspotSAAttach>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>

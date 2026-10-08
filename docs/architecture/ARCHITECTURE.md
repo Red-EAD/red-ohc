@@ -192,7 +192,9 @@ SAFE segments have passed the relevant reader checks; the actor still has to fre
 their physical blocks. Reclaim batches group page releases and track partial
 progress before reusing segments. A stalled protected reader can retain retired
 memory, but the actor uses retry deadlines and notifications to park instead of
-continually spinning. Sources: [`ReaderRegistry`](../../red-ohc-core/src/main/java/com/red/ohc/runtime/ReaderRegistry.java),
+continually spinning. An expired reader-blocked retry runs one bounded pass to
+re-arm reader notifications and advance the backoff deadline; it never releases
+blocks that remain protected. Sources: [`ReaderRegistry`](../../red-ohc-core/src/main/java/com/red/ohc/runtime/ReaderRegistry.java),
 [`RetirementJournal`](../../red-ohc-core/src/main/java/com/red/ohc/maintenance/RetirementJournal.java)
 and [`RetirementSegment`](../../red-ohc-core/src/main/java/com/red/ohc/maintenance/RetirementSegment.java).
 
@@ -250,6 +252,19 @@ hardware optimality. Sources: [`ValueBlock`](../../red-ohc-core/src/main/java/co
 [`SizeClasses`](../../red-ohc-core/src/main/java/com/red/ohc/storage/SizeClasses.java),
 [`NativeMemory`](../../red-ohc-core/src/main/java/com/red/ohc/storage/NativeMemory.java)
 and [`NativeAllocator`](../../red-ohc-core/src/main/java/com/red/ohc/storage/NativeAllocator.java).
+
+Allocator page descriptors isolate the owner cursor/counters, the actor freed
+counter and the shared free bitmap with separate inheritance padding layers.
+A leading padding layer keeps subclass fields that the JVM backfills into header
+gaps away from the owner fields. Layout tests check byte ranges at every possible
+base offset within a 64-byte cache line; heap objects need not be line-aligned.
+This isolation target is Linux/x86-64 with 64-byte cache lines, not a universal
+claim about every processor. The padding belongs to each allocator page descriptor,
+not each cache entry. In local HotSpot Java 11/21 measurements with 12-byte headers
+and 8-byte object alignment, the descriptor grows from 280 to 368 bytes (+88 bytes
+per page). CI reports actual Page and Entry sizes for its JVM configurations;
+different header/pointer/alignment settings can change these sizes. Layout evidence
+does not establish throughput improvement; matched Linux measurements are separate.
 
 ## Scheduling, failure and lifetime
 

@@ -289,30 +289,46 @@ public final class WriterArena {
     }
   }
 
-  /**
-   * Owner-only allocation cursor and counter; padding keeps shared state out of this line. The
-   * cursor is a long so it stays inside this line: the JVM lays int fields after the long group,
-   * which would drop the cursor into the contended reclaimer region below.
-   */
-  static class PageOwnerLine {
+  /** Keeps subclass fields backfilled into the object header away from the owner group. */
+  static class PageLeadingPadding {
+    long leadingPadding0;
+    long leadingPadding1;
+    long leadingPadding2;
+    long leadingPadding3;
+    long leadingPadding4;
+    long leadingPadding5;
+    long leadingPadding6;
+    long leadingPadding7;
+  }
+
+  /** Owner-only fields stay together regardless of the JVM's ordering within each class. */
+  static class PageOwnerLine extends PageLeadingPadding {
     long nextSlot;
     long allocatedSlots;
-    long ownerPadding0;
-    long ownerPadding1;
-    long ownerPadding2;
-    long ownerPadding3;
-    long ownerPadding4;
     /** Owner-private remainder of the last whole freeBits word grab; grabWord is its word index. */
     long grabMask;
     long grabWord;
   }
 
-  /** Reclaimer-shared bitmap, counter, state, and owner handoff fields. */
-  static class PageSharedLine extends PageOwnerLine {
-    // Actor-only cumulative freed count. Isolated on both sides so the writer-side allocation
-    // read of freeSummary never shares a line with this counter's remote-free RMWs; with only
-    // 8-byte object alignment, double-sided padding is the sole deterministic isolation.
+  /** A separate inheritance layer prevents padding from splitting the owner field group. */
+  static class PageOwnerPadding extends PageOwnerLine {
+    long ownerPadding0;
+    long ownerPadding1;
+    long ownerPadding2;
+    long ownerPadding3;
+    long ownerPadding4;
+    long ownerPadding5;
+    long ownerPadding6;
+    long ownerPadding7;
+  }
+
+  /** Actor-only cumulative freed count, isolated from owner and bitmap fields on both sides. */
+  static class PageFreedCounterLine extends PageOwnerPadding {
     volatile long freedSlots;
+  }
+
+  /** Heap objects need not be cache-line aligned, so reserve a full line between field groups. */
+  static class PageFreedPadding extends PageFreedCounterLine {
     long freedPad0;
     long freedPad1;
     long freedPad2;
@@ -321,6 +337,10 @@ public final class WriterArena {
     long freedPad5;
     long freedPad6;
     long freedPad7;
+  }
+
+  /** Reclaimer-shared bitmap, state, and owner handoff fields. */
+  static class PageSharedLine extends PageFreedPadding {
     volatile long freeSummary;
     volatile long freeBits0;
     volatile long freeBits1;
@@ -367,7 +387,7 @@ public final class WriterArena {
         MethodHandles.Lookup lookup = MethodHandles.lookup();
         ALLOCATED_SLOTS =
             lookup.findVarHandle(PageOwnerLine.class, "allocatedSlots", long.class);
-        FREED_SLOTS = lookup.findVarHandle(PageSharedLine.class, "freedSlots", long.class);
+        FREED_SLOTS = lookup.findVarHandle(PageFreedCounterLine.class, "freedSlots", long.class);
         FREE_SUMMARY = lookup.findVarHandle(PageSharedLine.class, "freeSummary", long.class);
         FREE_BITS_0 = lookup.findVarHandle(PageSharedLine.class, "freeBits0", long.class);
         FREE_BITS_1 = lookup.findVarHandle(PageSharedLine.class, "freeBits1", long.class);

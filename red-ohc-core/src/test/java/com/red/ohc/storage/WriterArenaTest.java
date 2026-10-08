@@ -612,7 +612,7 @@ public class WriterArenaTest {
     Assert.assertEquals(allocatedSlots.getType(), long.class);
     Assert.assertEquals(freedSlots.getType(), long.class);
     Assert.assertEquals(allocatedSlots.getDeclaringClass(), WriterArena.PageOwnerLine.class);
-    Assert.assertEquals(freedSlots.getDeclaringClass(), WriterArena.PageSharedLine.class);
+    Assert.assertEquals(freedSlots.getDeclaringClass(), WriterArena.PageFreedCounterLine.class);
     Assert.assertEquals(
         requirePageField("state").getDeclaringClass(), WriterArena.PageSharedLine.class);
     Assert.assertEquals(
@@ -648,13 +648,27 @@ public class WriterArenaTest {
     for (FieldLayout field : layout.fields()) {
       fields.put(field.name(), field);
     }
-    FieldLayout nextSlot = requirePageLayoutField(fields, "nextSlot");
-    FieldLayout allocatedSlots = requirePageLayoutField(fields, "allocatedSlots");
-    long ownerLine = allocatedSlots.offset() / 64L;
+    String[] ownerFields = {"nextSlot", "allocatedSlots", "grabMask", "grabWord"};
+    long firstOwnerOffset = Long.MAX_VALUE;
+    long ownerEnd = 0L;
+    for (String name : ownerFields) {
+      FieldLayout field = requirePageLayoutField(fields, name);
+      firstOwnerOffset = Math.min(firstOwnerOffset, field.offset());
+      ownerEnd = Math.max(ownerEnd, field.offset() + field.size());
+    }
     Assert.assertEquals(
-        nextSlot.offset() / 64L,
-        ownerLine,
-        "owner allocation fields must share the owner cache line");
+        ownerEnd - firstOwnerOffset,
+        4L * Long.BYTES,
+        "owner allocation fields must form one compact group");
+    System.out.printf(
+        "page-layout: bytes=%d, header=%d, firstOwner=%d, ownerSpan=%d, "
+            + "freedSlots=%d, freeSummary=%d%n",
+        layout.instanceSize(),
+        layout.headerSize(),
+        firstOwnerOffset,
+        ownerEnd - firstOwnerOffset,
+        requirePageLayoutField(fields, "freedSlots").offset(),
+        requirePageLayoutField(fields, "freeSummary").offset());
 
     String[] sharedFields = {
       "freedSlots",
@@ -670,36 +684,32 @@ public class WriterArenaTest {
       "state",
       "ownerClass"
     };
-    for (String name : sharedFields) {
-      Assert.assertNotEquals(
-          requirePageLayoutField(fields, name).offset() / 64L,
-          ownerLine,
-          name + " must not share the owner cache line");
+    for (String owner : ownerFields) {
+      for (String shared : sharedFields) {
+        assertSeparatePageCacheLines(fields, owner, shared);
+      }
     }
+    // Heap objects are not cache-line aligned. Check every possible base offset, including
+    // fields that straddle a line, rather than treating object-relative offset zero as aligned.
+    for (String shared : sharedFields) {
+      if (!shared.equals("freedSlots")) {
+        assertSeparatePageCacheLines(fields, "freedSlots", shared);
+      }
+    }
+  }
 
-    // The actor-only cumulative freed counter must stay off the bitmap lines the writers read
-    // on every allocation: its remote-free RMWs would otherwise invalidate the writer-side line.
-    long freedLine = requirePageLayoutField(fields, "freedSlots").offset() / 64L;
-    for (String name :
-        new String[] {
-          "nextSlot",
-          "allocatedSlots",
-          "freeSummary",
-          "freeBits0",
-          "freeBits1",
-          "freeBits2",
-          "freeBits3",
-          "freeBits4",
-          "freeBits5",
-          "freeBits6",
-          "freeBits7",
-          "state",
-          "ownerClass"
-        }) {
-      Assert.assertNotEquals(
-          requirePageLayoutField(fields, name).offset() / 64L,
-          freedLine,
-          name + " must not share the freed-counter cache line");
+  private static void assertSeparatePageCacheLines(
+      Map<String, FieldLayout> fields, String first, String second) {
+    FieldLayout left = requirePageLayoutField(fields, first);
+    FieldLayout right = requirePageLayoutField(fields, second);
+    for (int base = 0; base < 64; base++) {
+      long leftStart = (base + left.offset()) / 64L;
+      long leftEnd = (base + left.offset() + left.size() - 1L) / 64L;
+      long rightStart = (base + right.offset()) / 64L;
+      long rightEnd = (base + right.offset() + right.size() - 1L) / 64L;
+      Assert.assertTrue(
+          leftEnd < rightStart || rightEnd < leftStart,
+          first + " must not share a cache line with " + second + " at base offset " + base);
     }
   }
 

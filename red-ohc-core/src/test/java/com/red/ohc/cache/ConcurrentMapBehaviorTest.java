@@ -803,7 +803,6 @@ public final class ConcurrentMapBehaviorTest {
       try {
         ThreadContext pinned = context(cache);
         ReaderGuard guard = new ReaderGuard(worker(cache));
-        guard.enter(pinned);
         Field memoryField = OffHeapCache.class.getDeclaredField("memory");
         memoryField.setAccessible(true);
         NativeMemory.Memory memory = (NativeMemory.Memory) memoryField.get(cache);
@@ -811,9 +810,10 @@ public final class ConcurrentMapBehaviorTest {
             NativeMemory.Memory.class.getDeclaredMethod("pageForHandle", long.class);
         pageForHandle.setAccessible(true);
         Field freedSlots =
-            Class.forName("com.red.ohc.storage.WriterArena$PageSharedLine")
+            Class.forName("com.red.ohc.storage.WriterArena$PageFreedCounterLine")
                 .getDeclaredField("freedSlots");
         freedSlots.setAccessible(true);
+        guard.enter(pinned);
         try {
           cache.computeIfAbsent("computed", ignored -> "value");
           Entry inserted = cache.dataForTest().values().iterator().next();
