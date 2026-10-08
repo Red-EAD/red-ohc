@@ -13,7 +13,7 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>11</maven.compiler.release>
-        <jna.version>5.15.0</jna.version>
+        <jna.version>5.19.1</jna.version>
         <jctools.version>4.0.5</jctools.version>
         <jol.version>0.17</jol.version>
         <jcstress.version>0.16</jcstress.version>
