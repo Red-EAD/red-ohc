@@ -14,7 +14,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>11</maven.compiler.release>
         <jna.version>5.19.1</jna.version>
-        <jctools.version>4.0.5</jctools.version>
+        <jctools.version>4.0.7</jctools.version>
         <jol.version>0.17</jol.version>
         <jcstress.version>0.16</jcstress.version>
         <caffeine.version>3.2.4</caffeine.version>
