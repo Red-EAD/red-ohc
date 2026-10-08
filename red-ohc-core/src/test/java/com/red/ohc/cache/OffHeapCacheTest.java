@@ -820,10 +820,14 @@ public class OffHeapCacheTest {
   public void committedComputeRemovalSurvivesAReadySignalPublicationFailure() throws Exception {
     {
       OffHeapCache<String, String> cache = newTestCache();
+      CountDownLatch actorPaused = new CountDownLatch(1);
+      CountDownLatch releaseActor = new CountDownLatch(1);
       Throwable cacheFailure4 = null;
       try {
         cache.put("remove", "value");
         cache.flushAsync().join();
+        // The test inspects the actor's consumer lane, so stop its consumer before publication.
+        pauseMaintenance(cache, actorPaused, releaseActor);
         MaintenanceEventLoop worker = worker(cache);
         AtomicBoolean injected = new AtomicBoolean();
         Method recordFailure =
@@ -872,6 +876,7 @@ public class OffHeapCacheTest {
         cacheFailure4 = cacheOperationFailure;
         throw cacheOperationFailure;
       } finally {
+        releaseActor.countDown();
         CacheTestSupport.stop(cache, cacheFailure4);
       }
     }

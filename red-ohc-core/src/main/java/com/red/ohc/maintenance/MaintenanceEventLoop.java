@@ -1822,9 +1822,16 @@ public final class MaintenanceEventLoop
     }
     int result =
         RUNNABLE_CHECK_READERS | (decision.activeReaders ? RUNNABLE_CHECK_ACTIVE_READERS : 0);
-    if (!decision.activeReaders
-        && (((decision.retirementState & RetirementJournal.WORK_STATE_SEALED) != 0)
-            || reclaimWorkDue(sampleMonotonicNow()))) {
+    // An expired reader-blocked retry must run one bounded pass to re-arm notifications and
+    // advance its backoff. Otherwise parkUntilWork keeps seeing a past deadline and spins.
+    boolean blockedRetryDue =
+        reclaimBlocked
+            && reclaimRetryNanos != Long.MAX_VALUE
+            && reclaimRetryNanos <= sampleMonotonicNow();
+    if (blockedRetryDue
+        || (!decision.activeReaders
+            && (((decision.retirementState & RetirementJournal.WORK_STATE_SEALED) != 0)
+                || reclaimWorkDue(sampleMonotonicNow())))) {
       result |= RUNNABLE_CHECK_WORK;
     }
     return result;
