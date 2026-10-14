@@ -1,6 +1,6 @@
-# Red OHC
+# [Red OHC](https://github.com/Red-EAD/red-ohc)
 
-[中文](README.zh-CN.md) · [Quick start](docs/quickstart.md) · [Documentation](docs/README.md) · [Architecture](docs/architecture/ARCHITECTURE.md)
+[中文](README.zh-CN.md) · [Quick start](docs/quickstart.md) · [Documentation](docs/README.md) · [Architecture](docs/architecture/ARCHITECTURE.md) · [Project article](https://mp.weixin.qq.com/s/gKQneNQRDOFSSVueQWvq3A)
 
 Red OHC is a concurrent, serialized off-heap cache for Java applications. It keeps
 key and value bytes in native memory, uses a JDK `ConcurrentHashMap` for lookup,
@@ -98,20 +98,7 @@ will supply it without an additional repository.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  App[Application threads] --> Index[CHM index on heap]
-  Index --> Native[Serialized keys and values in native memory]
-  App --> Lanes[Lifecycle lanes and access samples]
-  Lanes --> Actor[Maintenance actor]
-  Actor --> Policy[Eviction and TTL]
-  Policy --> Index
-  App --> Retirement[Retirement journal]
-  Actor --> Retirement
-  Readers[Reader quiescence] --> Retirement
-  Retirement --> Reclaim[Actor reclaims safe memory]
-  Reclaim --> Native
-```
+![Red OHC architecture: caller data path, heap CHM, native bytes and actor maintenance](docs/architecture/assets/red-ohc-architecture.png)
 
 Writes publish data synchronously; the actor maintains policy state and releases
 retired storage later. `capacity` and `maxSize` are mutually exclusive eviction
@@ -157,13 +144,26 @@ Maintainer procedures are in the [release guide](docs/releasing.md).
 
 ## Benchmarks
 
-The fair comparison suite covers Red OHC, [snazy/OHC](https://github.com/snazy/ohc),
-Ehcache, MapDB, Chronicle Map and Redis through ordinary APIs. It reports workload,
-serialization and memory contracts; Redis includes its process and network costs.
-Core microbenchmarks diagnose individual paths separately.
+The fair comparison suite uses [JMH](https://github.com/openjdk/jmh) and covers
+[Red OHC](https://github.com/Red-EAD/red-ohc), [snazy/OHC](https://github.com/snazy/ohc),
+[Ehcache](https://github.com/ehcache/ehcache3), [MapDB](https://github.com/jankotek/mapdb),
+[Chronicle Map](https://github.com/OpenHFT/Chronicle-Map) and
+[Redis](https://github.com/redis/redis) through ordinary APIs. Redis includes its
+process and network costs. [Caffeine](https://github.com/ben-manes/caffeine) and
+core microbenchmarks are separate diagnostic workloads.
 
-No comparative throughput or Linux x86-64 performance result is published yet.
-Use the [benchmark protocol](docs/benchmarks.md) to reproduce and interpret results.
+The [project article](https://mp.weixin.qq.com/s/gKQneNQRDOFSSVueQWvq3A) reports
+**3.38x** the Cassandra OHC throughput for 32-thread reads and **2.60x** for a
+32-thread 90% read / 10% write workload, on AMD EPYC 7T83 with JDK 11, 16-byte
+keys and 64-byte values. These are results from the article's two-engine
+comparison, rather than a ranking of all six frameworks or a new run of this
+checkout. See [published results and measurement conditions](docs/benchmarks.md#published-results)
+and the benchmark protocol for the complete comparison.
+
+![Published Red OHC and Cassandra OHC throughput ratios](docs/benchmark-assets/published-throughput.png)
+
+[Download the vector chart](docs/benchmark-assets/published-throughput.svg).
+Cassandra OHC is normalized to 1.00x separately for each workload.
 
 ## License
 

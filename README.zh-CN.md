@@ -1,6 +1,6 @@
-# Red OHC
+# [Red OHC](https://github.com/Red-EAD/red-ohc)
 
-[English](README.md) · [快速开始](docs/quickstart.md) · [文档导航](docs/README.md) · [架构设计](docs/architecture/ARCHITECTURE.md)
+[English](README.md) · [快速开始](docs/quickstart.md) · [文档导航](docs/README.md) · [架构设计](docs/architecture/ARCHITECTURE.md) · [项目文章](https://mp.weixin.qq.com/s/gKQneNQRDOFSSVueQWvq3A)
 
 Red OHC 是面向 Java 应用的并发序列化堆外缓存。key/value 的字节存储在 native
 内存，JDK `ConcurrentHashMap` 负责索引，维护 actor 负责淘汰、过期和延迟内存回收。
@@ -90,20 +90,7 @@ Maven 和 Gradle 的完整配置见[依赖指南](docs/quickstart.md#add-the-dep
 
 ## 架构
 
-```mermaid
-flowchart LR
-  App[应用线程] --> Index[堆内 CHM 索引]
-  Index --> Native[native 中的 key/value 字节]
-  App --> Lanes[Lifecycle lane 和访问采样]
-  Lanes --> Actor[维护 actor]
-  Actor --> Policy[淘汰与 TTL]
-  Policy --> Index
-  App --> Retirement[Retirement journal]
-  Actor --> Retirement
-  Readers[读者静止状态] --> Retirement
-  Retirement --> Reclaim[Actor 回收安全内存]
-  Reclaim --> Native
-```
+![Red OHC 架构：调用线程数据路径、堆内 CHM、native 字节与 actor 维护](docs/architecture/assets/red-ohc-architecture.png)
 
 写操作同步发布数据，actor 随后维护策略状态并回收退休存储。
 `capacity` 与 `maxSize` 只能二选一，都是淘汰目标，native 分配可能暂时超过目标。
@@ -145,12 +132,25 @@ Wrapper 固定 Maven 3.9.16，并进行 SHA-256 下载校验。
 
 ## Benchmark
 
-公平对比覆盖 Red OHC、[snazy/OHC](https://github.com/snazy/ohc)、Ehcache、MapDB、
-Chronicle Map 和 Redis，使用各框架普通 API。结果需要报告负载、序列化和内存约定，
-Redis 还包括独立进程及网络成本；核心微基准单独用于路径诊断。
+公平对比使用 [JMH](https://github.com/openjdk/jmh)，覆盖
+[Red OHC](https://github.com/Red-EAD/red-ohc)、[snazy/OHC](https://github.com/snazy/ohc)、
+[Ehcache](https://github.com/ehcache/ehcache3)、[MapDB](https://github.com/jankotek/mapdb)、
+[Chronicle Map](https://github.com/OpenHFT/Chronicle-Map) 和
+[Redis](https://github.com/redis/redis)，通过各框架普通 API 测量。
+Redis 包含独立进程和网络成本。[Caffeine](https://github.com/ben-manes/caffeine)
+和核心微基准单独用于诊断。
 
-目前没有发布框架吞吐对比或 Linux x86-64 性能结果。
-运行与解读方式见 [benchmark 协议](docs/benchmarks.md)。
+[项目文章](https://mp.weixin.qq.com/s/gKQneNQRDOFSSVueQWvq3A)报告：在 AMD EPYC 7T83、
+JDK 11、16B key、64B value 的配置下，32 线程纯读吞吐为 Cassandra OHC 的
+**3.38 倍**，32 线程 90% 读 / 10% 写为 **2.60 倍**。这些数据属于文章中的两引擎对比，
+不代表全部六框架排名，也不是当前 checkout 的新一轮测试。
+完整结果和测量条件见[已发表的基准结果](docs/benchmarks.md#published-results)，
+复现方式见同页 benchmark 协议。
+
+![Red OHC 与 Cassandra OHC 已发表的吞吐比值](docs/benchmark-assets/published-throughput.png)
+
+[下载矢量图](docs/benchmark-assets/published-throughput.svg)。
+每个场景分别将 Cassandra OHC 吞吐归一为 1.00 倍。
 
 ## 许可证
 
