@@ -1,10 +1,74 @@
 # Benchmark protocol
 
+## Published results
+
+The [project article](https://mp.weixin.qq.com/s/gKQneNQRDOFSSVueQWvq3A) reports a
+five-round comparison of Red OHC and Cassandra OHC. The following values come
+from that article; they were not measured again on this checkout.
+
+| Setting | Reported configuration |
+| --- | --- |
+| CPU | AMD EPYC 7T83, Zen 3 |
+| JDK | 11 |
+| Heap / native memory budget | 1 GB / 1 GB |
+| Key / value size | 16 B / 64 B |
+| Working set | Approximately 24,000 entries |
+| Access distribution | Uniform random |
+| Red OHC policy | Default S3-FIFO |
+| Cassandra OHC policy | Default LRU |
+| Measurement | JMH throughput mode, five rounds |
+
+Ratios are Red OHC throughput divided by Cassandra OHC throughput; Cassandra OHC
+is the 1.00x reference in each row.
+
+| Workload | Threads | Reported throughput ratio |
+| --- | ---: | ---: |
+| Read | 1 | 1.13x |
+| Write | 1 | 1.26x |
+| 90% read / 10% write | 1 | 1.25x |
+| Read | 32 | 3.38x |
+| Write | 32 | 1.30x |
+| 90% read / 10% write | 32 | 2.60x |
+
+![Published Red OHC and Cassandra OHC throughput ratios](benchmark-assets/published-throughput.png)
+
+[Download the vector chart](benchmark-assets/published-throughput.svg).
+Both panels use the same scale, with Cassandra OHC normalized to 1.00x for each
+workload. Ratios compare engines within a workload; the chart does not compare
+absolute throughput between workloads. Raw rounds are unavailable here, so the
+chart has no error bars.
+
+A separate JMH GC-profiler measurement used 32 read threads and three
+3-second measurement rounds. Its published observations are:
+
+| Metric | Cassandra OHC | Red OHC |
+| --- | ---: | ---: |
+| Heap allocation per read | Approximately 32 B/op | Approximately 0.001 B/op |
+| GC count in that measurement | 22 | 0 |
+
+These observations describe the measured read workload and profiling window.
+Serializers that materialize application objects can allocate on the Java heap.
+The GC measurement is separate from the five-round throughput comparison.
+
+Artifact hashes, source SHAs and raw per-round results are not included with
+this table. It records a sourced comparison, not acceptance evidence for
+current main or the six-framework protocol below. Reproducing the exact run
+also requires the measured artifacts and complete JMH settings. The source
+text does not report CPU cost per completed operation or a matched total-memory
+comparison. The heap allocation numbers above do not represent total process
+memory, and the ratios do not establish end-to-end application QPS.
+
+## Six-framework comparison
+
 The primary comparison is `FairSerializedBenchmark.operation`, with six isolated
-runtime graphs: Red OHC, upstream snazy/OHC 0.7.4 (linked implementation),
-Ehcache 3.10.8, MapDB 3.1.0 (direct-memory DB, 16 hash-map segments),
-Chronicle Map 3.27ea1 and Redis via Jedis 5.0.2. Redis's installed server version
-must also be recorded. Caffeine and engine-specific microbenchmarks remain
+runtime graphs: [Red OHC](https://github.com/Red-EAD/red-ohc), upstream
+[snazy/OHC](https://github.com/snazy/ohc) 0.7.4 (linked implementation),
+[Ehcache](https://github.com/ehcache/ehcache3) 3.10.8,
+[MapDB](https://github.com/jankotek/mapdb) 3.1.0 (direct-memory DB, 16 hash-map segments),
+[Chronicle Map](https://github.com/OpenHFT/Chronicle-Map) 3.27ea1 and
+[Redis](https://github.com/redis/redis) via Jedis 5.0.2. Redis's installed server
+version must also be recorded. [Caffeine](https://github.com/ben-manes/caffeine)
+and engine-specific microbenchmarks remain
 developer diagnostics, not additional members of this six-framework ranking.
 
 All adapters use ordinary synchronous get/put APIs and full `byte[]` values.
@@ -99,7 +163,8 @@ Invocation benchmarks retain their internal stop/join/native-accounting teardown
 Preparation does not establish benchmark correctness under long contention,
 cross-platform native compatibility or Linux x86-64 performance. Run dedicated
 Linux experiments after approval, retain all rounds, investigate stable regressions
-and publish limitations alongside results. No comparative performance result is published yet.
+and publish limitations alongside results. No results from this six-framework
+suite are included here.
 
 ## Paired revisions across JDKs
 
@@ -180,4 +245,5 @@ regression threshold or automatic acceptance verdict is generated. Evaluate
 throughput, CPU per completed operation and memory separately for each JDK and
 size; investigate repeatable regressions without cancelling them against gains
 elsewhere. Cross-platform CI and passing layout tests do not establish Linux
-performance. Linux performance acceptance remains pending until actual results exist.
+performance. Current-main paired Linux performance acceptance remains pending
+until matched results exist.

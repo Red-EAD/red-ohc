@@ -15,45 +15,7 @@ policy links, the timer wheel and safe native reclamation. A JDK CHM is the
 authoritative lookup index; the actor's policy structures mirror applied lifecycle
 changes rather than replacing that index.
 
-```mermaid
-flowchart TB
-  App[Application threads and serializers]
-  subgraph Heap[Java heap]
-    Context[ThreadContext and reusable key scratch]
-    CHM[ConcurrentHashMap of Entry to Entry]
-    Entry[Entry descriptor and volatile tagged value address]
-    Lifecycle[WriterLifecycleJournal: caller lanes and actor retry lane]
-    Access[Reader slots and SPSC access rings]
-  end
-  subgraph Native[Cache-owned native storage]
-    Keys[Key bytes and entry metadata]
-    Values[Value header and payload]
-    Pages[Allocator pages and slot storage]
-    Links[Policy links, ghost data and reader sequence storage]
-  end
-  Actor[MaintenanceEventLoop]
-  Policy[MaintenancePolicy and TimerWheel]
-  Retire[RetirementJournal: caller lanes and actor lane]
-  App --> Context
-  Context --> CHM
-  CHM --> Entry
-  Entry --> Keys
-  Entry --> Values
-  Context --> Pages
-  Context --> Lifecycle
-  Context --> Access
-  Lifecycle --> Actor
-  Access --> Actor
-  Actor --> Policy
-  Policy --> Links
-  Policy --> CHM
-  Context --> Retire
-  Actor --> Retire
-  Access --> QSBR[Reader quiescence checks]
-  QSBR --> Retire
-  Retire --> Actor
-  Actor -->|Free safe blocks; recycle or unmap pages| Pages
-```
+![Red OHC runtime architecture](assets/red-ohc-architecture.png)
 
 The stable integration surface is [`OHCache`](../../red-ohc-core/src/main/java/com/red/ohc/api/OHCache.java),
 its API types and [`OHCacheBuilder`](../../red-ohc-core/src/main/java/com/red/ohc/cache/OHCacheBuilder.java).
