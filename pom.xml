@@ -35,6 +35,7 @@
         <maven-deploy-plugin.version>3.1.4</maven-deploy-plugin.version>
         <project.build.outputTimestamp>2026-10-07T00:00:00Z</project.build.outputTimestamp>
         <central.skipPublishing>true</central.skipPublishing>
+        <central.autoPublish>false</central.autoPublish>
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
         <central-publishing-maven-plugin.version>0.11.0</central-publishing-maven-plugin.version>
         <maven-dependency-plugin.version>3.8.1</maven-dependency-plugin.version>
@@ -207,6 +208,7 @@
                         <version>${maven-gpg-plugin.version}</version>
                         <configuration>
                             <bestPractices>true</bestPractices>
+                            <ascDirectory>${project.build.directory}</ascDirectory>
                         </configuration>
                         <executions>
                             <execution>
@@ -233,7 +235,7 @@
                         <configuration>
                             <publishingServerId>central</publishingServerId>
                             <centralSnapshotsUrl>https://central.sonatype.com/repository/maven-snapshots/</centralSnapshotsUrl>
-                            <autoPublish>false</autoPublish>
+                            <autoPublish>${central.autoPublish}</autoPublish>
                             <skipPublishing>${central.skipPublishing}</skipPublishing>
                             <excludeArtifacts>
                                 <excludeArtifact>red-ohc-jmh</excludeArtifact>

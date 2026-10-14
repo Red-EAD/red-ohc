@@ -1,0 +1,39 @@
+name: Release readiness
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  eligibility:
+    if: github.repository == 'Red-EAD/red-ohc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require all CI jobs on exact current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_publication.py check-ci --sha "$(git rev-parse HEAD)"
+  signing:
+    needs: eligibility
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '11'
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: Verify real primary signing key and public distribution without publishing
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: python3 scripts/release_publication.py check-gpg --fingerprint "$GPG_FINGERPRINT"
