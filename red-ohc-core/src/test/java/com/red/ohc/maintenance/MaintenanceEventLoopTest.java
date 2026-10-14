@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
@@ -3203,14 +3204,10 @@ public class MaintenanceEventLoopTest {
       // Resume through the real run loop: it must drain the resource-owned retirement work
       // from the pooled resources and park once the registry is quiet.
       MaintenanceTestSupport.start(loop);
-      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
-      while (!loop.isParked() && System.nanoTime() < deadline) {
-        Thread.yield();
-      }
-      assertTrue(loop.isParked(), "the actor must park after a completed or fully blocked sweep");
+      waitUntilParked(loop::isParked, TimeUnit.SECONDS.toNanos(1L));
       if (blockedHead) {
         first.lifecycleLane().cancel(firstSequence);
-        deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
         while (resources.pooledCount() != 2 && System.nanoTime() < deadline) {
           Thread.yield();
         }
@@ -3469,11 +3466,7 @@ public class MaintenanceEventLoopTest {
             Long.MAX_VALUE);
     MaintenanceTestSupport.start(loop);
     try {
-      long deadline = System.nanoTime() + 1_000_000_000L;
-      while (!loop.isParked() && System.nanoTime() < deadline) {
-        Thread.yield();
-      }
-      assertTrue(loop.isParked(), "maintenance loop did not park while idle");
+      waitUntilParked(loop::isParked, TimeUnit.SECONDS.toNanos(1L));
     } finally {
       loop.stop();
       loop.join(1_000L);
@@ -4203,14 +4196,33 @@ public class MaintenanceEventLoopTest {
   }
 
   private static void waitUntilParked(MaintenanceEventLoop loop) throws InterruptedException {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4L);
-    while (!loop.isParked() && System.nanoTime() < deadline) {
+    waitUntilParked(loop::isParked, TimeUnit.SECONDS.toNanos(4L));
+  }
+
+  @Test
+  public void parkObservationSurvivesImmediateWakeup() throws InterruptedException {
+    AtomicInteger observations = new AtomicInteger();
+    waitUntilParked(() -> observations.getAndIncrement() == 0, TimeUnit.SECONDS.toNanos(1L));
+    assertEquals(observations.get(), 1, "a successful observation must not be sampled again");
+  }
+
+  @Test(expectedExceptions = AssertionError.class)
+  public void parkObservationRejectsNeverParkedActor() throws InterruptedException {
+    waitUntilParked(() -> false, 0L);
+  }
+
+  private static void waitUntilParked(BooleanSupplier parked, long timeoutNanos)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + timeoutNanos;
+    boolean observedPark;
+    while (!(observedPark = parked.getAsBoolean()) && System.nanoTime() < deadline) {
       if (Thread.interrupted()) {
         throw new InterruptedException();
       }
       LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));
     }
-    assertTrue(loop.isParked(), "maintenance actor did not park within 4 seconds");
+    // A timed or spurious wakeup may follow the successful observation immediately.
+    assertTrue(observedPark, "maintenance actor did not park before timeout");
   }
 
   private static void waitForMonotonicCalls(CountingTicker ticker, int expected) {
