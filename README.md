@@ -162,7 +162,6 @@ and the benchmark protocol for the complete comparison.
 
 ![Published Red OHC and Cassandra OHC throughput ratios](docs/benchmark-assets/published-throughput.png)
 
-[Download the vector chart](docs/benchmark-assets/published-throughput.svg).
 Cassandra OHC is normalized to 1.00x separately for each workload.
 
 ## License
