@@ -1168,12 +1168,31 @@ public final class ConcurrentMapBehaviorTest {
   }
 
   @Test
-  public void expiryReaderDoesNotChangeLogicalCountWhileAWriterOwnsTheEntry() {
+  public void expiryReaderDoesNotChangeLogicalCountWhileAWriterOwnsTheEntry() throws Exception {
     MutableTicker ticker = new MutableTicker(1_000L);
     {
       OffHeapCache<String, String> cache = newCache(ticker);
       Throwable cacheFailure5 = null;
+      CountDownLatch actorPaused = new CountDownLatch(1);
+      CountDownLatch releaseActor = new CountDownLatch(1);
       try {
+        // This tests reader ownership; the actor must not acquire a competing writer claim.
+        assertTrue(
+            worker(cache)
+                .submitActorTaskForTest(
+                    () -> {
+                      actorPaused.countDown();
+                      try {
+                        releaseActor.await();
+                      } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(interrupted);
+                      }
+                    },
+                    failure -> {
+                      throw new AssertionError(failure);
+                    }));
+        assertTrue(actorPaused.await(2L, TimeUnit.SECONDS), "maintenance actor did not pause");
         cache.put("key", "old", 2_000L);
         Entry entry = cache.dataForTest().values().iterator().next();
         ticker.setMillis(3_000L);
@@ -1196,6 +1215,7 @@ public final class ConcurrentMapBehaviorTest {
         cacheFailure5 = cacheOperationFailure;
         throw cacheOperationFailure;
       } finally {
+        releaseActor.countDown();
         CacheTestSupport.stop(cache, cacheFailure5);
       }
     }
