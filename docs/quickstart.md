@@ -137,16 +137,48 @@ method. Reuse it instead of creating caches per request or per test case.
 
 ## Add the dependency
 
-While developing from source, use `1.0.0-SNAPSHOT` after the local install above.
-In another Maven application's POM:
+Use the public development build by adding this repository at project level and
+the dependency inside your application's `<dependencies>`:
 
 ```xml
+<repositories>
+  <repository>
+    <id>central-portal-snapshots</id>
+    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+    <releases><enabled>false</enabled></releases>
+    <snapshots><enabled>true</enabled></snapshots>
+  </repository>
+</repositories>
 <dependency>
   <groupId>io.github.red-ead</groupId>
   <artifactId>red-ohc-core</artifactId>
   <version>1.0.0-SNAPSHOT</version>
 </dependency>
 ```
+
+No account or credentials are needed to download. Use `mvn -U` to refresh a cached
+SNAPSHOT. Alternatively, install from source as shown above; that path needs no
+SNAPSHOT repository. The checked-in example uses this local-install path.
+
+For Gradle Kotlin DSL:
+
+```kotlin
+repositories {
+    mavenCentral()
+    maven {
+        url = uri("https://central.sonatype.com/repository/maven-snapshots/")
+        mavenContent { snapshotsOnly() }
+    }
+}
+dependencies {
+    implementation("io.github.red-ead:red-ohc-core:1.0.0-SNAPSHOT")
+}
+```
+
+Successful main CI triggers development publication. Fast consecutive merges can
+be consolidated into the latest verified main; failed or superseded commits are
+not published. See the [publication procedure](releasing.md#development-snapshots)
+for the exact gate and verification record.
 
 After the stable release is published to Maven Central, change the version to
 `1.0.0`. No additional `<repositories>` section will be needed. Gradle consumers

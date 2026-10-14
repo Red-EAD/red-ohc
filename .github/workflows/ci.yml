@@ -48,6 +48,9 @@ jobs:
       - name: Verify paired benchmark tooling
         if: matrix.os == 'ubuntu-latest' && matrix.java == '11'
         run: python3 -m unittest discover -s scripts -p 'test_run_paired_benchmarks.py' -v
+      - name: Verify SNAPSHOT publishing tooling
+        if: matrix.os == 'ubuntu-latest' && matrix.java == '11'
+        run: python3 -m unittest discover -s scripts -p 'test_snapshot_publication.py' -v
       - name: Check whitespace
         shell: bash
         run: git diff --check
