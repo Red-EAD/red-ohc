@@ -86,11 +86,24 @@ def resolve_tag(tag):
     raise ValueError('Release tag must resolve to a commit')
 
 
+def tag_notes(tag):
+    checked_version(tag[1:] if tag and tag.startswith('v') else None)
+    obj = github('git/ref/tags/' + tag)['object']
+    if obj.get('type') != 'tag':
+        raise ValueError('Release notes require an annotated tag')
+    annotation = github('git/tags/' + checked_sha(obj.get('sha')))
+    message = annotation.get('message')
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError('Nonempty annotated tag release notes are required')
+    return message.rstrip()
+
+
 def inspect_release(root, tag, expected_sha):
     version = release_version(root, tag)
     sha = resolve_tag(tag)
     if sha != checked_sha(expected_sha):
         raise ValueError('The release tag moved or does not match the checked-out candidate')
+    tag_notes(tag)
     main_sha = checked_sha(github('branches/main')['commit']['sha'])
     if github('compare/' + sha + '...' + main_sha)['status'] not in ('ahead', 'identical'):
         raise ValueError('The candidate must be in protected main history')
@@ -254,7 +267,7 @@ def find_github_release(tag):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('resolve-tag', 'check', 'check-ci', 'check-gpg',
+    parser.add_argument('command', choices=('resolve-tag', 'tag-notes', 'check', 'check-ci', 'check-gpg',
                                            'consumer-pom', 'receipt', 'manifest', 'github-release'))
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--tag')
@@ -271,6 +284,8 @@ def main():
     args = parser.parse_args()
     if args.command == 'resolve-tag':
         print(resolve_tag(args.tag))
+    elif args.command == 'tag-notes':
+        print(tag_notes(args.tag))
     elif args.command == 'check-gpg':
         check_gpg(args.fingerprint)
     elif args.command == 'consumer-pom':

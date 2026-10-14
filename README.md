@@ -12,8 +12,8 @@ native allocation and background maintenance are part of its cost; measure your
 workload before choosing a cache. Data belongs to one JVM process and is lost on
 process exit.
 
-The development version is **1.0.0-SNAPSHOT**. The first stable release will be
-**1.0.0**; it is not available from Maven Central yet.
+Release version: **1.0.0**. See [GitHub releases](https://github.com/Red-EAD/red-ohc/releases)
+for publication status and release notes.
 
 ## Features
 
@@ -28,6 +28,19 @@ See the [API reference](docs/api.md) for concurrency and lifetime contracts.
 
 ## Quick start
 
+Requires JDK 11 or later. Once **1.0.0** is published to Maven Central, add this
+dependency to your application's POM. No additional repository or download token is needed.
+
+```xml
+<dependency>
+  <groupId>io.github.red-ead</groupId>
+  <artifactId>red-ohc-core</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+See the [dependency guide](docs/quickstart.md#add-the-dependency) for Maven and Gradle setup.
+
 With a source checkout and JDK 11 or later, run these commands from the repository
 root. The Wrapper downloads and verifies the pinned Maven distribution.
 
@@ -37,7 +50,7 @@ root. The Wrapper downloads and verifies the pinned Maven distribution.
 ```
 
 On Windows, use `mvnw.cmd` instead of `./mvnw`. The first command installs the
-development library locally and skips test execution. The example runs in its
+library locally and skips test execution. The example runs in its
 own JVM and prints:
 
 ```text
@@ -71,31 +84,6 @@ Caches have process lifetime and no public `close`, `stop` or `destroy` method.
 Repeated cache creation retains infrastructure in a running JVM. Use a bounded
 number of shared caches; `clear()` removes mappings without destroying the cache.
 
-To use the development build without a source checkout, add the official
-Sonatype SNAPSHOT repository and dependency to your application's POM:
-
-```xml
-<dependency>
-  <groupId>io.github.red-ead</groupId>
-  <artifactId>red-ohc-core</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
-</dependency>
-<!-- Place repositories at project level, alongside dependencies. -->
-<repositories>
-  <repository>
-    <id>central-portal-snapshots</id>
-    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
-    <releases><enabled>false</enabled></releases>
-    <snapshots><enabled>true</enabled></snapshots>
-  </repository>
-</repositories>
-```
-
-SNAPSHOTs follow successful main CI; they are development builds and can change.
-See the [dependency guide](docs/quickstart.md#add-the-dependency) for Maven and
-Gradle setup. Stable **1.0.0** is not yet published; after its release, Maven Central
-will supply it without an additional repository.
-
 ## Architecture
 
 ![Red OHC architecture: caller data path, heap CHM, native bytes and actor maintenance](docs/architecture/assets/red-ohc-architecture.png)
@@ -114,7 +102,7 @@ read/write paths, memory layout, scheduling, TTL and flush completion.
 
 ## Documentation and examples
 
-- [Quick start](docs/quickstart.md): install the development build and run a complete example.
+- [Quick start](docs/quickstart.md): add the stable dependency and run a complete example.
 - [Usage guide](docs/usage.md): serializers, TTL, loading, conditional and direct operations.
 - [API reference](docs/api.md): builder defaults, operation groups and failure semantics.
 - [Operations guide](docs/operations.md): memory accounting and maintenance diagnostics.
