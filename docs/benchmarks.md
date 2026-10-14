@@ -32,7 +32,6 @@ is the 1.00x reference in each row.
 
 ![Published Red OHC and Cassandra OHC throughput ratios](benchmark-assets/published-throughput.png)
 
-[Download the vector chart](benchmark-assets/published-throughput.svg).
 Both panels use the same scale, with Cassandra OHC normalized to 1.00x for each
 workload. Ratios compare engines within a workload; the chart does not compare
 absolute throughput between workloads. Raw rounds are unavailable here, so the

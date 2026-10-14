@@ -149,7 +149,6 @@ JDK 11、16B key、64B value 的配置下，32 线程纯读吞吐为 Cassandra O
 
 ![Red OHC 与 Cassandra OHC 已发表的吞吐比值](docs/benchmark-assets/published-throughput.png)
 
-[下载矢量图](docs/benchmark-assets/published-throughput.svg)。
 每个场景分别将 Cassandra OHC 吞吐归一为 1.00 倍。
 
 ## 许可证
