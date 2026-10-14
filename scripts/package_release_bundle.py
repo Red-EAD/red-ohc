@@ -2,33 +2,29 @@
 """Package already-signed parent/core artifacts locally. This script has no uploader."""
 import argparse
 import hashlib
-import subprocess
 from pathlib import Path
-import xml.etree.ElementTree as ET
 import zipfile
 
+from release_publication import release_version, verify_signature
+
 ROOT = Path(__file__).resolve().parents[1]
-NS = '{http://maven.apache.org/POM/4.0.0}'
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--root', type=Path, default=ROOT)
+    parser.add_argument('--tag', required=True)
+    parser.add_argument('--fingerprint', required=True)
     args = parser.parse_args()
-    version = ET.parse(ROOT / 'pom.xml').getroot().findtext(NS + 'version')
-    if not version or version.endswith('-SNAPSHOT'):
-        parser.error('commit a stable release version and run -Prelease verify first')
+    version = release_version(args.root, args.tag)
     files = {}
     for module in ['', 'red-ohc-core']:
         artifact = module or 'red-ohc'
-        source = ROOT / module
+        source = args.root / module
         prefix = artifact + '-' + version
         repository = 'io/github/red-ead/' + artifact + '/' + version + '/'
         pom = source / 'pom.xml'
-        model = ET.parse(pom).getroot()
-        actual = model.findtext(NS + 'version') or model.findtext(NS + 'parent/' + NS + 'version')
-        if actual != version:
-            parser.error('reactor version mismatch: ' + artifact)
         expected = {prefix + '.pom': pom,
                     prefix + '.pom.asc': source / 'target' / (prefix + '.pom.asc')}
         if module:
@@ -38,7 +34,7 @@ def main():
         for name, path in expected.items():
             if name.endswith('.asc'):
                 artifact_path = expected[name[:-4]]
-                subprocess.run(['gpg', '--verify', str(path), str(artifact_path)], check=True)
+                verify_signature(path, artifact_path, args.fingerprint)
             if not path.is_file():
                 parser.error('missing real artifact/signature: ' + str(path))
             content = path.read_bytes()

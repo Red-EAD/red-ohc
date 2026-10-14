@@ -1,0 +1,227 @@
+name: Publish release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable stable tag, for example v1.0.0
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: red-ohc-stable-release
+  cancel-in-progress: false
+jobs:
+  candidate:
+    if: github.repository == 'Red-EAD/red-ohc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.eligibility.outputs.sha }}
+      version: ${{ steps.eligibility.outputs.version }}
+      ci_run_id: ${{ steps.eligibility.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.eligibility.outputs.ci_run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Resolve the existing release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          sha="$(python3 scripts/release_publication.py resolve-tag --tag "$RELEASE_TAG")"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.tag.outputs.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Require matching stable version and every successful CI job before approval
+        id: eligibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 scripts/release_publication.py check --root candidate --tag "$RELEASE_TAG" \
+            --sha "$(git -C candidate rev-parse HEAD)"
+      - name: Record the candidate for human approval
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ steps.eligibility.outputs.sha }}
+          CI_RUN_ID: ${{ steps.eligibility.outputs.ci_run_id }}
+        run: |
+          {
+            echo '### Stable release awaiting maintainer approval'
+            echo "Tag: $RELEASE_TAG"
+            echo "Source: $RELEASE_SHA"
+            echo "All CI passed: https://github.com/Red-EAD/red-ohc/actions/runs/$CI_RUN_ID"
+            echo 'Review this exact candidate before approving the release environment.'
+          } >> "$GITHUB_STEP_SUMMARY"
+  publish:
+    needs: candidate
+    environment: release
+    outputs:
+      artifact_id: ${{ steps.persist.outputs.artifact-id }}
+      fingerprint: ${{ steps.signing.outputs.fingerprint }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '11'
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: Verify signing credentials and public key
+        id: signing
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          python3 scripts/release_publication.py check-gpg --fingerprint "$GPG_FINGERPRINT"
+          echo "fingerprint=$GPG_FINGERPRINT" >> "$GITHUB_OUTPUT"
+      - name: Build and verify the real signed parent/core bundle
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          MAVEN_OPTS: -Xmx1g
+        run: |
+          cd candidate
+          ./mvnw -B -ntp -s config/maven/settings.xml -gs config/maven/settings.xml \
+            -Prelease -pl red-ohc-core -am -DskipTests "-Dgpg.keyname=$GPG_FINGERPRINT!" clean verify
+          python3 ../scripts/package_release_bundle.py --root . --tag "$RELEASE_TAG" \
+            --fingerprint "$GPG_FINGERPRINT" --output target/release-bundle.zip
+      - name: Record exact bundle and candidate before upload
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ needs.candidate.outputs.sha }}
+          CI_RUN_ID: ${{ needs.candidate.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.candidate.outputs.ci_run_attempt }}
+          GPG_FINGERPRINT: ${{ steps.signing.outputs.fingerprint }}
+        run: |
+          python3 scripts/release_publication.py receipt --root candidate --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" --ci-run-id "$CI_RUN_ID" --fingerprint "$GPG_FINGERPRINT" \
+            --ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --bundle candidate/target/release-bundle.zip --output candidate/target/release-candidate.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: persist
+        with:
+          name: red-ohc-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate/target/release-bundle.zip
+            candidate/target/release-candidate.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Recheck the approved tag and CI, then publish to Central
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ needs.candidate.outputs.sha }}
+          CI_RUN_ID: ${{ needs.candidate.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.candidate.outputs.ci_run_attempt }}
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+          MAVEN_OPTS: -Xmx1g
+        run: |
+          test -n "$CENTRAL_USERNAME" && test -n "$CENTRAL_PASSWORD"
+          python3 scripts/release_publication.py check --root candidate --tag "$RELEASE_TAG" --sha "$RELEASE_SHA" \
+            --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT"
+          cd candidate
+          ./mvnw -B -ntp -s config/maven/publishing-settings.xml -gs config/maven/settings.xml \
+            -Prelease,central-publish -pl red-ohc-core -am -DskipTests "-Dgpg.keyname=$GPG_FINGERPRINT!" \
+            -Dcentral.skipPublishing=false -Dcentral.autoPublish=true -DwaitUntil=published deploy
+  finalize:
+    needs: [candidate, publish]
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '11'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: needs.publish.outputs.artifact_id != ''
+        with:
+          artifact-ids: ${{ needs.publish.outputs.artifact_id }}
+          path: release-artifacts
+          merge-multiple: true
+      - name: Verify anonymous Maven Central downloads with an empty cache
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
+        run: |
+          consumer="$RUNNER_TEMP/red-ohc-release-consumer"
+          cache="$RUNNER_TEMP/red-ohc-release-consumer-m2"
+          test ! -e "$cache"
+          python3 scripts/release_publication.py consumer-pom --root candidate --tag "$RELEASE_TAG" \
+            --output "$consumer/pom.xml"
+          # Central's CDN may lag the portal's PUBLISHED state. Retry only anonymous downloads.
+          for attempt in {1..20}; do
+            if candidate/mvnw -B -ntp -U -s config/maven/settings.xml -gs config/maven/settings.xml \
+              -f "$consumer/pom.xml" "-Dmaven.repo.local=$cache" \
+              org.apache.maven.plugins:maven-dependency-plugin:3.8.1:resolve -DincludeScope=runtime \
+              && candidate/mvnw -B -ntp -U -s config/maven/settings.xml -gs config/maven/settings.xml \
+                -f "$consumer/pom.xml" "-Dmaven.repo.local=$cache" \
+                org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
+                "-Dartifact=io.github.red-ead:red-ohc-core:$RELEASE_VERSION:jar:sources" -Dtransitive=false \
+              && candidate/mvnw -B -ntp -U -s config/maven/settings.xml -gs config/maven/settings.xml \
+                -f "$consumer/pom.xml" "-Dmaven.repo.local=$cache" \
+                org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
+                "-Dartifact=io.github.red-ead:red-ohc-core:$RELEASE_VERSION:jar:javadoc" -Dtransitive=false; then
+              break
+            fi
+            test "$attempt" -lt 20 || exit 1
+            sleep 30
+          done
+      - name: Record verified release and create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ needs.candidate.outputs.sha }}
+          CI_RUN_ID: ${{ needs.candidate.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.candidate.outputs.ci_run_attempt }}
+          GPG_FINGERPRINT: ${{ needs.publish.outputs.fingerprint }}
+        run: |
+          python3 scripts/release_publication.py manifest --root candidate --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" --ci-run-id "$CI_RUN_ID" --fingerprint "$GPG_FINGERPRINT" \
+            --ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --bundle release-artifacts/release-bundle.zip --receipt release-artifacts/release-candidate.json \
+            --cache "$RUNNER_TEMP/red-ohc-release-consumer-m2" --output release-artifacts/release-publication.json
+          {
+            echo "Red OHC $RELEASE_TAG"
+            echo "Source: $RELEASE_SHA"
+            echo "Validated CI: https://github.com/Red-EAD/red-ohc/actions/runs/$CI_RUN_ID"
+            echo "Primary signing key: $GPG_FINGERPRINT"
+            echo "Publication run: https://github.com/Red-EAD/red-ohc/actions/runs/$GITHUB_RUN_ID"
+            echo 'Signed parent/core artifacts are published on Maven Central and anonymously verified.'
+            echo 'See release-publication.json for artifact SHA-256 checksums.'
+          } > release-artifacts/release-notes.md
+          python3 scripts/release_publication.py github-release --tag "$RELEASE_TAG" \
+            --notes release-artifacts/release-notes.md --asset release-artifacts/release-bundle.zip \
+            --asset release-artifacts/release-publication.json
+          cat release-artifacts/release-notes.md >> "$GITHUB_STEP_SUMMARY"
