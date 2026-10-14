@@ -6,8 +6,9 @@ history. Private export mappings and review records must remain outside this rep
 The initial source history has an independent root. Once public, do not rewrite
 public commits or move/delete a released tag.
 
-Version policy: develop on `1.0.0-SNAPSHOT`, first stable version `1.0.0`, tag
-`v1.0.0`. Commit the version change, validate that exact clean commit, then create
+Version policy: the first stable version is `1.0.0`, with tag `v1.0.0`.
+Development versions use a `-SNAPSHOT` suffix. Commit the version change,
+validate that exact clean commit, then create
 the tag. Record its SHA, JDK, dependency graphs, source/JAR checksums, test results
 and reproducibility evidence. Never fabricate signatures or validation results.
 
@@ -91,11 +92,13 @@ remote bundle-preview workflow. Secret names alone do not prove readiness.
 
 ### Publish an approved version
 
-1. Prepare a release PR setting the parent and both module parent versions to
-   the stable version, starting with `1.0.0`. Review the changes and release notes.
+1. Prepare a release PR setting the parent, both module parent versions, example
+   and benchmark runtime coordinates to the stable version, starting with `1.0.0`.
+   Review the changes and prepare the English release notes for the annotated tag.
    Merge through the protected PR path after all required checks succeed.
 2. Wait for every main-push CI job on the resulting commit. Create the annotated
-   tag `v1.0.0` on that exact commit and push only that tag. The `Immutable release
+   tag `v1.0.0` on that exact commit, with its release notes as the annotation,
+   and push only that tag. The `Immutable release
    tags` ruleset prevents updates and deletions of `v*` tags with no bypass.
    Check the commit carefully before creating the tag.
 3. In Actions, select **Publish release**, choose the `main` branch and supply
@@ -115,6 +118,8 @@ remote bundle-preview workflow. Secret names alone do not prove readiness.
    POM and all three core JAR checksums must match the build. Only then does the
    separate `finalize` job create a GitHub release with the verified bundle and publication
    manifest, including tag, source SHA, CI run, fingerprint and artifact hashes.
+   GitHub release notes include the immutable tag annotation plus the verified
+   publication metadata. Finalization retries use the same content.
 7. Resume development in a separate PR with the next `-SNAPSHOT` version.
 
 If `finalize` fails after `publish` succeeds, select **Re-run failed jobs** on the

@@ -9,7 +9,8 @@ Red OHC 是面向 Java 应用的并发序列化堆外缓存。key/value 的字�
 序列化、native 分配和后台维护也有成本，需要用自己的负载评估。数据属于单个 JVM 进程，
 进程退出后丢失。
 
-当前开发版本为 **1.0.0-SNAPSHOT**，首个稳定版本计划为 **1.0.0**，尚未发布到 Maven Central。
+正式版本为 **1.0.0**。发布状态与发行说明见
+[GitHub Releases](https://github.com/Red-EAD/red-ohc/releases)。
 
 ## 功能
 
@@ -24,6 +25,18 @@ Red OHC 是面向 Java 应用的并发序列化堆外缓存。key/value 的字�
 
 ## 快速开始
 
+需要 JDK 11 或以上版本。**1.0.0** 正式发布到 Maven Central 后，在应用 POM 中添加：
+
+```xml
+<dependency>
+  <groupId>io.github.red-ead</groupId>
+  <artifactId>red-ohc-core</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+无需额外 repository 或下载凭据。Maven 和 Gradle 完整配置见[依赖指南](docs/quickstart.md#add-the-dependency)。
+
 准备源码 checkout 和 JDK 11 或以上版本，从仓库根目录执行。
 Wrapper 会下载固定版本 Maven，并校验下载文件。
 
@@ -32,7 +45,7 @@ Wrapper 会下载固定版本 Maven，并校验下载文件。
 ./mvnw -B -f examples/user-cache/pom.xml compile exec:exec
 ```
 
-Windows 使用 `mvnw.cmd` 替代 `./mvnw`。第一条命令将开发版安装到本地 Maven 仓库，
+Windows 使用 `mvnw.cmd` 替代 `./mvnw`。第一条命令将源码构建的库安装到本地 Maven 仓库，
 跳过测试执行；案例使用独立 JVM，成功后输出：
 
 ```text
@@ -65,29 +78,6 @@ users.remove("user:42");
 在运行中的 JVM 反复创建缓存会保留基础设施，应使用有限数量的共享缓存。
 `clear()` 删除映射，缓存仍可继续使用。
 
-要直接使用开发版，在应用 POM 中添加官方 Sonatype SNAPSHOT 仓库和依赖：
-
-```xml
-<dependency>
-  <groupId>io.github.red-ead</groupId>
-  <artifactId>red-ohc-core</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
-</dependency>
-<!-- repositories 位于 project 下，与 dependencies 同级。 -->
-<repositories>
-  <repository>
-    <id>central-portal-snapshots</id>
-    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
-    <releases><enabled>false</enabled></releases>
-    <snapshots><enabled>true</enabled></snapshots>
-  </repository>
-</repositories>
-```
-
-main 的 CI 成功后会发布 SNAPSHOT；它是会持续变化的开发版。
-Maven 和 Gradle 的完整配置见[依赖指南](docs/quickstart.md#add-the-dependency)。
-稳定版 **1.0.0** 尚未发布；正式发布后可从 Maven Central 拉取，无需额外 repository。
-
 ## 架构
 
 ![Red OHC 架构：调用线程数据路径、堆内 CHM、native 字节与 actor 维护](docs/architecture/assets/red-ohc-architecture.png)
@@ -104,7 +94,7 @@ Maven 和 Gradle 的完整配置见[依赖指南](docs/quickstart.md#add-the-dep
 
 ## 文档与案例
 
-- [快速开始](docs/quickstart.md)：安装开发版，运行完整案例。
+- [快速开始](docs/quickstart.md)：接入正式版，运行完整案例。
 - [使用指南](docs/usage.md)：serializer、TTL、加载、条件操作和 direct read。
 - [API 参考](docs/api.md)：builder 默认值、操作分类和失败语义。
 - [运行诊断](docs/operations.md)：内存口径和维护状态排查。

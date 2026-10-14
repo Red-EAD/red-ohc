@@ -4,7 +4,8 @@
 
 This guide runs [`UserCacheExample`](../examples/user-cache/src/main/java/com/red/ohc/example/UserCacheExample.java)
 against `red-ohc-core`, then shows how to reuse that cache in an application.
-The current development dependency is `1.0.0-SNAPSHOT`; stable `1.0.0` is not yet published.
+The release version is `1.0.0`. Check [GitHub releases](https://github.com/Red-EAD/red-ohc/releases)
+for publication status; the source-checkout example works before Central publication.
 
 ## Run the example
 
@@ -33,7 +34,7 @@ The second command uses a separate Java process. Expect this line followed by Ma
 Red OHC: put/get/replace/remove succeeded
 ```
 
-The example uses the development library installed in your local Maven repository.
+The example uses the source-built library installed in your local Maven repository.
 To exclude machine-specific Maven mirrors, add
 `-s config/maven/settings.xml -gs config/maven/settings.xml` to both root commands.
 The example POM is standalone, so those settings paths are relative to your shell's repository root.
@@ -137,8 +138,43 @@ method. Reuse it instead of creating caches per request or per test case.
 
 ## Add the dependency
 
-Use the public development build by adding this repository at project level and
-the dependency inside your application's `<dependencies>`:
+After `1.0.0` is published to Maven Central, add this inside your application's
+`<dependencies>`. Maven uses Central by default, so no custom repository or
+download credentials are needed:
+
+```xml
+<dependency>
+  <groupId>io.github.red-ead</groupId>
+  <artifactId>red-ohc-core</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+For Gradle Kotlin DSL:
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+dependencies {
+    implementation("io.github.red-ead:red-ohc-core:1.0.0")
+}
+```
+
+To run the example against the published release, omit the local install:
+
+```bash
+./mvnw -B -f examples/user-cache/pom.xml compile exec:exec
+```
+
+The example defaults to `1.0.0`. To evaluate another published version, pass
+`-Dred-ohc.version=<version>` to that command.
+
+### Development snapshots
+
+SNAPSHOTs are optional development builds and can change. For the published
+`1.0.0-SNAPSHOT` development line, add this repository at project level and the
+dependency inside `<dependencies>`:
 
 ```xml
 <repositories>
@@ -156,40 +192,11 @@ the dependency inside your application's `<dependencies>`:
 </dependency>
 ```
 
-No account or credentials are needed to download. Use `mvn -U` to refresh a cached
-SNAPSHOT. Alternatively, install from source as shown above; that path needs no
-SNAPSHOT repository. The checked-in example uses this local-install path.
-
-For Gradle Kotlin DSL:
-
-```kotlin
-repositories {
-    mavenCentral()
-    maven {
-        url = uri("https://central.sonatype.com/repository/maven-snapshots/")
-        mavenContent { snapshotsOnly() }
-    }
-}
-dependencies {
-    implementation("io.github.red-ead:red-ohc-core:1.0.0-SNAPSHOT")
-}
-```
-
-Successful main CI triggers development publication. Fast consecutive merges can
-be consolidated into the latest verified main; failed or superseded commits are
-not published. See the [publication procedure](releasing.md#development-snapshots)
-for the exact gate and verification record.
-
-After the stable release is published to Maven Central, change the version to
-`1.0.0`. No additional `<repositories>` section will be needed. Gradle consumers
-will use `mavenCentral()` and `implementation("io.github.red-ead:red-ohc-core:1.0.0")`
-after that publication.
-
-To run the example against that future release, omit the local install and use:
-
-```bash
-./mvnw -B -f examples/user-cache/pom.xml -Dred-ohc.version=1.0.0 compile exec:exec
-```
+No account or credentials are needed. Use `mvn -U` to refresh a cached SNAPSHOT.
+Development publication requires a `-SNAPSHOT` main version and successful CI;
+stable main versions are skipped. Fast consecutive merges can be consolidated
+into the latest verified main. See the [publication procedure](releasing.md#development-snapshots)
+for the gate and verification record.
 
 Continue with [usage recipes](usage.md), [builder and API contracts](api.md), and
 [memory sizing and diagnosis](operations.md). The [architecture guide](architecture/ARCHITECTURE.md)

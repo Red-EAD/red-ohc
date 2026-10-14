@@ -11,6 +11,7 @@ CHECKS = snapshot_tests.CHECKS
 REPOSITORY = snapshot_tests.REPOSITORY
 SHA = snapshot_tests.SHA
 OTHER_SHA = snapshot_tests.OTHER_SHA
+TAG_SHA = 'c' * 40
 
 
 SCRIPT = Path(__file__).with_name('release_publication.py')
@@ -31,13 +32,14 @@ class StableReleaseTest(unittest.TestCase):
                     'repository': {'full_name': REPOSITORY},
                     'head_repository': {'full_name': REPOSITORY}}
         self.jobs = [{'name': name, 'status': 'completed', 'conclusion': 'success'} for name in CHECKS]
-        self.tag = {'object': {'type': 'commit', 'sha': SHA}}
+        self.tag = {'object': {'type': 'tag', 'sha': TAG_SHA}}
+        self.tag_message = '# Red OHC 1.0.0\n\nFirst stable release.\n'
 
     def github(self, path):
         if path == 'git/ref/tags/v1.0.0':
             return self.tag
-        if path == 'git/tags/' + OTHER_SHA:
-            return {'object': {'type': 'commit', 'sha': SHA}}
+        if path in ('git/tags/' + TAG_SHA, 'git/tags/' + OTHER_SHA):
+            return {'object': {'type': 'commit', 'sha': SHA}, 'message': self.tag_message}
         if path == 'branches/main':
             return {'commit': {'sha': OTHER_SHA}}
         if path == 'compare/' + SHA + '...' + OTHER_SHA:
@@ -69,6 +71,52 @@ class StableReleaseTest(unittest.TestCase):
         self.tag['object'] = {'type': 'tag', 'sha': OTHER_SHA}
         self.assertEqual(SHA, self.inspect()['sha'])
 
+    def test_release_requires_annotated_tag_notes(self):
+        self.tag['object'] = {'type': 'commit', 'sha': SHA}
+        with self.assertRaisesRegex(ValueError, 'annotated tag'):
+            self.inspect()
+
+    def test_empty_tag_release_notes_cannot_publish(self):
+        for message in (None, '', ' \n'):
+            self.tag_message = message
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, 'release notes'):
+                self.inspect()
+
+    def test_tag_notes_command_prints_the_annotation(self):
+        import contextlib
+        import io
+        import sys
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['release_publication.py', 'tag-notes', '--tag', 'v1.0.0']), \
+                patch.object(self.module, 'github', self.github), contextlib.redirect_stdout(output):
+            self.module.main()
+        self.assertEqual(self.tag_message, output.getvalue())
+
+    def test_finalizer_uses_literal_tag_notes_and_publication_metadata(self):
+        import os
+        import re
+        import subprocess
+        import textwrap
+        self.tag_message = '# Red OHC 1.0.0\n\nLiteral: $(touch should-not-run)\n'
+        script = self.root / 'scripts/release_publication.py'
+        script.parent.mkdir()
+        script.write_text('import sys\nsys.stdout.write({!r})\n'.format(self.tag_message), encoding='utf-8')
+        (self.root / 'release-artifacts').mkdir()
+        workflow = SCRIPT.parent.parent / '.github/workflows/publish-release.yml'
+        step = workflow.read_text(encoding='utf-8').split(
+            '      - name: Record verified release and create GitHub release\n', 1)[1]
+        block = re.search(r'(?m)^          \{\n[\s\S]*?^          \} > release-artifacts/release-notes.md', step)
+        self.assertIsNotNone(block)
+        environment = dict(os.environ, RELEASE_TAG='v1.0.0', RELEASE_SHA=SHA,
+                           CI_RUN_ID='123', GPG_FINGERPRINT='A' * 40, GITHUB_RUN_ID='456')
+        subprocess.run(['bash', '-eu', '-c', textwrap.dedent(block.group())],
+                       cwd=self.root, env=environment, check=True, capture_output=True, text=True)
+        body = (self.root / 'release-artifacts/release-notes.md').read_text(encoding='utf-8')
+        self.assertIn(self.tag_message, body)
+        self.assertIn('Source: ' + SHA, body)
+        self.assertIn('/actions/runs/123', body)
+        self.assertFalse((self.root / 'should-not-run').exists())
+
     def test_successful_ci_attempt_is_recorded_and_cannot_change_during_inspection(self):
         result = self.inspect()
         self.assertIn('ci_run_attempt', result, 'Release evidence must identify the successful CI attempt')
@@ -78,7 +126,7 @@ class StableReleaseTest(unittest.TestCase):
             self.inspect()
 
     def test_moved_tag_cannot_use_preapproval_candidate(self):
-        self.tag['object']['sha'] = OTHER_SHA
+        self.tag['object'] = {'type': 'commit', 'sha': OTHER_SHA}
         with self.assertRaises(ValueError):
             self.inspect()
 

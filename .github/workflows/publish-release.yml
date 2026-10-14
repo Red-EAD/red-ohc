@@ -213,7 +213,8 @@ jobs:
             --bundle release-artifacts/release-bundle.zip --receipt release-artifacts/release-candidate.json \
             --cache "$RUNNER_TEMP/red-ohc-release-consumer-m2" --output release-artifacts/release-publication.json
           {
-            echo "Red OHC $RELEASE_TAG"
+            python3 scripts/release_publication.py tag-notes --tag "$RELEASE_TAG"
+            printf '\n## Publication verification\n\n'
             echo "Source: $RELEASE_SHA"
             echo "Validated CI: https://github.com/Red-EAD/red-ohc/actions/runs/$CI_RUN_ID"
             echo "Primary signing key: $GPG_FINGERPRINT"
