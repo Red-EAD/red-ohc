@@ -65,15 +65,28 @@ users.remove("user:42");
 在运行中的 JVM 反复创建缓存会保留基础设施，应使用有限数量的共享缓存。
 `clear()` 删除映射，缓存仍可继续使用。
 
-**1.0.0 发布后**，应用可以从 Maven Central 直接依赖，无需配置额外 repository：
+要直接使用开发版，在应用 POM 中添加官方 Sonatype SNAPSHOT 仓库和依赖：
 
 ```xml
 <dependency>
   <groupId>io.github.red-ead</groupId>
   <artifactId>red-ohc-core</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.0-SNAPSHOT</version>
 </dependency>
+<!-- repositories 位于 project 下，与 dependencies 同级。 -->
+<repositories>
+  <repository>
+    <id>central-portal-snapshots</id>
+    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+    <releases><enabled>false</enabled></releases>
+    <snapshots><enabled>true</enabled></snapshots>
+  </repository>
+</repositories>
 ```
+
+main 的 CI 成功后会发布 SNAPSHOT；它是会持续变化的开发版。
+Maven 和 Gradle 的完整配置见[依赖指南](docs/quickstart.md#add-the-dependency)。
+稳定版 **1.0.0** 尚未发布；正式发布后可从 Maven Central 拉取，无需额外 repository。
 
 ## 架构
 

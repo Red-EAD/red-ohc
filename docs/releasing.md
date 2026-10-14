@@ -11,6 +11,42 @@ Version policy: develop on `1.0.0-SNAPSHOT`, first stable version `1.0.0`, tag
 the tag. Record its SHA, JDK, dependency graphs, source/JAR checksums, test results
 and reproducibility evidence. Never fabricate signatures or validation results.
 
+## Development SNAPSHOTs
+
+The `io.github.red-ead` namespace must be verified and its SNAPSHOT option enabled
+in Central Portal. A maintainer-generated Central user token is stored as
+`CENTRAL_USERNAME` and `CENTRAL_PASSWORD` in GitHub's `snapshot` environment.
+That environment permits only the `main` branch. Maven reads the secrets through
+`config/maven/publishing-settings.xml`, under server ID `central`; the file
+contains environment references only. SNAPSHOT publishing requires no GPG key.
+
+`Publish SNAPSHOT` runs after a successful `CI` main push or a manual dispatch on
+main. Before upload, it confirms the current main SHA, the trusted CI workflow
+and all 14 successful jobs: Linux/macOS/Windows with JDK 11/17/21/25, JCStress and
+the runnable example. PR and fork runs cannot publish. The parent and core must
+share public coordinates and a `-SNAPSHOT` version; stable versions are skipped.
+
+Uploads run serially. CI cancellation and the publication queue can consolidate
+fast consecutive merges. A superseded checkout is skipped, so the workflow does
+not promise a separate published artifact for every intermediate merge. A failed
+upload or verification is visible as a failed workflow; after correcting the
+cause, dispatch `Publish SNAPSHOT` on main to retry with the same CI gate.
+
+The publisher builds parent/core with JDK 11, skips already-validated Java tests,
+and uses the existing Central plugin's SNAPSHOT support. It then resolves the
+dependency anonymously using empty Maven settings and a new cache, comparing the
+downloaded core JAR's SHA-256 against the built JAR. The workflow summary and logs
+record source SHA, validated CI run, version and parent/core artifact checksums.
+The benchmark module is excluded.
+
+Consumers add the official repository
+`https://central.sonatype.com/repository/maven-snapshots/` with SNAPSHOTs enabled;
+see the [quick start](quickstart.md#add-the-dependency). This endpoint is separate
+from the stable Maven Central repository. No download token is required.
+See Sonatype's [SNAPSHOT documentation](https://central.sonatype.org/publish/publish-portal-snapshots/).
+
+## Stable releases
+
 The default build publishes nothing. The opt-in `release` profile attaches
 sources/Javadoc and signs with the maintainer's existing GPG key. A local
 rehearsal requires a clean committed stable version and a real signing key,

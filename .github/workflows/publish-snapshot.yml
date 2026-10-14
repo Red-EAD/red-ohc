@@ -1,0 +1,81 @@
+name: Publish SNAPSHOT
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: red-ohc-main-snapshot
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      github.repository == 'Red-EAD/red-ohc' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'))
+    environment: snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Require successful CI for the exact current main
+        id: eligibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/snapshot_publication.py check --sha "$(git rev-parse HEAD)"
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        if: steps.eligibility.outputs.publish == 'true'
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Build and publish parent and core
+        if: steps.eligibility.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ steps.eligibility.outputs.sha }}
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          MAVEN_OPTS: -Xmx1g
+        run: |
+          test -n "$CENTRAL_USERNAME" && test -n "$CENTRAL_PASSWORD"
+          python3 scripts/snapshot_publication.py assert-current --sha "$EXPECTED_SHA"
+          ./mvnw -B -ntp -s config/maven/publishing-settings.xml -gs config/maven/settings.xml \
+            -Pcentral-publish -pl red-ohc-core -am -DskipTests -Dcentral.skipPublishing=false clean deploy
+      - name: Verify anonymous resolution with an empty Maven cache
+        if: steps.eligibility.outputs.publish == 'true'
+        run: |
+          consumer="$RUNNER_TEMP/red-ohc-snapshot-consumer"
+          cache="$RUNNER_TEMP/red-ohc-snapshot-consumer-m2"
+          test ! -e "$cache"
+          python3 scripts/snapshot_publication.py consumer-pom --output "$consumer/pom.xml"
+          ./mvnw -B -ntp -U -s config/maven/settings.xml -gs config/maven/settings.xml \
+            -f "$consumer/pom.xml" "-Dmaven.repo.local=$cache" \
+            org.apache.maven.plugins:maven-dependency-plugin:3.8.1:resolve -DincludeScope=runtime
+      - name: Record published source and artifact checksums
+        if: steps.eligibility.outputs.publish == 'true'
+        env:
+          EXPECTED_SHA: ${{ steps.eligibility.outputs.sha }}
+          CI_RUN_ID: ${{ steps.eligibility.outputs.ci_run_id }}
+        run: |
+          python3 scripts/snapshot_publication.py manifest --sha "$EXPECTED_SHA" \
+            --ci-run-id "$CI_RUN_ID" --cache "$RUNNER_TEMP/red-ohc-snapshot-consumer-m2" \
+            --output target/snapshot-publication.json
+          {
+            echo '### Public SNAPSHOT publication'
+            echo "Source: $EXPECTED_SHA"
+            echo "Validated CI: https://github.com/Red-EAD/red-ohc/actions/runs/$CI_RUN_ID"
+            echo 'Parent/core upload and anonymous Maven resolution completed.'
+            echo '```json'
+            cat target/snapshot-publication.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

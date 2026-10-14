@@ -71,16 +71,30 @@ Caches have process lifetime and no public `close`, `stop` or `destroy` method.
 Repeated cache creation retains infrastructure in a running JVM. Use a bounded
 number of shared caches; `clear()` removes mappings without destroying the cache.
 
-After **1.0.0 is published**, applications can use Maven Central without a custom
-repository:
+To use the development build without a source checkout, add the official
+Sonatype SNAPSHOT repository and dependency to your application's POM:
 
 ```xml
 <dependency>
   <groupId>io.github.red-ead</groupId>
   <artifactId>red-ohc-core</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.0-SNAPSHOT</version>
 </dependency>
+<!-- Place repositories at project level, alongside dependencies. -->
+<repositories>
+  <repository>
+    <id>central-portal-snapshots</id>
+    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+    <releases><enabled>false</enabled></releases>
+    <snapshots><enabled>true</enabled></snapshots>
+  </repository>
+</repositories>
 ```
+
+SNAPSHOTs follow successful main CI; they are development builds and can change.
+See the [dependency guide](docs/quickstart.md#add-the-dependency) for Maven and
+Gradle setup. Stable **1.0.0** is not yet published; after its release, Maven Central
+will supply it without an additional repository.
 
 ## Architecture
 
