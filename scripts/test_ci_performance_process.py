@@ -15,6 +15,19 @@ import ci_performance_process as monitor
 
 
 class ProcessTest(unittest.TestCase):
+    def test_zero_duration_startup_failure_keeps_original_error_and_evidence(self):
+        target = ('ci_performance_windows.WindowsProcess' if os.name == 'nt'
+                  else 'ci_performance_process.psutil.Popen')
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(target, side_effect=OSError('spawn failed')), \
+                    patch.object(monitor.time, 'monotonic', return_value=1.):
+                with self.assertRaisesRegex(OSError, 'spawn failed'):
+                    self.run_command('pass', directory)
+            evidence = json.loads((Path(directory) / 'child.process.json').read_text())
+            self.assertEqual(evidence['wall_seconds'], 0)
+            self.assertIsNone(evidence['sampled_normalized_cpu_percent'])
+            self.assertEqual(evidence['error'], 'spawn failed')
+
     @unittest.skipUnless(os.name == 'nt', 'native Windows job contract')
     def test_job_assignment_failure_never_starts_the_controller(self):
         import win32job
@@ -54,12 +67,24 @@ class ProcessTest(unittest.TestCase):
                     child = psutil.Process(pid)
                 except psutil.NoSuchProcess:
                     return
-                self.assertTrue(not child.is_running() or child.status() == psutil.STATUS_ZOMBIE)
-            finally:
-                if child is not None and child.is_running():
-                    child.kill()
+                deadline = time.monotonic() + 2
+                while True:
                     try:
+                        stopped = not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+                    except psutil.NoSuchProcess:
+                        stopped = True
+                    if stopped or time.monotonic() >= deadline:
+                        break
+                    time.sleep(.01)
+                self.assertTrue(stopped)
+            finally:
+                if child is not None:
+                    try:
+                        if child.is_running():
+                            child.kill()
                         child.wait(timeout=2)
+                    except psutil.NoSuchProcess:
+                        pass
                     except psutil.TimeoutExpired:
                         pass  # A POSIX orphan zombie is reaped by the OS, not this test.
 

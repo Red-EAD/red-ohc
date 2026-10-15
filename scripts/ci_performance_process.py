@@ -155,7 +155,10 @@ def run_process(args, cwd, log_file, timeout, deadline=None, rss_limit=RSS_LIMIT
         info['sampled_user_seconds'] = sum(p['user_seconds'] for p in info['processes'])
         info['sampled_system_seconds'] = sum(p['system_seconds'] for p in info['processes'])
         info['logical_cpus'] = os.cpu_count()
-        info['sampled_normalized_cpu_percent'] = 100 * (info['sampled_user_seconds'] + info['sampled_system_seconds']) / info['wall_seconds'] / (os.cpu_count() or 1)
+        info['sampled_normalized_cpu_percent'] = (
+            100 * (info['sampled_user_seconds'] + info['sampled_system_seconds'])
+            / info['wall_seconds'] / (os.cpu_count() or 1)
+            if info['wall_seconds'] > 0 else None)
         log_file.with_suffix('.process.json').write_text(json.dumps(info, indent=2) + '\n', encoding='utf-8')
         if cleanup_error is not None and error is None:
             raise cleanup_error

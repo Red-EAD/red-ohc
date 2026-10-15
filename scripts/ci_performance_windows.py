@@ -2,6 +2,7 @@
 import os
 import subprocess
 import time
+import uuid
 
 import msvcrt
 import psutil
@@ -17,7 +18,7 @@ class WindowsProcess:
     def __init__(self, args, cwd, env, log):
         self.returncode = None
         self.process_handle = None
-        self.job = win32job.CreateJobObject(None, None)
+        self.job = win32job.CreateJobObject(None, 'red-ohc-ci-' + uuid.uuid4().hex)
         thread_handle = input_handle = None
         output_handle = msvcrt.get_osfhandle(log.fileno())
         inherited = os.get_handle_inheritable(output_handle)
