@@ -129,7 +129,7 @@ jobs:
       fail-fast: false
       max-parallel: 15
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-latest' && 'macos-26-intel' || matrix.os }}
     timeout-minutes: 27
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

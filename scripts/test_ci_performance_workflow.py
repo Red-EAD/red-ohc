@@ -77,6 +77,15 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(performance['timeout-minutes'], '27')
         self.assertEqual(performance['strategy']['fail-fast'], 'false')
 
+    def test_macos_performance_uses_intel_without_changing_arm_correctness(self):
+        jobs = self.workflow['jobs']
+        self.assertEqual(jobs['performance']['runs-on'],
+                         "${{ matrix.os == 'macos-latest' && 'macos-26-intel' || matrix.os }}")
+        self.assertEqual(jobs['verify']['runs-on'], '${{ matrix.os }}')
+        matrix = jobs['verify']['strategy']['matrix']
+        self.assertIn('macos-latest', matrix['os'])
+        self.assertEqual(set(matrix['java']), {'11', '17', '21', '25'})
+
     def test_unmeasured_job_runs_only_its_explicit_summary_step(self):
         steps = self.workflow['jobs']['performance']['steps']
         for step in steps:

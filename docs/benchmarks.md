@@ -321,9 +321,16 @@ Linux CPU times include steal and iowait when exposed by the guest. These sample
 include the benchmark's own CPU demand and do not expose the physical host's
 other tenants. A high load average alone does not establish external contention.
 OHC's `mmap`/`VirtualAlloc` pages are outside `MaxDirectMemorySize`.
-The 2 GiB heap leaves room for the
-7 GB macOS ARM runner; public Linux and Windows standard runners provide 16 GB.
+Performance jobs use the standard macOS 26 Intel runner (four logical CPUs,
+14 GB RAM), while the macOS correctness matrix continues on Apple Silicon.
+The 2 GiB heap budget is identical across platforms; public Linux and Windows
+standard runners provide 16 GB.
 See [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+Daily macOS performance results cover Intel, and do not establish Apple Silicon
+performance. The runner change is a stability experiment: macOS ARM calibration
+showed large within-fork variation even in read-only windows with no GC and
+little JIT activity. Those observations do not identify a specific host or
+scheduler cause, and Intel virtualization can also introduce variability.
 POSIX process groups and a private Windows Job Object retain ownership even
 when a controller exits before its fork is sampled. Windows starts the controller
 suspended, assigns it to the kill-on-close job, then resumes its primary thread.
