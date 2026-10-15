@@ -350,13 +350,13 @@ Each OS/JDK/scenario combination runs in a separate runner VM; the five scenario
 can run concurrently without competing for CPUs inside one VM. BASE and NEW
 execute serially in that same VM, adjacent within each pair, with AB/BA order
 alternating by round. Each scenario starts with five independent pairs. Every
-process has one fork, three 10-second warmup iterations and five 6-second
-measurement iterations: ten minutes of pure screening per scenario.
+process has one fork, three 10-second warmup iterations and five 7-second
+measurement iterations: 10 minutes 50 seconds of pure screening per scenario.
 
 A case that reaches either 10% threshold or has inconclusive screening receives
 exactly one independent confirmation batch: three pairs, three 15-second warmup
-iterations and five 6-second measurement iterations. This adds 7.5 minutes of
-pure measurement/warmup, for 17.5 minutes per scenario including both
+iterations and five 7-second measurement iterations. This adds eight minutes of
+pure measurement/warmup, for 18 minutes 50 seconds per scenario including both
 batches. Builds, startup and teardown add time. Batches are retained separately,
 without pooling, trimming outliers or retrying until a desired result appears.
 Longer windows do not establish that a hosted VM has reached steady state.
