@@ -416,9 +416,15 @@ observer; rates use each process's monotonic observation interval and are
 estimates with partial coverage because short-lived, new or unreadable processes
 may be absent. The iterator cache is cleared for fresh PID/create-time identities.
 Windows PID 0 (the Idle Process) is excluded; POSIX PID 0 remains eligible.
+On macOS, native read-only `ps` counters avoid the task-port restriction on
+system-service CPU times; fresh creation-time reads bracket that snapshot to
+reject reused PIDs. The command records executable names, never arguments, and
+has a two-second timeout. Processes omitted by the OS, including kernel PID 0,
+remain unavailable; a low readable aggregate is not proof that the host is idle.
 The first census has no CPU-rate estimate. Per-call wall durations
-separate slow OS introspection from long sampling intervals. All monitoring CPU
-remains included in the observer cost. No system service or unrelated process is
+separate slow OS introspection from long sampling intervals. Python monitoring CPU
+remains included in the observer cost; native `ps` child CPU is excluded from that
+Python-only counter and its wall cost is included in census durations. No system service or unrelated process is
 stopped, reprioritized or reconfigured by the measurement tool.
 
 The JMH auxiliary counters are **operation rates**, not raw operation counts.
@@ -437,11 +443,19 @@ CPU totals are lower bounds. Throughput increases and CPU/op decreases indicate
 improvement, so their warning directions differ.
 
 Process-tree/RSS and guest CPU/load sampling runs once per second; deadline and
-cancellation polling remains responsive at 100 ms. There is no RSS failure cap.
+cancellation checks use a 100 ms loop between OS queries. Blocking introspection
+can delay a check; per-call durations are retained and the clock is refreshed
+after queries. There is no RSS failure cap.
 The tool records its own Python CPU separately across launch, warmup, measurement
 and cleanup, so observer overhead is not mistaken for benchmark CPU.
 Unreadable child command metadata is recorded as unknown with its reason;
 primary sampling and process-control errors still fail the job.
+
+Before cleanup on a process timeout, the tool attempts same-JDK `jcmd Thread.print`
+only for still-live owned JVM identities. All attempts share a five-second launch
+deadline, use the existing child-process cleanup, and never recursively diagnose
+a failed attach. Dump logs and attach failures are retained without replacing the
+original timeout. This is failure evidence, not a startup-hang fix or a retry.
 Guest load includes this benchmark and cannot by itself establish interference from other
 workloads. JMH's built-in `gc` and `comp` profilers retain per-iteration allocation,
 collection and compilation diagnostics in their original units, separately from

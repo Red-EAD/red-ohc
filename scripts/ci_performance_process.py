@@ -1,12 +1,36 @@
 """Cross-platform sampling and cleanup restricted to processes launched by this tool."""
 import json
+import math
 import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import time
 
 import psutil
+
+
+def darwin_cpu_snapshot():
+    # ps reads kernel process accounting without task_for_pid privileges. -c
+    # requests executable names, never arguments. Missing PID 0 remains unknown.
+    started = time.monotonic()
+    output = subprocess.check_output(['/bin/ps', '-A', '-c', '-o', 'pid=,time=,comm='],
+                                     text=True, timeout=2., env={**os.environ, 'LC_ALL': 'C'})
+    observed = (started + time.monotonic()) / 2.
+    counters = {}
+    for line in output.splitlines():
+        pid, elapsed, _ = line.split(maxsplit=2)
+        parts = elapsed.split(':')
+        if len(parts) not in (2, 3):
+            raise ValueError('invalid native process CPU counter')
+        seconds = 0.
+        for part in parts:
+            seconds = seconds * 60. + float(part)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError('negative native process CPU counter')
+        counters[int(pid)] = seconds
+    return counters, observed
 
 
 class HostProcessSampler:
@@ -25,18 +49,34 @@ class HostProcessSampler:
         try:
             # process_iter and Process.create_time both cache; refresh before testing identities.
             psutil.process_iter.cache_clear()
-            for process in psutil.process_iter(
-                    attrs=['pid', 'name', 'create_time', 'cpu_times'], ad_value=None):
+            darwin = sys.platform == 'darwin'
+            attrs = ['pid', 'name', 'create_time'] + ([] if darwin else ['cpu_times'])
+            processes = psutil.process_iter(attrs=attrs, ad_value=None)
+            if darwin:
+                processes = list(processes)  # Identity reads precede the native CPU snapshot.
+            counters, snapshot_time = darwin_cpu_snapshot() if darwin else ({}, None)
+            for process in processes:
                 info = process.info
                 if os.name == 'nt' and info['pid'] == 0:
                     continue  # Windows PID 0 reports idle CPU, not competing work.
-                cpu, born = info['cpu_times'], info['create_time']
-                if cpu is None or born is None:
+                born = info['create_time']
+                if darwin:
+                    total, observed = counters.get(info['pid']), snapshot_time
+                    # Bracket the native snapshot with fresh identity reads. Never
+                    # attach CPU from a reused PID to its previous occupant.
+                    try:
+                        if total is not None and psutil.Process(info['pid']).create_time() != born:
+                            total = None
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        total = None
+                else:
+                    cpu = info['cpu_times']
+                    total = cpu.user + cpu.system if cpu is not None else None
+                    observed = time.monotonic()
+                if total is None or born is None:
                     unavailable += 1
                     continue
                 identity = (info['pid'], born)
-                total = cpu.user + cpu.system
-                observed = time.monotonic()
                 current[identity] = (total, observed)
                 if (identity in owned or info['pid'] == os.getpid()
                         or identity not in self.previous):
@@ -49,7 +89,7 @@ class HostProcessSampler:
                     top.append({'pid': identity[0], 'created_at': born, 'name': info['name'],
                                 'cpu_cores': (total - previous) / duration,
                                 'interval_seconds': duration})
-        except (OSError, NotImplementedError, psutil.Error) as failure:
+        except (OSError, ValueError, NotImplementedError, psutil.Error, subprocess.SubprocessError) as failure:
             error = type(failure).__name__
         self.previous = current if error is None else {}
         self.elapsed = started
@@ -178,7 +218,39 @@ def host_sample(elapsed, initial=False):
     return sample
 
 
-def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
+def timeout_diagnostics(tree, log_file):
+    """Try same-JDK thread dumps only for live, owned JVM identities before cleanup."""
+    cutoff = time.monotonic() + 5.
+    targets = []
+    for identity, process in reversed(list(tree.known.items())):
+        if time.monotonic() >= cutoff:
+            break
+        target = None
+        try:
+            if not process.is_running():  # psutil also checks PID reuse.
+                continue
+            command = process.cmdline()
+            if not command or Path(command[0]).name.lower() not in ('java', 'java.exe'):
+                continue
+            java = Path(command[0])
+            jcmd = java.with_name('jcmd.exe' if java.suffix.lower() == '.exe' else 'jcmd')
+            target = {'pid': identity[0], 'created_at': identity[1], 'error': None}
+            targets.append(target)
+            if not jcmd.is_file():
+                target['error'] = 'same-JDK jcmd unavailable'
+                continue
+            dump = Path(log_file).with_name(Path(log_file).stem + '-threads-' + str(identity[0]) + '.log')
+            target['log'] = dump.name
+            run_process([str(jcmd), str(identity[0]), 'Thread.print', '-l'], dump.parent, dump,
+                        max(.001, cutoff - time.monotonic()), deadline=cutoff,
+                        diagnose_timeout=False)
+        except (OSError, RuntimeError, psutil.Error) as failure:
+            if target is not None:
+                target['error'] = str(failure)
+    return {'budget_seconds': 5., 'targets': targets}
+
+
+def run_process(args, cwd, log_file, timeout, deadline=None, env=None, diagnose_timeout=True):
     log_file = Path(log_file)
     started = time.monotonic()
     cpu_started = time.process_time()
@@ -187,6 +259,7 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
     samples = []
     host_samples = []
     background_samples = []
+    diagnostics = None
     background = HostProcessSampler()
     try:
         with log_file.open('w', encoding='utf-8') as log:
@@ -219,6 +292,11 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
                 # Sampling can block in OS introspection. Never test a stale pre-sample clock.
                 now = time.monotonic()
                 if now - started > timeout or (deadline is not None and now > deadline):
+                    if diagnose_timeout:
+                        try:
+                            diagnostics = timeout_diagnostics(tree, log_file)
+                        except Exception as failure:
+                            diagnostics = {'error': str(failure)}
                     raise RuntimeError('TIMEOUT: performance process exceeded its deadline')
                 if finished:
                     if process.returncode:
@@ -250,6 +328,7 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
                 'sampled_peak_rss_bytes': max((s['rss_bytes'] for s in samples), default=0),
                 'processes': list(tree.stats.values()) if tree else [],
                 'process_cpu_samples_are_lower_bounds': True,
+                'timeout_diagnostics': diagnostics,
                 'error': str(error) if error is not None else None,
                 'cleanup_error': str(cleanup_error) if cleanup_error is not None else None}
         info['sampled_user_seconds'] = sum(p['user_seconds'] for p in info['processes'])

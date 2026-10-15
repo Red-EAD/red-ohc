@@ -309,6 +309,8 @@ def summary_markdown(manifest, results, records, error):
              'Process/RSS sampling is 1 Hz; observer CPU includes Python launch, monitoring and cleanup, across warmup and measurement. GC/JIT diagnostics retain per-iteration units separately from operation rates.',
              'Host CPU busy, cumulative CPU times (including available steal/iowait) and load samples are retained in each process JSON; host load includes this benchmark.',
              'Read-only process CPU attribution runs every 10 seconds: names and fresh PID/create-time identities, no command arguments. Outside-tree CPU rates are estimates over per-process observation intervals, with partial coverage of short-lived or unreadable processes. Per-call sampling wall time is recorded. No unrelated process is modified.',
+             'macOS uses native read-only ps counters with bracketed creation-time validation. Omitted processes remain unknown. Native ps child CPU is excluded from the Python-only observer counter; its wall time is included in census durations.',
+             'Timeouts retain bounded same-JDK thread-dump attempts for live owned JVMs before cleanup. Attach failure never replaces the original timeout.',
              'CPU/op is estimated from measurement-window process CPU and corresponding completed-operation rates; it includes the actor.',
              'Warnings and INCONCLUSIVE results do not fail CI. Raw iteration rates, CPU windows, logs, environment and artifact hashes are retained for 90 days.',
              'Hosted-runner comparisons do not establish dedicated Linux/AMD/Intel performance acceptance.', '']

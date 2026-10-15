@@ -16,6 +16,11 @@ import ci_performance_process as monitor
 
 
 class HostProcessTest(unittest.TestCase):
+    def setUp(self):
+        platform = patch.object(sys, 'platform', 'linux')
+        platform.start()
+        self.addCleanup(platform.stop)
+
     @staticmethod
     def process(pid, born, cpu, name='background'):
         return SimpleNamespace(info={'pid': pid, 'create_time': born, 'name': name,
@@ -95,6 +100,22 @@ class HostProcessTest(unittest.TestCase):
             self.assertEqual(result['outside_cpu_cores'], 2.)
             self.assertEqual(result['top_processes'][0]['interval_seconds'], 12.)
 
+    def test_streamed_counter_time_is_not_shifted_by_a_later_process_query(self):
+        clock = [0.]
+        def scan(**kwargs):
+            yield self.process(20, 2., clock[0] * 2., 'observed first')
+            if clock[0] > 0:
+                clock[0] += 2.  # An unrelated later kernel query stalls.
+            yield self.process(30, 3., 0., 'observed later')
+        with patch.object(monitor.psutil, 'process_iter', side_effect=scan), \
+                patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]):
+            sampler = monitor.HostProcessSampler()
+            sampler.sample(0., set())
+            clock[0] = 10.
+            sample = sampler.sample(10., set())
+            self.assertEqual(sample['top_processes'][0]['interval_seconds'], 10.)
+            self.assertEqual(sample['outside_cpu_cores'], 2.)
+
     def test_pid_reuse_new_and_unreadable_processes_never_invent_cpu_deltas(self):
         with patch.object(monitor.psutil, 'process_iter') as scan:
             sampler = monitor.HostProcessSampler()
@@ -112,6 +133,91 @@ class HostProcessTest(unittest.TestCase):
             sample = sampler.sample(20., set())
             self.assertIsNone(sample['outside_cpu_cores'])
             self.assertEqual(sample['error'], 'AccessDenied')
+
+    def test_darwin_system_cpu_uses_native_read_only_counters_with_identity_validation(self):
+        clock = [0.]
+        process = self.process(20, 2., 0., 'system service')
+        process.info['cpu_times'] = None  # task_for_pid is denied for system services.
+        kernel = self.process(0, 0., 0., 'kernel_task')
+        kernel.info['cpu_times'] = None
+        with patch.object(sys, 'platform', 'darwin'), \
+                patch.object(monitor.psutil, 'process_iter', return_value=[process, kernel]), \
+                patch.object(monitor.psutil, 'Process', return_value=SimpleNamespace(create_time=lambda: 2.)), \
+                patch.object(monitor.subprocess, 'check_output', side_effect=[
+                    '20 1:00.00 system service\n', '20 1:20.00 system service\n']) as native, \
+                patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]):
+            sampler = monitor.HostProcessSampler()
+            sampler.sample(0., set())
+            clock[0] = 10.
+            sample = sampler.sample(10., set())
+            self.assertEqual(sample['outside_cpu_cores'], 2.)
+            self.assertEqual(sample['top_processes'][0]['name'], 'system service')
+            self.assertEqual(sample['unavailable_process_count'], 1)
+            self.assertTrue(sample['coverage_is_partial'])
+            self.assertEqual(native.call_args.args[0], ['/bin/ps', '-A', '-c', '-o', 'pid=,time=,comm='])
+            self.assertLessEqual(native.call_args.kwargs['timeout'], 2.)
+
+    def test_darwin_native_snapshot_rejects_pid_reuse_and_retains_optional_failure(self):
+        process = self.process(20, 1., 0.)
+        process.info['cpu_times'] = None
+        with patch.object(sys, 'platform', 'darwin'), \
+                patch.object(monitor.psutil, 'process_iter', return_value=[process]), \
+                patch.object(monitor.psutil, 'Process', return_value=SimpleNamespace(create_time=lambda: 2.)), \
+                patch.object(monitor.subprocess, 'check_output', return_value='20 1:00.00 worker\n') as native:
+            sampler = monitor.HostProcessSampler()
+            sampler.sample(0., set())
+            sample = sampler.sample(10., set())
+            self.assertIsNone(sample['outside_cpu_cores'])
+            self.assertEqual(sample['unavailable_process_count'], 1)
+            native.side_effect = subprocess.TimeoutExpired('ps', 2)
+            sample = sampler.sample(20., set())
+            self.assertIsNone(sample['outside_cpu_cores'])
+            self.assertEqual(sample['error'], 'TimeoutExpired')
+
+    def test_native_cpu_counter_units_and_invalid_values(self):
+        output = '20 123:45.67 worker\n21 1:02:03.50 other service\n'
+        with patch.object(monitor.subprocess, 'check_output', return_value=output):
+            counters, _ = monitor.darwin_cpu_snapshot()
+        self.assertEqual(counters, {20: 7425.67, 21: 3723.5})
+        for invalid in ('20 NaN worker\n', '20 0:NaN worker\n', '20 -1:00 worker\n'):
+            with self.subTest(invalid=invalid), \
+                    patch.object(monitor.subprocess, 'check_output', return_value=invalid), \
+                    self.assertRaises(ValueError):
+                monitor.darwin_cpu_snapshot()
+
+
+class TimeoutDiagnosticTest(unittest.TestCase):
+    def test_only_live_owned_jvms_get_same_jdk_bounded_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            java = Path(directory) / 'java.exe'
+            jcmd = Path(directory) / 'jcmd.exe'
+            jcmd.touch()
+            live = SimpleNamespace(is_running=lambda: True, cmdline=lambda: [str(java), '-version'])
+            reused = SimpleNamespace(is_running=lambda: False,
+                                     cmdline=lambda: self.fail('reused identity must not be inspected'))
+            other = SimpleNamespace(is_running=lambda: True, cmdline=lambda: ['unrelated'])
+            tree = SimpleNamespace(known={(10, 1.): live, (20, 2.): reused, (30, 3.): other})
+            with patch.object(monitor, 'run_process', side_effect=RuntimeError('TIMEOUT: jcmd')) as launch:
+                result = monitor.timeout_diagnostics(tree, Path(directory) / 'maven.log')
+            self.assertEqual(len(result['targets']), 1)
+            self.assertEqual(result['targets'][0]['pid'], 10)
+            self.assertIn('TIMEOUT', result['targets'][0]['error'])
+            self.assertEqual(launch.call_args.args[0], [str(jcmd), '10', 'Thread.print', '-l'])
+            self.assertLessEqual(launch.call_args.args[3], 5.)
+            self.assertFalse(launch.call_args.kwargs['diagnose_timeout'])
+
+    def test_a_disappearing_non_jvm_does_not_rewrite_a_previous_diagnostic_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            java = Path(directory) / 'java'
+            java.with_name('jcmd').touch()
+            live = SimpleNamespace(is_running=lambda: True, cmdline=lambda: [str(java)])
+            def vanished():
+                raise psutil.NoSuchProcess(20)
+            gone = SimpleNamespace(is_running=vanished)
+            tree = SimpleNamespace(known={(20, 2.): gone, (10, 1.): live})
+            with patch.object(monitor, 'run_process', return_value={}):
+                result = monitor.timeout_diagnostics(tree, Path(directory) / 'maven.log')
+            self.assertEqual(result['targets'][0]['error'], None)
 
 
 class ProcessTest(unittest.TestCase):
@@ -301,6 +407,19 @@ class ProcessTest(unittest.TestCase):
                     monitor.run_process([sys.executable, '-c', code], Path(directory),
                                         Path(directory) / 'run.log', timeout=timeout)
                 self.assertTrue((Path(directory) / 'run.process.json').exists())
+
+    def test_timeout_keeps_original_failure_when_thread_diagnostic_cannot_attach(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(monitor, 'timeout_diagnostics', create=True,
+                             side_effect=RuntimeError('attach unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'TIMEOUT: performance process'):
+                monitor.run_process([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                    Path(directory), Path(directory) / 'timed.log', timeout=.1)
+            info = json.loads((Path(directory) / 'timed.process.json').read_text())
+            self.assertIn('timeout_diagnostics', info)
+            self.assertEqual(info['timeout_diagnostics']['error'], 'attach unavailable')
+            self.assertIn('TIMEOUT', info['error'])
+            self.assertIsNone(info['cleanup_error'])
 
     def test_known_child_is_killed_even_after_controller_has_exited(self):
         with tempfile.TemporaryDirectory() as directory:
