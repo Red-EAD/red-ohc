@@ -39,6 +39,25 @@ class HostProcessTest(unittest.TestCase):
             self.assertNotIn('cmdline', str(scan.call_args))
             self.assertGreaterEqual(measured['sampling_wall_seconds'], 0.)
 
+    def test_windows_idle_pid_is_not_work_but_posix_kernel_pid_remains_visible(self):
+        for platform_name, expected in [('nt', 1.), ('posix', 5.)]:
+            clock = [0.]
+            with self.subTest(platform=platform_name), \
+                    patch.object(monitor.psutil, 'process_iter') as scan, \
+                    patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]), \
+                    patch.object(monitor.os, 'name', platform_name):
+                sampler = monitor.HostProcessSampler()
+                scan.return_value = [self.process(0, 0., 100., 'idle-or-kernel'),
+                                     self.process(20, 1., 0., 'worker')]
+                sampler.sample(0., set())
+                clock[0] = 10.
+                scan.return_value = [self.process(0, 0., 140., 'idle-or-kernel'),
+                                     self.process(20, 1., 10., 'worker')]
+                measured = sampler.sample(10., set())
+                self.assertEqual(measured['outside_cpu_cores'], expected)
+                self.assertEqual(any(p['pid'] == 0 for p in measured['top_processes']),
+                                 platform_name == 'posix')
+
     def test_real_iterator_cache_is_refreshed_when_an_existing_pid_is_reused(self):
         state = {'born': 1., 'cpu': 100., 'now': 0.}
         class CachedProcess:

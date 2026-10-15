@@ -28,6 +28,8 @@ class HostProcessSampler:
             for process in psutil.process_iter(
                     attrs=['pid', 'name', 'create_time', 'cpu_times'], ad_value=None):
                 info = process.info
+                if os.name == 'nt' and info['pid'] == 0:
+                    continue  # Windows PID 0 reports idle CPU, not competing work.
                 cpu, born = info['cpu_times'], info['create_time']
                 if cpu is None or born is None:
                     unavailable += 1

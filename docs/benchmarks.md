@@ -415,6 +415,7 @@ without command arguments. CPU deltas exclude the launched process tree and the
 observer; rates use each process's monotonic observation interval and are
 estimates with partial coverage because short-lived, new or unreadable processes
 may be absent. The iterator cache is cleared for fresh PID/create-time identities.
+Windows PID 0 (the Idle Process) is excluded; POSIX PID 0 remains eligible.
 The first census has no CPU-rate estimate. Per-call wall durations
 separate slow OS introspection from long sampling intervals. All monitoring CPU
 remains included in the observer cost. No system service or unrelated process is
