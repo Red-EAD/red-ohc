@@ -323,6 +323,14 @@ other tenants. A high load average alone does not establish external contention.
 OHC's `mmap`/`VirtualAlloc` pages are outside `MaxDirectMemorySize`.
 Performance jobs use the standard macOS 26 Intel runner (four logical CPUs,
 14 GB RAM), while the macOS correctness matrix continues on Apple Silicon.
+Only the ephemeral macOS performance VMs disable Spotlight indexing with
+`mdutil -a -i off`, before building or measuring either artifact. Status before
+and after the command is retained as `performance-spotlight.log`. Calibration
+observed `mds` and `mds_stores` jointly consuming about two vCPUs while the
+four-worker JVM received fewer than two. This control targets that observed
+guest workload; it does not eliminate other services, hypervisor contention or
+all within-fork drift. No index is erased, no security service is disabled, and
+correctness VMs and developer machines are unaffected.
 The 2 GiB heap budget is identical across platforms; public Linux and Windows
 standard runners provide 16 GB.
 See [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).

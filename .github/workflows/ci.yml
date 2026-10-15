@@ -149,6 +149,19 @@ jobs:
         if: needs.plan.outputs.enabled == 'true'
         shell: bash
         run: python scripts/run_ci_performance.py select --jdk '${{ matrix.java }}' --plan "$RUNNER_TEMP/performance-plan.json"
+      - name: Isolate macOS performance from Spotlight indexing
+        if: needs.plan.outputs.enabled == 'true' && matrix.os == 'macos-latest'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          {
+            echo 'Spotlight status before isolation'
+            sudo -n /usr/bin/mdutil -a -s
+            sudo -n /usr/bin/mdutil -a -i off
+            echo 'Spotlight status after isolation'
+            sudo -n /usr/bin/mdutil -a -s
+          } > "$RUNNER_TEMP/performance-spotlight.log" 2>&1
+          cat "$RUNNER_TEMP/performance-spotlight.log"
       - name: Install isolated performance tooling
         if: needs.plan.outputs.enabled == 'true'
         shell: bash
@@ -191,6 +204,7 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/performance-plan.json
+            ${{ runner.temp }}/performance-spotlight.log
             ${{ runner.temp }}/performance-results/reports/
             ${{ runner.temp }}/performance-results/logs/
             ${{ runner.temp }}/performance-results/artifacts/

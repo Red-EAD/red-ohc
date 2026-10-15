@@ -86,6 +86,56 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('macos-latest', matrix['os'])
         self.assertEqual(set(matrix['java']), {'11', '17', '21', '25'})
 
+    def test_spotlight_isolation_is_scoped_to_measured_macos_jobs_and_retained(self):
+        jobs = self.workflow['jobs']
+        steps = jobs['performance']['steps']
+        controls = [s for s in steps if 'mdutil' in s.get('run', '')]
+        self.assertEqual(len(controls), 1)
+        control = controls[0]
+        self.assertEqual(control['if'], "needs.plan.outputs.enabled == 'true' && matrix.os == 'macos-latest'")
+        self.assertEqual(control['timeout-minutes'], '1')
+        self.assertIn('sudo -n /usr/bin/mdutil -a -i off', control['run'])
+        self.assertIn('sudo -n /usr/bin/mdutil -a -s', control['run'])
+        self.assertNotRegex(control['run'], r'mdutil .*-(?:E|X)\b|launchctl|kill|rm ')
+        self.assertLess(steps.index(control), next(i for i, s in enumerate(steps)
+                                                 if s.get('name') == 'Compare paired performance'))
+        for name, job in jobs.items():
+            if name != 'performance':
+                self.assertFalse(any('mdutil' in s.get('run', '') for s in job.get('steps', [])))
+        upload = next(s for s in steps if s.get('name') == 'Retain performance evidence')
+        self.assertIn('performance-spotlight.log', upload['with']['path'])
+
+    @unittest.skipUnless(os.name == 'posix', 'macOS host-control shell contract')
+    def test_spotlight_step_retains_status_and_propagates_control_failure_with_fake_commands(self):
+        controls = [s for s in self.workflow['jobs']['performance']['steps'] if 'mdutil' in s.get('run', '')]
+        self.assertEqual(len(controls), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'bin'
+            binary.mkdir()
+            sudo = binary / 'sudo'
+            sudo.write_text('#!/bin/sh\n'
+                            'printf "%s\\n" "$*" >> "$RUNNER_TEMP/calls"\n'
+                            'if [ "$CONTROL_FAILURE" = 1 ]; then exit 9; fi\n'
+                            'printf "index-status-fixture\\n"\n')
+            sudo.chmod(0o755)
+            for failure in ('0', '1'):
+                output = root / ('result with spaces ' + failure)
+                output.mkdir()
+                env = os.environ | {'PATH': str(binary) + os.pathsep + os.environ['PATH'],
+                                    'RUNNER_TEMP': str(output), 'CONTROL_FAILURE': failure}
+                done = subprocess.run(['bash', '-eo', 'pipefail', '-c', controls[0]['run']],
+                                      env=env, capture_output=True, text=True, timeout=3)
+                self.assertEqual(done.returncode, 9 if failure == '1' else 0, done.stderr)
+                evidence = output / 'performance-spotlight.log'
+                self.assertTrue(evidence.exists())
+                if failure == '0':
+                    self.assertEqual(evidence.read_text().count('index-status-fixture'), 3)
+                    calls = (output / 'calls').read_text().splitlines()
+                    self.assertEqual(calls, ['-n /usr/bin/mdutil -a -s',
+                                             '-n /usr/bin/mdutil -a -i off',
+                                             '-n /usr/bin/mdutil -a -s'])
+
     def test_unmeasured_job_runs_only_its_explicit_summary_step(self):
         steps = self.workflow['jobs']['performance']['steps']
         for step in steps:
