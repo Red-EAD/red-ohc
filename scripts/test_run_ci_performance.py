@@ -105,7 +105,7 @@ class RunnerTest(unittest.TestCase):
     def test_whole_runner_warnings_succeed_and_real_errors_propagate(self):
         from test_ci_performance import result, windows
         import ci_performance_process
-        for failure in [None, RuntimeError('RESOURCE_ERROR: simulated')]:
+        for failure in [None, RuntimeError('PROCESS_ERROR: simulated')]:
             with self.subTest(error=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 plan = root / 'plan.json'
@@ -134,12 +134,14 @@ class RunnerTest(unittest.TestCase):
                         patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'step-summary.md')}), \
                         redirect_stdout(output):
                     if failure:
-                        with self.assertRaisesRegex(RuntimeError, 'RESOURCE_ERROR'):
+                        with self.assertRaisesRegex(RuntimeError, 'PROCESS_ERROR'):
                             runner.run(arguments)
                     else:
                         runner.run(arguments)
                 status = json.loads((root / 'output/reports/status.json').read_text())
                 self.assertEqual(status['status'], 'ERROR' if failure else 'COMPLETED')
+                manifest = json.loads((root / 'output/reports/manifest.json').read_text())
+                self.assertNotIn('rss_limit_bytes', manifest)
                 self.assertEqual((root / 'step-summary.md').read_text(),
                                  (root / 'output/reports/summary.md').read_text() + '\n')
                 if not failure:

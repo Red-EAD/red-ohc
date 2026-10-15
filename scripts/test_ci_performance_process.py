@@ -1,4 +1,4 @@
-"""Owned process cleanup with tiny Python children; resource limits are simulated."""
+"""Owned process cleanup and memory sampling with tiny Python children."""
 import json
 import os
 from pathlib import Path
@@ -100,14 +100,20 @@ class ProcessTest(unittest.TestCase):
             self.assertGreater(info['wall_seconds'], .1)
             self.assertTrue(info['processes'])
 
-    def test_rss_over_limit_is_an_error_without_allocating_gigabytes(self):
+    def test_large_sampled_rss_is_recorded_without_rejecting_the_process(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(monitor.OwnedTree, 'sample', return_value=4 * 1024**3 + 1):
-                with self.assertRaisesRegex(RuntimeError, 'RESOURCE_ERROR'):
-                    self.run_command('import time; time.sleep(30)', directory)
+            sampled_rss = 6 * 1024**3
+            with patch.object(monitor.OwnedTree, 'sample', return_value=sampled_rss):
+                try:
+                    info = self.run_command('import time; time.sleep(.15)', directory)
+                except RuntimeError as error:
+                    self.fail('sampled RSS must not abort the process: ' + str(error))
+            self.assertEqual(info['exit_code'], 0)
+            self.assertEqual(info['sampled_peak_rss_bytes'], sampled_rss)
             evidence = json.loads((Path(directory) / 'child.process.json').read_text())
-            self.assertIn('RESOURCE_ERROR', evidence['error'])
-            self.assertIsNotNone(evidence['exit_code'])
+            self.assertIsNone(evidence['error'])
+            self.assertEqual(evidence['rss_samples'][0]['rss_bytes'], sampled_rss)
+            self.assertNotIn('rss_limit_bytes', evidence)
 
     def test_crash_and_timeout_fail_and_always_leave_partial_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

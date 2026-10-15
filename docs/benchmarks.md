@@ -255,7 +255,7 @@ PR with its main base after correctness tests. The 14 required checks and the
 maintainer's merge decision remain unchanged. A throughput or estimated CPU/op
 ratio at or beyond 0.90 or 1.10 emits a warning in either direction. Performance
 warnings, including `INCONCLUSIVE`, keep the step successful. Build failures,
-crashes, timeouts, resource-limit breaches, wrong artifacts/configuration and
+crashes, timeouts, allocation failures, wrong artifacts/configuration and
 operation reconciliation failures fail the existing verify check.
 
 Main pushes run correctness checks and report performance as `NOT_MEASURED`.
@@ -293,11 +293,10 @@ and prepend arguments, removes inherited Java option variables and validates
 the fork JVM, arguments, JDK, workload and iteration settings in the actual JMH
 JSON. This prevents the benchmark's 1 GiB annotation defaults from taking effect.
 
-The tool samples the combined RSS of its controller and fork every 100 ms. A
-sample above 4 GiB terminates owned processes and reports `RESOURCE_ERROR`.
-Sampling can miss brief peaks and allows overshoot between samples; this is
-not a physical-memory or native-allocation hard limit. OHC's `mmap`/`VirtualAlloc`
-pages are outside `MaxDirectMemorySize`. The 2 GiB heap leaves room for the
+The tool samples the combined RSS of its controller and fork every 100 ms and
+records the peak without imposing an RSS limit. Sampling can miss brief peaks.
+OHC's `mmap`/`VirtualAlloc` pages are outside `MaxDirectMemorySize`.
+The 2 GiB heap leaves room for the
 7 GB macOS ARM runner; public Linux and Windows standard runners provide 16 GB.
 See [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 POSIX process groups and a private Windows Job Object retain ownership even
@@ -395,7 +394,7 @@ by publication tools. It never triggers a formal release.
 
 Python 3.12 tooling dependencies are isolated and pinned with wheel hashes in
 `scripts/ci-performance-requirements.txt`. They add no Java runtime dependencies.
-Short protocol tests, including simulated memory limits and cancellation, run
+Short protocol tests, including simulated high RSS and cancellation, run
 without invoking a local Java benchmark:
 
 ```bash

@@ -251,7 +251,7 @@ def summary_markdown(manifest, results, records, error):
         text += ['', '**ERROR:** ' + str(error).replace('\n', ' ')[:500]]
     peak = max((r['sampled_peak_rss_bytes'] for r in records), default=0)
     text += ['', 'Sampled controller + fork peak RSS: {:.3f} GiB. {} completed forks.'.format(peak / 1024**3, len(records)),
-             'RSS is sampled, not a hard native memory cap. Missing CPU data is N/A.',
+             'RSS is sampled without a failure threshold. Missing CPU data is N/A.',
              'CPU/op is estimated from measurement-window process CPU and corresponding completed-operation rates; it includes the actor.',
              'Warnings and INCONCLUSIVE results do not fail CI. Raw iteration rates, CPU windows, logs, environment and artifact hashes are retained for 90 days.',
              'Hosted-runner comparisons do not establish dedicated Linux/AMD/Intel performance acceptance.', '']
@@ -279,7 +279,7 @@ def run(args):
                        'logical_cpus': os.cpu_count(), 'parallel_threads': all_cases[-1]['threads'],
                        'compiler_home': str(args.compiler_home), 'fork_args': protocol.FORK_ARGS,
                        'controller_args': protocol.CONTROLLER_ARGS, 'cases': all_cases,
-                       'rss_limit_bytes': 4 * 1024**3, 'phase_timeout_seconds': 45 * 60,
+                       'phase_timeout_seconds': 45 * 60,
                        'sampling': {'screening': {'pairs': 5, 'warmup': '3x2s', 'measurement': '5x3s'},
                                     'confirmation': {'pairs': 3, 'warmup': '3x5s', 'measurement': '5x3s'}},
                        'image': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH')},

@@ -8,9 +8,6 @@ import time
 
 import psutil
 
-RSS_LIMIT = 4 * 1024**3
-
-
 class OwnedTree:
     def __init__(self, root):
         self.root = root
@@ -99,7 +96,7 @@ def clean_environment(env=None):
     return result
 
 
-def run_process(args, cwd, log_file, timeout, deadline=None, rss_limit=RSS_LIMIT, env=None):
+def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
     log_file = Path(log_file)
     started = time.monotonic()
     process = tree = None
@@ -118,8 +115,6 @@ def run_process(args, cwd, log_file, timeout, deadline=None, rss_limit=RSS_LIMIT
             while True:
                 rss = tree.sample()
                 samples.append({'elapsed_seconds': time.monotonic() - started, 'rss_bytes': rss})
-                if rss > rss_limit:
-                    raise RuntimeError('RESOURCE_ERROR: sampled controller and fork RSS exceeds 4 GiB')
                 now = time.monotonic()
                 if now - started > timeout or (deadline is not None and now > deadline):
                     raise RuntimeError('TIMEOUT: performance process exceeded its deadline')
@@ -145,7 +140,7 @@ def run_process(args, cwd, log_file, timeout, deadline=None, rss_limit=RSS_LIMIT
                 except BaseException as failure:
                     cleanup_error = cleanup_error or failure
         info = {'command': list(map(str, args)), 'exit_code': process.returncode if process else None,
-                'wall_seconds': time.monotonic() - started, 'rss_limit_bytes': rss_limit,
+                'wall_seconds': time.monotonic() - started,
                 'sample_interval_seconds': .1, 'rss_samples': samples,
                 'sampled_peak_rss_bytes': max((s['rss_bytes'] for s in samples), default=0),
                 'processes': list(tree.stats.values()) if tree else [],
