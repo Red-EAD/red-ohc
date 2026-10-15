@@ -119,6 +119,7 @@ def host_sample(elapsed, initial=False):
 def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
     log_file = Path(log_file)
     started = time.monotonic()
+    cpu_started = time.process_time()
     process = tree = None
     error = None
     samples = []
@@ -134,12 +135,13 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
                                        start_new_session=True)
             tree = OwnedTree(process)
             while True:
-                rss = tree.sample()
                 now = time.monotonic()
                 elapsed = now - started
-                samples.append({'elapsed_seconds': elapsed, 'rss_bytes': rss})
                 finished = process.poll() is not None
-                if not host_samples or elapsed - host_samples[-1]['elapsed_seconds'] >= 1. or finished:
+                # Process-tree enumeration is expensive on some platforms. Keep
+                # deadline/cancellation polling responsive without sampling at 10 Hz.
+                if not samples or elapsed - samples[-1]['elapsed_seconds'] >= 1. or finished:
+                    samples.append({'elapsed_seconds': elapsed, 'rss_bytes': tree.sample()})
                     host_samples.append(host_sample(elapsed, initial=not host_samples))
                 if now - started > timeout or (deadline is not None and now > deadline):
                     raise RuntimeError('TIMEOUT: performance process exceeded its deadline')
@@ -166,7 +168,8 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
                     cleanup_error = cleanup_error or failure
         info = {'command': list(map(str, args)), 'exit_code': process.returncode if process else None,
                 'wall_seconds': time.monotonic() - started,
-                'sample_interval_seconds': .1, 'rss_samples': samples,
+                'sampler_cpu_seconds': time.process_time() - cpu_started,
+                'sample_interval_seconds': 1., 'rss_samples': samples,
                 'host_sample_interval_seconds': 1., 'host_samples': host_samples,
                 'sampled_peak_rss_bytes': max((s['rss_bytes'] for s in samples), default=0),
                 'processes': list(tree.stats.values()) if tree else [],

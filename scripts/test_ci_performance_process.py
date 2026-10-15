@@ -15,6 +15,14 @@ import ci_performance_process as monitor
 
 
 class ProcessTest(unittest.TestCase):
+    def test_expensive_sampling_is_one_hertz_and_observer_cpu_is_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            info = self.run_command('import time; time.sleep(1.2)', directory)
+            self.assertEqual(info['sample_interval_seconds'], 1.)
+            self.assertLessEqual(len(info['rss_samples']), 4)
+            self.assertGreaterEqual(info['sampler_cpu_seconds'], 0.)
+            self.assertLess(info['sampler_cpu_seconds'], info['wall_seconds'])
+
     def test_zero_duration_startup_failure_keeps_original_error_and_evidence(self):
         target = ('ci_performance_windows.WindowsProcess' if os.name == 'nt'
                   else 'ci_performance_process.psutil.Popen')

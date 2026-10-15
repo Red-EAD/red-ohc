@@ -19,7 +19,8 @@ def result(values=None):
     return {'benchmark': 'com.red.ohc.jmh.OHCSerializedBenchmark.oneThread',
             'mode': 'thrpt', 'threads': 1, 'forks': 1, 'jdkVersion': '21.0.10',
             'jvm': '/jdk/bin/java', 'jvmArgs': perf.FORK_ARGS,
-            'warmupIterations': 3, 'warmupTime': '5 s',
+            'warmupIterations': 3,
+            'warmupTime': str(perf.SAMPLING['screening']['warmup_seconds']) + ' s',
             'measurementIterations': 5, 'measurementTime': '8 s',
             'params': {'keyBytes': '32', 'valueBytes': '5120', 'workload': 'READ_100',
                        'distribution': 'UNIFORM', 'writeShape': 'MIXED'},
@@ -56,13 +57,19 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual([c['threads'] for c in perf.cases(cpus)], [1, 1, cpus, cpus, cpus])
 
     def test_longer_warmup_and_measurement_are_used_in_both_batches(self):
-        for batch, warmup in [('screening', '5s'), ('confirmation', '10s')]:
+        for batch, warmup in [('screening', '10s'), ('confirmation', '15s')]:
             args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases(4)[0],
                                 batch, Path('result.json'))
             self.assertEqual(args[args.index('-wi') + 1], '3')
             self.assertEqual(args[args.index('-w') + 1], warmup)
             self.assertEqual(args[args.index('-i') + 1], '5')
             self.assertEqual(args[args.index('-r') + 1], '8s')
+
+    def test_lightweight_gc_and_compilation_diagnostics_are_enabled(self):
+        args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases(4)[0],
+                            'screening', Path('result.json'))
+        self.assertEqual([args[i + 1] for i, arg in enumerate(args) if arg == '-prof'],
+                         ['gc', 'comp'])
 
     def test_only_documents_images_and_community_content_can_skip(self):
         self.assertTrue(perf.documentation_only(['README.md', 'docs/a.md', 'docs/img/a.png',
@@ -94,6 +101,36 @@ class PolicyTest(unittest.TestCase):
 
 
 class MeasurementTest(unittest.TestCase):
+    def test_profiler_metrics_keep_their_units_separate_from_operation_rates(self):
+        raw = result()
+        diagnostics = {'gc.count': ('counts', 2.), 'gc.time': ('ms', 3.),
+                       'gc.alloc.rate': ('MB/sec', 1.), 'gc.alloc.rate.norm': ('B/op', .01),
+                       'compiler.time.profiled': ('ms', 7.), 'compiler.time.total': ('ms', 100.)}
+        for name, (unit, value) in diagnostics.items():
+            raw['secondaryMetrics'][name] = {'score': value, 'scoreUnit': unit,
+                                              'rawData': [[value] * 5]}
+        parsed = perf.measurement([raw], windows(), perf.cases(4)[0],
+                                  'screening', '/jdk/bin/java', 21)
+        self.assertEqual(set(parsed['operation_rates']), set(result()['secondaryMetrics']))
+        self.assertEqual(parsed['profiler_metrics'],
+                         {name: raw['secondaryMetrics'][name] for name in diagnostics})
+        self.assertAlmostEqual(parsed['cpu_per_op'], .02)
+
+    def test_unavailable_profiler_values_stay_unknown_and_are_json_serializable(self):
+        import json
+        # JMH JSON emits quoted sentinels, not just Python's non-finite floats.
+        for unavailable in (float('nan'), 'NaN', '+INF', '-INF'):
+            with self.subTest(unavailable=unavailable):
+                raw = result()
+                raw['secondaryMetrics']['gc.alloc.rate'] = {
+                    'score': unavailable, 'scoreUnit': 'MB/sec', 'rawData': [[unavailable] * 5]}
+                parsed = perf.measurement([raw], windows(), perf.cases(4)[0],
+                                          'screening', '/jdk/bin/java', 21)
+                self.assertIsNone(parsed['profiler_metrics']['gc.alloc.rate']['score'])
+                self.assertEqual(parsed['profiler_metrics']['gc.alloc.rate']['rawData'], [[None] * 5])
+                self.assertNotIn('gc.time', parsed['profiler_metrics'])
+                json.dumps(parsed, allow_nan=False)
+
     def test_cpu_uses_each_completed_rate_times_corresponding_window(self):
         parsed = perf.measurement([result([100., 200., 300., 400., 500.])], windows(),
                                   perf.cases(4)[0], 'screening', '/jdk/bin/java', 21)
@@ -209,6 +246,35 @@ class AnalysisTest(unittest.TestCase):
         confirmed = perf.analyze(records(1.2, pairs=3), 3)
         self.assertEqual(perf.final_verdict(initial, confirmed), 'WARNING')
         self.assertEqual(perf.final_verdict(perf.analyze(records(), 5), None), 'STABLE')
+
+    def test_clean_confirmation_can_resolve_small_noisy_screening(self):
+        rows = records(1.03, cpu_ratio=.98)
+        rows[0]['quality'] = ['iteration CV exceeds 5%']
+        initial = perf.analyze(rows, 5)
+        confirmed = perf.analyze(records(1.01, cpu_ratio=.99, pairs=3), 3)
+        self.assertEqual(initial['throughput']['verdict'], 'INCONCLUSIVE')
+        self.assertEqual(perf.final_verdict(initial, confirmed), 'STABLE')
+        self.assertTrue(initial['quality'], 'screening evidence must remain visible')
+
+    def test_large_noisy_signal_or_noisy_confirmation_remains_inconclusive(self):
+        for ratio, cpu_ratio, confirm_noisy in [(1.11, 1., False), (1., .90, False),
+                                                 (1.01, 1., True)]:
+            with self.subTest(ratio=ratio, cpu_ratio=cpu_ratio, confirm_noisy=confirm_noisy):
+                rows = records(ratio, cpu_ratio=cpu_ratio)
+                rows[0]['quality'] = ['iteration CV exceeds 5%']
+                confirmed_rows = records(pairs=3)
+                if confirm_noisy:
+                    confirmed_rows[0]['quality'] = ['iteration CV exceeds 5%']
+                self.assertEqual(perf.final_verdict(perf.analyze(rows, 5),
+                                                   perf.analyze(confirmed_rows, 3)), 'INCONCLUSIVE')
+
+    def test_contradictory_signals_and_unknown_confirmation_cpu_do_not_resolve(self):
+        initial = perf.analyze(records(1.2, cpu_ratio=.8), 5)
+        for rows in (records(.8, cpu_ratio=1.2, pairs=3), records(1.2, cpu_ratio=.8, pairs=3)):
+            if rows[1]['throughput'] > 100.:
+                for row in rows:
+                    row['cpu_per_op'] = None
+            self.assertEqual(perf.final_verdict(initial, perf.analyze(rows, 3)), 'INCONCLUSIVE')
 
 
 if __name__ == '__main__':

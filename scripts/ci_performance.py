@@ -9,12 +9,18 @@ from run_paired_benchmarks import validate_results
 
 FORK_ARGS = ['-Xms2g', '-Xmx2g', '-XX:MaxDirectMemorySize=2g', '-XX:+UseG1GC']
 CONTROLLER_ARGS = ['-Xms64m', '-Xmx256m']
+PROFILERS = ['gc', 'comp']
+OPERATION_COUNTERS = ('attemptedOperations', 'completedOperations', 'attemptedWrites',
+                      'acceptedWrites', 'rejectedWrites', 'exceptionCount', 'incompleteOperations')
+PROFILER_UNITS = {'gc.count': 'counts', 'gc.time': 'ms', 'gc.alloc.rate': 'MB/sec',
+                  'gc.alloc.rate.norm': 'B/op', 'compiler.time.profiled': 'ms',
+                  'compiler.time.total': 'ms'}
 BENCHMARK = 'com.red.ohc.jmh.OHCSerializedBenchmark.'
 MODES = ('off', 'jdk21', 'all-jdks', 'aa-jdk21')
 SAMPLING = {
-    'screening': {'pairs': 5, 'warmup_iterations': 3, 'warmup_seconds': 5,
+    'screening': {'pairs': 5, 'warmup_iterations': 3, 'warmup_seconds': 10,
                   'measurement_iterations': 5, 'measurement_seconds': 8},
-    'confirmation': {'pairs': 3, 'warmup_iterations': 3, 'warmup_seconds': 10,
+    'confirmation': {'pairs': 3, 'warmup_iterations': 3, 'warmup_seconds': 15,
                      'measurement_iterations': 5, 'measurement_seconds': 8},
 }
 
@@ -86,6 +92,7 @@ def command(java, jars, case, batch, result_file):
             '-p', 'keyBytes=32', '-p', 'valueBytes=5120', '-p', 'workload=' + case['workload'],
             '-p', 'distribution=UNIFORM', '-p', 'writeShape=MIXED',
             '-jvmArgs', ' '.join(FORK_ARGS), '-jvmArgsPrepend', '', '-jvmArgsAppend', '',
+            *[arg for profiler in PROFILERS for arg in ('-prof', profiler)],
             '-foe', 'true', '-rf', 'json', '-rff', str(result_file)]
 
 
@@ -113,12 +120,26 @@ def measurement(results, log, case, batch, java, jdk):
             or any(not math.isfinite(v) or v <= 0 for v in values[0])
             or not math.isclose(statistics.mean(values[0]), throughput, rel_tol=1e-9)):
         raise ValueError('invalid throughput iterations')
-    for metric in r['secondaryMetrics'].values():
+    operation_rates = {name: r['secondaryMetrics'][name] for name in OPERATION_COUNTERS}
+    for metric in operation_rates.values():
         # AuxCounters(Type.OPERATIONS) are rates. Never treat them as raw counts.
         if metric['scoreUnit'] != 'ops/s':
             raise ValueError('auxiliary operation counters must be rates in ops/s')
     if any(rate <= 0 for rate in rates):
         raise ValueError('no completed operations in a measurement iteration')
+    profiler_metrics = {}
+    for name, unit in PROFILER_UNITS.items():
+        metric = r['secondaryMetrics'].get(name)
+        if metric is None:
+            continue  # Some profiler metrics are absent when unsupported or no GC occurs.
+        if metric['scoreUnit'] != unit:
+            raise ValueError('unexpected profiler unit: ' + name)
+        def finite(value):
+            if value in ('NaN', '+INF', '-INF'):
+                return None  # JMH's JSON encoding for non-finite profiler values.
+            return value if math.isfinite(value) else None
+        profiler_metrics[name] = {'score': finite(metric['score']), 'scoreUnit': unit,
+                                  'rawData': [[finite(v) for v in fork] for fork in metric['rawData']]}
     matches = re.findall(r'measurement-window: wallNanos=(-?\d+), processCpuNanos=(-?\d+), '
                          r'actorCpuNanos=(-?\d+), processCpuKnown=(true|false), '
                          r'actorCpuKnown=(true|false)', log)
@@ -145,7 +166,8 @@ def measurement(results, log, case, batch, java, jdk):
         quality.append('first/last two iteration drift exceeds 5%')
     return {'throughput': throughput, 'cpu_per_op': cpu_per_op, 'quality': quality,
             'iteration_cv': cv, 'iteration_drift': drift, 'measurement_windows': windows,
-            'operation_rates': r['secondaryMetrics'], 'throughput_iterations': values}
+            'operation_rates': operation_rates, 'profiler_metrics': profiler_metrics,
+            'throughput_iterations': values}
 
 
 def _outside(ratio):
@@ -198,12 +220,19 @@ def final_verdict(screening, confirmation):
         return 'STABLE'
     if confirmation is None:
         raise ValueError('required confirmation batch is missing')
+    changed = False
     for metric in ('throughput', 'cpu_per_op'):
         first, second = screening[metric], confirmation[metric]
-        if first['verdict'] == 'INCONCLUSIVE' or second['verdict'] == 'INCONCLUSIVE':
+        if second['verdict'] == 'INCONCLUSIVE':
             return 'INCONCLUSIVE'
+        if first['verdict'] == 'INCONCLUSIVE':
+            # Only a small initial estimate can be resolved by an independent,
+            # clean within-band confirmation. Keep the original batch visible.
+            if second['verdict'] != 'STABLE' or _outside(first['ratio']):
+                return 'INCONCLUSIVE'
         if first['verdict'] == 'CHANGE' and (second['verdict'] != 'CHANGE' or first['direction'] != second['direction']):
             return 'INCONCLUSIVE'
         if first['verdict'] in ('N/A', 'STABLE') and second['verdict'] == 'CHANGE':
             return 'INCONCLUSIVE'
-    return 'WARNING'
+        changed |= first['verdict'] == 'CHANGE'
+    return 'WARNING' if changed else 'STABLE'

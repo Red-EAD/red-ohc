@@ -200,7 +200,7 @@ class RunnerTest(unittest.TestCase):
                     jmh['measurementTime'] = command[command.index('-r') + 1][:-1] + ' s'
                     Path(command[command.index('-rff') + 1]).write_text(json.dumps([jmh]))
                     log.write_text(windows())
-                    return {'sampled_peak_rss_bytes': 10, 'wall_seconds': 25.}
+                    return {'sampled_peak_rss_bytes': 10, 'wall_seconds': 25., 'sampler_cpu_seconds': .1}
                 def git(*args):
                     return 'a' * 40 if args[0] == 'rev-parse' else ''
                 arguments = SimpleNamespace(plan=plan, output=root / 'output', compiler_home='/jdk11',
@@ -226,11 +226,13 @@ class RunnerTest(unittest.TestCase):
                 self.assertNotIn('rss_limit_bytes', manifest)
                 self.assertEqual(manifest['cases'], [case])
                 self.assertEqual(manifest['parallel_threads'], 4)
+                self.assertEqual(manifest['profilers'], ['gc', 'comp'])
                 self.assertEqual((root / 'step-summary.md').read_text(),
                                  (root / 'output/reports/summary.md').read_text() + '\n')
                 if not failure:
                     self.assertEqual(status['completed_forks'], 16)
                     self.assertIn('WARNING', (root / 'output/reports/summary.md').read_text())
+                    self.assertIn('Observer CPU / wall', (root / 'output/reports/summary.md').read_text())
                     self.assertIn('::warning title=Performance 21::read_t1: WARNING', output.getvalue())
 
 

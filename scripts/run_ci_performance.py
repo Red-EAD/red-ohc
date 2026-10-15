@@ -22,7 +22,7 @@ from run_paired_benchmarks import check_java11_jar
 from snapshot_publication import github
 
 ROOT = Path(__file__).resolve().parents[1]
-PHASE_TIMEOUT_SECONDS = 22 * 60
+PHASE_TIMEOUT_SECONDS = 24 * 60
 FORK_TIMEOUT_SECONDS = 240
 
 
@@ -289,11 +289,22 @@ def summary_markdown(manifest, results, records, error):
             if row[batch] is not None:
                 text.append('| {} | {} | {} | {} | {} |'.format(row['case']['name'], batch,
                             _metric_text(row[batch]['throughput']), _metric_text(row[batch]['cpu_per_op'], cpu=True), row['verdict']))
+    text += ['', '| Fork | CV / drift | GC count / time (ms) | Measured compilation (ms) | Observer CPU / wall |',
+             '|---|---|---|---|---|']
+    for record in records:
+        def score(name):
+            value = record['profiler_metrics'].get(name, {}).get('score')
+            return 'N/A' if value is None else '{:.3g}'.format(value)
+        text.append('| {batch}/{round}/{label} | {cv:.1%} / {drift:.1%} | {gc} / {gc_ms} | {jit} | {observer:.2%} |'.format(
+            **record, cv=record['iteration_cv'], drift=record['iteration_drift'],
+            gc=score('gc.count'), gc_ms=score('gc.time'), jit=score('compiler.time.profiled'),
+            observer=record['sampler_cpu_seconds'] / record['wall_seconds']))
     if error:
         text += ['', '**ERROR:** ' + str(error).replace('\n', ' ')[:500]]
     peak = max((r['sampled_peak_rss_bytes'] for r in records), default=0)
     text += ['', 'Sampled controller + fork peak RSS: {:.3f} GiB. {} completed forks.'.format(peak / 1024**3, len(records)),
              'RSS is sampled without a failure threshold. Missing CPU data is N/A.',
+             'Process/RSS sampling is 1 Hz; observer CPU includes Python launch, monitoring and cleanup, across warmup and measurement. GC/JIT diagnostics retain per-iteration units separately from operation rates.',
              'Host CPU busy, cumulative CPU times (including available steal/iowait) and load samples are retained in each process JSON; host load includes this benchmark.',
              'CPU/op is estimated from measurement-window process CPU and corresponding completed-operation rates; it includes the actor.',
              'Warnings and INCONCLUSIVE results do not fail CI. Raw iteration rates, CPU windows, logs, environment and artifact hashes are retained for 90 days.',
@@ -332,6 +343,7 @@ def run(args):
                        'workflow_deadline_epoch': args.workflow_deadline,
                        'fork_timeout_seconds': FORK_TIMEOUT_SECONDS,
                        'sampling': protocol.SAMPLING,
+                       'profilers': protocol.PROFILERS,
                        'image': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH')},
                        'tool_sha256': {p.name: artifact(p)['sha256'] for p in
                                       [Path(__file__), ROOT / 'scripts/ci_performance.py', ROOT / 'scripts/ci_performance_process.py']}}
@@ -370,6 +382,7 @@ def run(args):
                                                    log.read_text(encoding='utf-8'), case, batch,
                                                    plan['java'], plan['jdk'])
                 record = row | measurement | {'sampled_peak_rss_bytes': process['sampled_peak_rss_bytes'],
+                                             'sampler_cpu_seconds': process['sampler_cpu_seconds'],
                                              'wall_seconds': process['wall_seconds']}
                 rows.append(record)
                 records.append(record)

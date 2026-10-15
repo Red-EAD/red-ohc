@@ -61,7 +61,7 @@ class WorkflowTest(unittest.TestCase):
     def test_longer_measurements_have_bounded_step_and_job_deadlines(self):
         job = self.workflow['jobs']['performance']
         step = next(s for s in job['steps'] if s.get('name') == 'Compare paired performance')
-        self.assertEqual(step['timeout-minutes'], '23')
+        self.assertEqual(step['timeout-minutes'], '25')
         self.assertIn('--workflow-deadline', step['run'])
         self.assertIn('--case', step['run'])
         self.assertEqual(self.workflow['jobs']['verify']['timeout-minutes'], '30')

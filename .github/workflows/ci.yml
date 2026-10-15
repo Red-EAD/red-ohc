@@ -169,7 +169,7 @@ jobs:
           java-version: '11'
       - name: Compare paired performance
         if: needs.plan.outputs.enabled == 'true'
-        timeout-minutes: 23
+        timeout-minutes: 25
         shell: bash
         env:
           WORKFLOW_DEADLINE: ${{ needs.plan.outputs.deadline_epoch }}

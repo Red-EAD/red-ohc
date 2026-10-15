@@ -311,7 +311,7 @@ and prepend arguments, removes inherited Java option variables and validates
 the fork JVM, arguments, JDK, workload and iteration settings in the actual JMH
 JSON. This prevents the benchmark's 1 GiB annotation defaults from taking effect.
 
-The tool samples the combined RSS of its controller and fork every 100 ms and
+The tool samples the combined RSS of its controller and fork once per second and
 records the peak without imposing an RSS limit. Sampling can miss brief peaks.
 Each process JSON also retains guest-wide CPU busy samples, cumulative CPU times
 and OS load averages at one-second intervals plus process exit. The first busy
@@ -350,20 +350,20 @@ Each OS/JDK/scenario combination runs in a separate runner VM; the five scenario
 can run concurrently without competing for CPUs inside one VM. BASE and NEW
 execute serially in that same VM, adjacent within each pair, with AB/BA order
 alternating by round. Each scenario starts with five independent pairs. Every
-process has one fork, three 5-second warmup iterations and five 8-second
-measurement iterations: about 9.2 minutes of pure screening per scenario.
+process has one fork, three 10-second warmup iterations and five 8-second
+measurement iterations: about 11.7 minutes of pure screening per scenario.
 
 A case that reaches either 10% threshold or has inconclusive screening receives
-exactly one independent confirmation batch: three pairs, three 10-second warmup
-iterations and five 8-second measurement iterations. This adds seven minutes of
-pure measurement/warmup, for about 16.2 minutes per scenario including both
+exactly one independent confirmation batch: three pairs, three 15-second warmup
+iterations and five 8-second measurement iterations. This adds 8.5 minutes of
+pure measurement/warmup, for about 20.2 minutes per scenario including both
 batches. Builds, startup and teardown add time. Batches are retained separately,
 without pooling, trimming outliers or retrying until a desired result appears.
 Longer windows do not establish that a hosted VM has reached steady state.
 
 A regular PR targets completion within 30 minutes: correctness first, then the
 15 JDK 21 scenario jobs, followed by three required quality gates. Each scenario
-has a 22-minute performance-phase watchdog, a 23-minute step ceiling and a
+has a 24-minute performance-phase watchdog, a 25-minute step ceiling and a
 26-minute job ceiling; each launched measurement process has a four-minute
 limit. PR measurement also stops at 28 minutes from the current workflow
 attempt's start, leaving room for uploads and gates. A rerun receives a fresh
@@ -387,9 +387,14 @@ These are individual scenario intervals, not a simultaneous confidence claim
 over all cases or JDKs. Hosted-runner scheduling noise remains a limitation.
 
 Iteration throughput CV above 5%, first-two versus last-two iteration drift above
-5%, an interval crossing a 10% boundary, or a signal that confirmation does not
-reproduce yields `INCONCLUSIVE`. Noisy or inconclusive screening stays visible
-even if the confirmation batch is quieter. An unavailable CPU measurement is
+5%, or an interval crossing a 10% boundary makes that batch `INCONCLUSIVE`.
+One noisy fork is sufficient; samples are never discarded. A clean independent
+confirmation whose interval stays within both thresholds can resolve initial
+uncertainty only when the initial point estimate was also within both thresholds.
+A threshold-sized initial signal that is not reproduced, a new contradictory
+signal, or uncertain confirmation remains `INCONCLUSIVE`. Both batches and all
+initial quality flags stay visible even when confirmation resolves uncertainty.
+An unavailable CPU measurement is
 `N/A`, never a zero-cost operation.
 
 The JMH auxiliary counters are **operation rates**, not raw operation counts.
@@ -407,12 +412,26 @@ user/system CPU, wall time and normalized CPU are separate diagnostics; sampled
 CPU totals are lower bounds. Throughput increases and CPU/op decreases indicate
 improvement, so their warning directions differ.
 
+Process-tree/RSS and guest CPU/load sampling runs once per second; deadline and
+cancellation polling remains responsive at 100 ms. There is no RSS failure cap.
+The tool records its own Python CPU separately across launch, warmup, measurement
+and cleanup, so observer overhead is not mistaken for benchmark CPU. Guest load
+includes this benchmark and cannot by itself establish interference from other
+workloads. JMH's built-in `gc` and `comp` profilers retain per-iteration allocation,
+collection and compilation diagnostics in their original units, separately from
+operation rates. Missing or unsupported diagnostics remain `N/A`. These lightweight
+profilers are enabled identically for BASE and NEW; their overhead is part of this
+CI protocol, not directly comparable to historical runs without them. Longer
+warmup reduces one source of drift but does not prove steady state or explain all
+hosted-runner variability.
+
 Every iteration must reconcile attempted/completed operations and
 attempted/accepted writes, with zero exceptions, incomplete operations or
 unexpected rejections. Aggregate agreement cannot hide a bad iteration.
 
 Actions Summary shows both batches, absolute geometric means, ratios, intervals
-and verdicts. Artifacts retained for 90 days contain raw JMH JSON/logs, operation
+and verdicts, plus per-fork CV/drift, GC/compilation and observer CPU diagnostics.
+Artifacts retained for 90 days contain raw JMH JSON/logs, operation
 rates, CPU windows, sampled process/RSS data, SHAs, complete commands, image/CPU/
 JDK descriptions and build receipts. Partial evidence is retained on errors.
 
