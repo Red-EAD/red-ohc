@@ -13,6 +13,7 @@ from pathlib import Path
 import zipfile
 
 from snapshot_publication import REPOSITORY, checked_sha, github, pom_element, publication_decision
+from ci_checks import NOT_MEASURED
 
 
 def checked_version(value):
@@ -68,8 +69,12 @@ def verified_ci(sha):
                                     workflow_id, 'refs/heads/main')
     if not decision['publish']:
         raise ValueError(decision['reason'])
-    if any(job.get('status') != 'completed' or job.get('conclusion') != 'success' for job in jobs):
-        raise ValueError('All CI jobs, including additional jobs, must succeed')
+    unmeasured = [job for job in jobs if job.get('name') == NOT_MEASURED
+                  and job.get('status') == 'completed' and job.get('conclusion') == 'skipped']
+    if len(unmeasured) > 1 or any(job.get('status') != 'completed'
+                                or (job.get('conclusion') != 'success' and job not in unmeasured)
+                                for job in jobs):
+        raise ValueError('All active CI jobs, including additional jobs, must succeed')
     return {'ci_run_id': run_id, 'ci_run_attempt': attempt}
 
 

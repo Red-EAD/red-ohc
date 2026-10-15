@@ -156,6 +156,20 @@ class StableReleaseTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.inspect()
 
+    def test_only_the_named_unmeasured_performance_placeholder_can_be_skipped(self):
+        original = copy.deepcopy(self.jobs)
+        self.jobs.append({'name': 'Performance / NOT_MEASURED', 'status': 'completed',
+                          'conclusion': 'skipped'})
+        self.assertEqual(self.inspect()['ci_run_id'], 123)
+        self.jobs.append(copy.deepcopy(self.jobs[-1]))
+        with self.assertRaises(ValueError):
+            self.inspect()
+        for name, state in [('extra check', 'skipped'), ('Performance / NOT_MEASURED', 'failure'),
+                            ('Performance / NOT_MEASURED', 'cancelled')]:
+            self.jobs = original + [{'name': name, 'status': 'completed', 'conclusion': state}]
+            with self.subTest(name=name, state=state), self.assertRaises(ValueError):
+                self.inspect()
+
     def test_pr_fork_wrong_sha_and_wrong_workflow_cannot_publish(self):
         original = copy.deepcopy(self.run)
         for changes in ({'event': 'pull_request'}, {'head_sha': OTHER_SHA}, {'workflow_id': 999},

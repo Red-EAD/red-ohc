@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare and compare immutable revisions on the current hosted runner."""
 import argparse
+from datetime import datetime
 import hashlib
 import io
 import json
@@ -16,10 +17,12 @@ import time
 import xml.etree.ElementTree as ET
 
 import ci_performance as protocol
+from ci_checks import CASE_NAMES, JDKS, PLATFORMS, check_quality_jobs
 from run_paired_benchmarks import check_java11_jar
+from snapshot_publication import github
 
 ROOT = Path(__file__).resolve().parents[1]
-PHASE_TIMEOUT_SECONDS = 120 * 60
+PHASE_TIMEOUT_SECONDS = 22 * 60
 FORK_TIMEOUT_SECONDS = 240
 
 
@@ -87,6 +90,36 @@ def select(args):
         append_summary('### Performance — ' + os.environ.get('RUNNER_OS', platform.system()) +
                        ' / JDK ' + args.jdk + '\n\n`NOT_MEASURED`: ' + reason +
                        '. Correctness checks still run.\n')
+
+
+def plan_workflow(args):
+    select(args)
+    plan = json.loads(args.plan.read_text(encoding='utf-8'))
+    jdks = list(JDKS) if plan['mode'] == 'all-jdks' else ['21']
+    # Leave two minutes for evidence uploads and final gates in a PR's 30-minute budget.
+    deadline = ''
+    if plan['event'] == 'pull_request':
+        run = github('actions/runs/{}/attempts/{}'.format(
+            os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']))
+        deadline = datetime.fromisoformat(run['run_started_at'].replace('Z', '+00:00')).timestamp() + 28 * 60
+    with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+        stream.write('jdks=' + json.dumps(jdks) + '\n')
+        stream.write('deadline_epoch=' + str(deadline) + '\n')
+
+
+def gate(args):
+    if args.plan_result != 'success' or args.enabled not in ('true', 'false'):
+        raise ValueError('The workflow plan must complete successfully')
+    jobs, page = [], 1
+    while True:
+        batch = github('actions/runs/{}/attempts/{}/jobs?per_page=100&page={}'.format(
+            os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'], page))['jobs']
+        jobs.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    check_quality_jobs(jobs, args.os, args.enabled == 'true', json.loads(args.jdks))
+    print('Required core and selected performance jobs succeeded for ' + PLATFORMS[args.os])
 
 
 def artifact(path):
@@ -275,15 +308,22 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     (output / 'logs').mkdir()
     (output / 'reports').mkdir()
-    deadline = time.monotonic() + PHASE_TIMEOUT_SECONDS
-    all_cases = protocol.cases()
+    budget = PHASE_TIMEOUT_SECONDS
+    if args.workflow_deadline is not None:
+        budget = min(budget, args.workflow_deadline - time.time())
+    deadline = time.monotonic() + budget
+    available_cases = protocol.cases(os.cpu_count() or 1)
+    all_cases = [case for case in available_cases if case['name'] == args.case]
+    if not all_cases:
+        raise ValueError('Unknown performance case: ' + args.case)
     manifest = plan | {'system': platform.system(), 'platform': platform.platform(),
                        'machine': platform.machine(), 'processor': platform.processor(),
                        'cpu_model': cpu_description(),
-                       'logical_cpus': os.cpu_count(), 'parallel_threads': all_cases[-1]['threads'],
+                       'logical_cpus': os.cpu_count(), 'parallel_threads': available_cases[-1]['threads'],
                        'compiler_home': str(args.compiler_home), 'fork_args': protocol.FORK_ARGS,
                        'controller_args': protocol.CONTROLLER_ARGS, 'cases': all_cases,
                        'phase_timeout_seconds': PHASE_TIMEOUT_SECONDS,
+                       'workflow_deadline_epoch': args.workflow_deadline,
                        'fork_timeout_seconds': FORK_TIMEOUT_SECONDS,
                        'sampling': protocol.SAMPLING,
                        'image': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH')},
@@ -306,6 +346,8 @@ def run(args):
         raise KeyboardInterrupt('cancelled by signal ' + str(signum))
     old_signals = {kind: signal.signal(kind, interrupted) for kind in (signal.SIGINT, signal.SIGTERM)}
     try:
+        if budget <= 0:
+            raise RuntimeError('TIMEOUT: workflow performance budget is exhausted')
         receipt = prepare(plan, output, args.compiler_home, deadline)
         def run_batch(case, batch):
             records = []
@@ -354,12 +396,22 @@ def main():
     choose = actions.add_parser('select')
     choose.add_argument('--jdk', choices=['11', '17', '21', '25'], required=True)
     choose.add_argument('--plan', type=Path, required=True)
+    planning = actions.add_parser('plan')
+    planning.add_argument('--jdk', choices=['21'], default='21')
+    planning.add_argument('--plan', type=Path, required=True)
     execute = actions.add_parser('run')
     execute.add_argument('--plan', type=Path, required=True)
     execute.add_argument('--output', type=Path, required=True)
     execute.add_argument('--compiler-home', type=Path, required=True)
+    execute.add_argument('--case', choices=CASE_NAMES, required=True)
+    execute.add_argument('--workflow-deadline', type=float)
+    aggregate = actions.add_parser('gate')
+    aggregate.add_argument('--os', choices=PLATFORMS, required=True)
+    aggregate.add_argument('--enabled', required=True)
+    aggregate.add_argument('--jdks', required=True)
+    aggregate.add_argument('--plan-result', required=True)
     args = parser.parse_args()
-    (select if args.action == 'select' else run)(args)
+    {'select': select, 'plan': plan_workflow, 'run': run, 'gate': gate}[args.action](args)
 
 
 if __name__ == '__main__':

@@ -20,7 +20,7 @@ def result(values=None):
             'mode': 'thrpt', 'threads': 1, 'forks': 1, 'jdkVersion': '21.0.10',
             'jvm': '/jdk/bin/java', 'jvmArgs': perf.FORK_ARGS,
             'warmupIterations': 3, 'warmupTime': '5 s',
-            'measurementIterations': 5, 'measurementTime': '10 s',
+            'measurementIterations': 5, 'measurementTime': '8 s',
             'params': {'keyBytes': '32', 'valueBytes': '5120', 'workload': 'READ_100',
                        'distribution': 'UNIFORM', 'writeShape': 'MIXED'},
             'primaryMetric': metric(values), 'secondaryMetrics': counters}
@@ -42,21 +42,27 @@ def records(ratio=1., cpu_ratio=1., pairs=5):
 
 
 class PolicyTest(unittest.TestCase):
-    def test_five_cases_include_single_writer_and_fixed_four_thread_loads(self):
-        self.assertEqual([(c['name'], c['threads'], c['workload']) for c in perf.cases()],
+    def test_parallel_loads_use_the_runner_cpu_count(self):
+        self.assertEqual([(c['name'], c['threads'], c['workload']) for c in perf.cases(4)],
                          [('read_t1', 1, 'READ_100'), ('write_t1', 1, 'WRITE_100'),
                           ('read_parallel', 4, 'READ_100'), ('write_parallel', 4, 'WRITE_100'),
                           ('mix_parallel', 4, 'READ_90_WRITE_10')])
-        self.assertTrue(all(c['threads'] == 4 for c in perf.cases()[2:]))
+        self.assertTrue(all(c['threads'] == 4 for c in perf.cases(4)[2:]))
+
+    def test_cpu_count_is_an_explicit_input_without_reserving_or_capping_cores(self):
+        import inspect
+        self.assertIn('logical_cpus', inspect.signature(perf.cases).parameters)
+        for cpus in (1, 2, 3, 4, 8, 64):
+            self.assertEqual([c['threads'] for c in perf.cases(cpus)], [1, 1, cpus, cpus, cpus])
 
     def test_longer_warmup_and_measurement_are_used_in_both_batches(self):
         for batch, warmup in [('screening', '5s'), ('confirmation', '10s')]:
-            args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases()[0],
+            args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases(4)[0],
                                 batch, Path('result.json'))
             self.assertEqual(args[args.index('-wi') + 1], '3')
             self.assertEqual(args[args.index('-w') + 1], warmup)
             self.assertEqual(args[args.index('-i') + 1], '5')
-            self.assertEqual(args[args.index('-r') + 1], '10s')
+            self.assertEqual(args[args.index('-r') + 1], '8s')
 
     def test_only_documents_images_and_community_content_can_skip(self):
         self.assertTrue(perf.documentation_only(['README.md', 'docs/a.md', 'docs/img/a.png',
@@ -81,32 +87,32 @@ class PolicyTest(unittest.TestCase):
             perf.selection('workflow_dispatch', '21', False, [], 'unexpected')
 
     def test_pairs_are_adjacent_and_alternate_in_each_independent_batch(self):
-        rows = list(perf.batch_plan(perf.cases()[0], 'screening'))
+        rows = list(perf.batch_plan(perf.cases(4)[0], 'screening'))
         self.assertEqual(len(rows), 10)
         self.assertEqual([r['label'] for r in rows[:6]], ['BASE', 'NEW', 'NEW', 'BASE', 'BASE', 'NEW'])
-        self.assertEqual(len(list(perf.batch_plan(perf.cases()[0], 'confirmation'))), 6)
+        self.assertEqual(len(list(perf.batch_plan(perf.cases(4)[0], 'confirmation'))), 6)
 
 
 class MeasurementTest(unittest.TestCase):
     def test_cpu_uses_each_completed_rate_times_corresponding_window(self):
         parsed = perf.measurement([result([100., 200., 300., 400., 500.])], windows(),
-                                  perf.cases()[0], 'screening', '/jdk/bin/java', 21)
+                                  perf.cases(4)[0], 'screening', '/jdk/bin/java', 21)
         self.assertAlmostEqual(parsed['cpu_per_op'], 10. / 1500.)
         self.assertEqual(parsed['throughput'], 300.)
         self.assertTrue(parsed['quality'])
 
     def test_missing_cpu_is_na_and_missing_result_is_a_real_error(self):
-        parsed = perf.measurement([result()], windows(known=False), perf.cases()[0],
+        parsed = perf.measurement([result()], windows(known=False), perf.cases(4)[0],
                                   'screening', '/jdk/bin/java', 21)
         self.assertIsNone(parsed['cpu_per_op'])
         for data, log in [([], windows()), ([result()], windows()[:-100])]:
             with self.assertRaises((ValueError, RuntimeError)):
-                perf.measurement(data, log, perf.cases()[0], 'screening', '/jdk/bin/java', 21)
+                perf.measurement(data, log, perf.cases(4)[0], 'screening', '/jdk/bin/java', 21)
 
     def test_jvm_unknown_cpu_sentinel_is_minus_one_not_zero(self):
         log = windows(cpu=-1, known=False).replace('actorCpuNanos=100000000', 'actorCpuNanos=-1')
         log = log.replace('actorCpuKnown=true', 'actorCpuKnown=false')
-        parsed = perf.measurement([result()], log, perf.cases()[0],
+        parsed = perf.measurement([result()], log, perf.cases(4)[0],
                                   'screening', '/jdk/bin/java', 21)
         self.assertIsNone(parsed['cpu_per_op'])
         self.assertIsNone(parsed['measurement_windows'][0]['actor_cpu_seconds'])
@@ -118,14 +124,14 @@ class MeasurementTest(unittest.TestCase):
             bad = result()
             bad['secondaryMetrics'][name]['rawData'][0] = raw
             with self.subTest(name=name), self.assertRaises((ValueError, RuntimeError)):
-                perf.measurement([bad], windows(), perf.cases()[0],
+                perf.measurement([bad], windows(), perf.cases(4)[0],
                                  'screening', '/jdk/bin/java', 21)
 
     def test_wrong_fork_annotation_override_and_partial_results_fail(self):
         for change in [{'jvmArgs': perf.FORK_ARGS + ['-Xmx1g']}, {'threads': 8},
                        {'warmupTime': '2 s'}, {'forks': 2}, {'jdkVersion': '11.0.30'}]:
             with self.subTest(change=change), self.assertRaises((ValueError, RuntimeError)):
-                perf.measurement([result() | change], windows(), perf.cases()[0],
+                perf.measurement([result() | change], windows(), perf.cases(4)[0],
                                  'screening', '/jdk/bin/java', 21)
 
     def test_iteration_noise_and_drift_use_five_percent_strict_boundary(self):
@@ -134,14 +140,14 @@ class MeasurementTest(unittest.TestCase):
                              ([94.99, 105.01, 100., 94.99, 105.01], ['CV']),
                              ([100., 100., 102.5, 105.01, 105.01], ['drift'])]:
             with self.subTest(raw=raw):
-                observed = perf.measurement([result(raw)], windows(), perf.cases()[0],
+                observed = perf.measurement([result(raw)], windows(), perf.cases(4)[0],
                                             'screening', '/jdk/bin/java', 21)['quality']
                 self.assertEqual(len(observed), len(quality))
                 for expected in quality:
                     self.assertTrue(any(expected in message for message in observed))
 
     def test_controller_is_small_and_annotation_arguments_are_cleared(self):
-        args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases()[1],
+        args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases(4)[1],
                             'screening', Path('result.json'))
         self.assertEqual(args[:3], ['/jdk/bin/java', '-Xms64m', '-Xmx256m'])
         self.assertEqual(args[args.index('-jvm') + 1], '/jdk/bin/java')

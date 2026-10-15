@@ -16,6 +16,58 @@ from test_ci_performance import records
 
 
 class RunnerTest(unittest.TestCase):
+    def test_pr_budget_uses_the_current_run_attempt_start_not_original_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / 'plan.json'
+            def select(args):
+                plan.write_text(json.dumps({'mode': 'off', 'event': 'pull_request'}))
+            run = {'created_at': '2026-10-15T00:00:00Z', 'run_started_at': '2026-10-15T10:00:00Z'}
+            env = {'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
+                   'GITHUB_OUTPUT': str(root / 'outputs')}
+            with patch.dict(os.environ, env), patch.object(runner, 'select', side_effect=select), \
+                    patch.object(runner, 'github', return_value=run) as api:
+                runner.plan_workflow(SimpleNamespace(plan=plan))
+            outputs = dict(line.split('=', 1) for line in (root / 'outputs').read_text().splitlines())
+            self.assertEqual(float(outputs['deadline_epoch']), 1792060080.)
+            api.assert_called_once_with('actions/runs/123/attempts/2')
+
+    def test_manual_full_matrix_has_no_pr_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / 'plan.json'
+            def select(args):
+                plan.write_text(json.dumps({'mode': 'all-jdks', 'event': 'workflow_dispatch'}))
+            with patch.dict(os.environ, {'GITHUB_OUTPUT': str(root / 'outputs')}), \
+                    patch.object(runner, 'select', side_effect=select), patch.object(runner, 'github') as api:
+                runner.plan_workflow(SimpleNamespace(plan=plan))
+            outputs = dict(line.split('=', 1) for line in (root / 'outputs').read_text().splitlines())
+            self.assertEqual(json.loads(outputs['jdks']), ['11', '17', '21', '25'])
+            self.assertEqual(outputs['deadline_epoch'], '')
+            api.assert_not_called()
+
+    def test_quality_gate_fetches_all_jobs_from_the_exact_attempt(self):
+        from ci_checks import CASE_NAMES, core_name, performance_name
+        names = [core_name('ubuntu-latest', '21')]
+        names += [performance_name('ubuntu-latest', '21', case) for case in CASE_NAMES]
+        jobs = [dict(name=name, status='completed', conclusion='success') for name in names]
+        args = SimpleNamespace(plan_result='success', enabled='true', jdks='["21"]', os='ubuntu-latest')
+        with patch.dict(os.environ, {'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2'}), \
+                patch.object(runner, 'github', side_effect=[{'jobs': [{}] * 100}, {'jobs': jobs}]) as api, \
+                redirect_stdout(io.StringIO()):
+            runner.gate(args)
+        self.assertEqual([call.args[0] for call in api.call_args_list],
+                         ['actions/runs/123/attempts/2/jobs?per_page=100&page=1',
+                          'actions/runs/123/attempts/2/jobs?per_page=100&page=2'])
+
+    def test_failed_or_missing_plan_cannot_pass_a_quality_gate(self):
+        for plan_result, enabled in [('failure', 'false'), ('success', ''), ('skipped', 'false')]:
+            args = SimpleNamespace(plan_result=plan_result, enabled=enabled, jdks='["21"]',
+                                   os='ubuntu-latest')
+            with patch.object(runner, 'github') as api, self.assertRaisesRegex(ValueError, 'plan'):
+                runner.gate(args)
+            api.assert_not_called()
+
     def test_maven_launcher_preserves_space_paths_and_reports_missing_tool(self):
         with patch.object(runner.shutil, 'which', return_value=None), self.assertRaisesRegex(ValueError, 'Maven'):
             runner.maven_executable()
@@ -125,12 +177,15 @@ class RunnerTest(unittest.TestCase):
                     return {'sampled_peak_rss_bytes': 10, 'wall_seconds': 25.}
                 def git(*args):
                     return 'a' * 40 if args[0] == 'rev-parse' else ''
-                arguments = SimpleNamespace(plan=plan, output=root / 'output', compiler_home='/jdk11')
+                arguments = SimpleNamespace(plan=plan, output=root / 'output', compiler_home='/jdk11',
+                                            case='read_t1', workflow_deadline=None)
                 case = {'name': 'read_t1', 'method': 'oneThread', 'threads': 1, 'workload': 'READ_100'}
                 output = io.StringIO()
                 with patch.object(runner, 'git', side_effect=git), patch.object(runner, 'prepare', return_value=receipt), \
                         patch.object(runner, 'check_artifacts'), patch.object(runner, 'cpu_description', return_value='Test CPU'), \
-                        patch.object(runner.protocol, 'cases', return_value=[case]), \
+                        patch.object(runner.protocol, 'cases', return_value=[case,
+                                     dict(name='write_parallel', method='cpuThreads', threads=4,
+                                          workload='WRITE_100')]), \
                         patch.object(ci_performance_process, 'run_process', side_effect=launch), \
                         patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'step-summary.md')}), \
                         redirect_stdout(output):
@@ -143,6 +198,8 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(status['status'], 'ERROR' if failure else 'COMPLETED')
                 manifest = json.loads((root / 'output/reports/manifest.json').read_text())
                 self.assertNotIn('rss_limit_bytes', manifest)
+                self.assertEqual(manifest['cases'], [case])
+                self.assertEqual(manifest['parallel_threads'], 4)
                 self.assertEqual((root / 'step-summary.md').read_text(),
                                  (root / 'output/reports/summary.md').read_text() + '\n')
                 if not failure:

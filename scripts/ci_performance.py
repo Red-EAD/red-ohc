@@ -13,20 +13,22 @@ BENCHMARK = 'com.red.ohc.jmh.OHCSerializedBenchmark.'
 MODES = ('off', 'jdk21', 'all-jdks', 'aa-jdk21')
 SAMPLING = {
     'screening': {'pairs': 5, 'warmup_iterations': 3, 'warmup_seconds': 5,
-                  'measurement_iterations': 5, 'measurement_seconds': 10},
+                  'measurement_iterations': 5, 'measurement_seconds': 8},
     'confirmation': {'pairs': 3, 'warmup_iterations': 3, 'warmup_seconds': 10,
-                     'measurement_iterations': 5, 'measurement_seconds': 10},
+                     'measurement_iterations': 5, 'measurement_seconds': 8},
 }
 
 
-def cases():
+def cases(logical_cpus):
+    if logical_cpus < 1:
+        raise ValueError('logical CPU count must be positive')
     return [dict(name=name, method=method, threads=threads, workload=workload) for
             name, method, threads, workload in (
                 ('read_t1', 'oneThread', 1, 'READ_100'),
                 ('write_t1', 'oneThread', 1, 'WRITE_100'),
-                ('read_parallel', 'cpuThreads', 4, 'READ_100'),
-                ('write_parallel', 'cpuThreads', 4, 'WRITE_100'),
-                ('mix_parallel', 'cpuThreads', 4, 'READ_90_WRITE_10'))]
+                ('read_parallel', 'cpuThreads', logical_cpus, 'READ_100'),
+                ('write_parallel', 'cpuThreads', logical_cpus, 'WRITE_100'),
+                ('mix_parallel', 'cpuThreads', logical_cpus, 'READ_90_WRITE_10'))]
 
 
 def documentation_only(paths):

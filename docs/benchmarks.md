@@ -250,13 +250,24 @@ until matched results exist.
 
 ## CI performance warnings
 
-The existing Linux, macOS and Windows JDK 21 `verify` jobs compare each non-draft
-PR with its main base after correctness tests. The 14 required checks and the
-maintainer's merge decision remain unchanged. A throughput or estimated CPU/op
-ratio at or beyond 0.90 or 1.10 emits a warning in either direction. Performance
-warnings, including `INCONCLUSIVE`, keep the step successful. Build failures,
-crashes, timeouts, allocation failures, wrong artifacts/configuration and
-operation reconciliation failures fail the existing verify check.
+The **Red OHC CI** workflow compares each non-draft PR with its main base after
+correctness tests. Jobs have names that identify their role, platform and JDK:
+
+- `Core & JMH / Linux / JDK 11` (and the other OS/JDK combinations): correctness.
+- `Performance / Linux / JDK 21 / read_t1` (and the other selected cases): measurement.
+- `Quality / Linux / JDK 21`: requires that platform's JDK 21 correctness and every
+  selected performance case to succeed exactly once.
+- `Concurrency / JCStress` and `Example / User cache`: their named validation tasks.
+
+There are still 14 required checks: the nine JDK 11/17/25 correctness checks,
+three JDK 21 quality gates, concurrency and the example. All twelve correctness
+jobs still run. The main ruleset and publishing tools use the new check names;
+strict main synchronization and the maintainer's merge decision remain unchanged.
+A throughput or estimated CPU/op ratio at or beyond 0.90 or 1.10 emits a warning
+in either direction. Performance warnings, including `INCONCLUSIVE`, keep the
+measurement job successful. Build failures, crashes, timeouts, allocation
+failures, wrong artifacts/configuration and operation reconciliation failures
+fail the affected platform's required quality gate.
 
 Main pushes run correctness checks and report performance as `NOT_MEASURED`.
 Draft PRs, non-measurement JDK jobs and changes limited to the allowed document,
@@ -272,14 +283,14 @@ to ready triggers fresh CI through `ready_for_review`.
 | --- | --- | --- |
 | read_t1 | 1 | READ_100 |
 | write_t1 | 1 | WRITE_100 |
-| read_parallel | 4 | READ_100 |
-| write_parallel | 4 | WRITE_100 |
-| mix_parallel | 4 | READ_90_WRITE_10 |
+| read_parallel | P | READ_100 |
+| write_parallel | P | WRITE_100 |
+| mix_parallel | P | READ_90_WRITE_10 |
 
-Parallel cases always use four benchmark worker threads, independently of the
-runner's logical CPU count. The maintenance actor and JVM threads add CPU demand;
-on a three-vCPU runner this intentionally oversubscribes the available CPUs.
-Each runner records its actual logical CPU count and the four-thread setting.
+`P` equals the runner's available logical CPU count, with no reserved core or
+fixed cap. Single-thread cases still use one worker. The maintenance actor and
+JVM threads add CPU demand, so matching workers to vCPUs does not eliminate
+scheduling contention. The manifest records the actual CPU count and workers.
 All cases use 32-byte keys, 5,120-byte values, UNIFORM distribution and MIXED
 writes. The existing 24,576-key universe, capacity formula for 19,660 entries,
 ten-minute TTL and lightweight first-byte read codec apply. This measures
@@ -331,23 +342,36 @@ runtime JAR checksum, compiler/runtime details and Maven version; artifact bytes
 are rechecked before every measurement process.
 For A/A calibration both labels execute the same prepared artifact bytes.
 
-BASE and NEW execute serially in the same runner VM, adjacent within each pair,
-with AB/BA order alternating by round. Each scenario starts with five independent
-pairs. Every process has one fork, three 5-second warmup iterations and five
-10-second measurement iterations. Five cases require 50 screening processes,
-or approximately 54 minutes of pure warmup and measurement. Builds and teardown
-add time. Longer windows reduce short transients but do not establish that a
-hosted VM has reached steady state.
+Each OS/JDK/scenario combination runs in a separate runner VM; the five scenarios
+can run concurrently without competing for CPUs inside one VM. BASE and NEW
+execute serially in that same VM, adjacent within each pair, with AB/BA order
+alternating by round. Each scenario starts with five independent pairs. Every
+process has one fork, three 5-second warmup iterations and five 8-second
+measurement iterations: about 9.2 minutes of pure screening per scenario.
 
 A case that reaches either 10% threshold or has inconclusive screening receives
 exactly one independent confirmation batch: three pairs, three 10-second warmup
-iterations and five 10-second measurement iterations. Confirming every case adds
-40 minutes of pure warmup and measurement. Screening and confirmation
-are retained separately, without pooling, trimming outliers or retrying until
-a desired result appears. The complete performance phase has a 120-minute
-watchdog and each launched measurement process has a four-minute deadline.
-Potential performance jobs have a 150-minute total ceiling, including
-correctness; other verify jobs keep their 30-minute ceiling.
+iterations and five 8-second measurement iterations. This adds seven minutes of
+pure measurement/warmup, for about 16.2 minutes per scenario including both
+batches. Builds, startup and teardown add time. Batches are retained separately,
+without pooling, trimming outliers or retrying until a desired result appears.
+Longer windows do not establish that a hosted VM has reached steady state.
+
+A regular PR targets completion within 30 minutes: correctness first, then the
+15 JDK 21 scenario jobs, followed by three required quality gates. Each scenario
+has a 22-minute performance-phase watchdog, a 23-minute step ceiling and a
+26-minute job ceiling; each launched measurement process has a four-minute
+limit. PR measurement also stops at 28 minutes from the current workflow
+attempt's start, leaving room for uploads and gates. A rerun receives a fresh
+attempt budget. Timeout is a real error, not a performance warning or successful
+unmeasured result. Cloud queue delays and service outages can still exceed the
+30-minute target; job timeouts alone are not a workflow-wide wall-clock guarantee.
+
+The Free plan permits 20 concurrent standard jobs and five macOS jobs, so one
+regular PR's five macOS scenarios fit that quota. Other workflows may compete for
+those slots. See [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits).
+Manual four-JDK experiments can queue additional waves and are outside the
+regular-PR 30-minute target. Their individual scenario deadlines still apply.
 
 ### Statistical and CPU interpretation
 
@@ -390,7 +414,7 @@ JDK descriptions and build receipts. Partial evidence is retained on errors.
 
 ### Manual comparisons and calibration
 
-Use the existing **CI** workflow's **Run workflow** control on the intended
+Use the **Red OHC CI** workflow's **Run workflow** control on the intended
 branch. Supply full 40-character BASE and NEW commit SHAs for a measurement:
 
 | `performance` | Behavior |

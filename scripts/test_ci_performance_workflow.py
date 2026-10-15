@@ -18,7 +18,7 @@ class WorkflowTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX runner entry-process signal contract')
     def test_cancellation_signal_reaches_the_python_entry_process(self):
-        command = next(step['run'] for step in self.workflow['jobs']['verify']['steps']
+        command = next(step['run'] for step in self.workflow['jobs']['performance']['steps']
                        if step.get('name') == 'Compare paired performance')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -31,7 +31,8 @@ class WorkflowTest(unittest.TestCase):
             script = root / 'step.sh'
             script.write_text(command + '\n')
             env = os.environ | {'PERFORMANCE_PYTHON': sys.executable,
-                                'RUNNER_TEMP': directory, 'JAVA_HOME': directory}
+                                'RUNNER_TEMP': directory, 'JAVA_HOME': directory,
+                                'PERFORMANCE_CASE': 'read_t1', 'WORKFLOW_DEADLINE': ''}
             shell = subprocess.Popen(['bash', str(script)], cwd=root, env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                                      start_new_session=True)
@@ -58,10 +59,30 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue({'opened', 'synchronize', 'reopened'} <= set(activities))
 
     def test_longer_measurements_have_bounded_step_and_job_deadlines(self):
-        verify = self.workflow['jobs']['verify']
-        self.assertIn('150 || 30', verify['timeout-minutes'])
-        step = next(s for s in verify['steps'] if s.get('name') == 'Compare paired performance')
-        self.assertEqual(step['timeout-minutes'], '121')
+        job = self.workflow['jobs']['performance']
+        step = next(s for s in job['steps'] if s.get('name') == 'Compare paired performance')
+        self.assertEqual(step['timeout-minutes'], '23')
+        self.assertIn('--workflow-deadline', step['run'])
+        self.assertIn('--case', step['run'])
+        self.assertEqual(self.workflow['jobs']['verify']['timeout-minutes'], '30')
+
+    def test_long_scenarios_run_on_separate_runner_jobs(self):
+        jobs = self.workflow['jobs']
+        self.assertIn('performance', jobs)
+        performance = jobs['performance']
+        self.assertEqual(performance['needs'], ['plan', 'verify'])
+        self.assertEqual(set(performance['strategy']['matrix']['case']),
+                         {'read_t1', 'write_t1', 'read_parallel', 'write_parallel', 'mix_parallel'})
+        self.assertEqual(performance['timeout-minutes'], '26')
+        self.assertEqual(performance['strategy']['fail-fast'], 'false')
+
+    def test_checks_have_explicit_names_and_a_per_platform_performance_gate(self):
+        jobs = self.workflow['jobs']
+        for name in ('verify', 'jcstress', 'example'):
+            self.assertIn('name', jobs[name])
+        self.assertIn('quality', jobs)
+        self.assertEqual(jobs['quality']['needs'], ['plan', 'verify', 'performance'])
+        self.assertIn('always()', jobs['quality']['if'])
 
     def test_runner_fixture_does_not_publish_fake_actions_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,7 +101,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_all_existing_publication_checks_remain_present_on_main_push(self):
         jobs = self.workflow['jobs']
-        self.assertEqual(set(jobs), {'verify', 'jcstress', 'example'})
+        self.assertEqual(set(jobs), {'plan', 'verify', 'performance', 'quality', 'jcstress', 'example'})
         self.assertNotIn('if', jobs['verify'])
         self.assertNotIn('if', jobs['jcstress'])
         self.assertNotIn('if', jobs['example'])
@@ -88,6 +109,24 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(set(matrix['os']), {'ubuntu-latest', 'macos-latest', 'windows-latest'})
         self.assertEqual(set(matrix['java']), {'11', '17', '21', '25'})
         self.assertEqual(self.workflow['on']['push']['branches'], ['main'])
+
+    def test_snapshot_trigger_tracks_the_renamed_ci_workflow(self):
+        source = Path(__file__).resolve().parents[1] / '.github/workflows/publish-snapshot.yml'
+        snapshot = yaml.load(source.read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(snapshot['on']['workflow_run']['workflows'], [self.workflow['name']])
+
+    def test_display_names_match_the_required_check_contract(self):
+        import ci_checks
+        names = set()
+        for job_id in ('verify', 'quality'):
+            job = self.workflow['jobs'][job_id]
+            matrix = job['strategy']['matrix']
+            for included in matrix['include']:
+                for java in matrix.get('java', ['21']):
+                    names.add(job['name'].replace('${{ matrix.platform }}', included['platform'])
+                              .replace('${{ matrix.java }}', java))
+        names |= {self.workflow['jobs'][key]['name'] for key in ('jcstress', 'example')}
+        self.assertTrue(ci_checks.REQUIRED_JOBS <= names)
 
 
 if __name__ == '__main__':
