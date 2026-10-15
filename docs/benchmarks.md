@@ -356,17 +356,19 @@ For A/A calibration both labels execute the same prepared artifact bytes.
 Each OS/JDK/scenario combination runs in a separate runner VM; the five scenarios
 can run concurrently without competing for CPUs inside one VM. BASE and NEW
 execute serially in that same VM, adjacent within each pair, with AB/BA order
-alternating by round. Each scenario starts with five independent pairs. Every
-process has one fork, three 10-second warmup iterations and five 7-second
-measurement iterations: 10 minutes 50 seconds of pure screening per scenario.
+alternating by round. Each scenario starts with three independent pairs. Every
+process has one fork, three 10-second warmup iterations and five 9-second
+measurement iterations: 7 minutes 30 seconds of pure screening per scenario.
 
 A case that reaches either 10% threshold or has inconclusive screening receives
 exactly one independent confirmation batch: three pairs, three 15-second warmup
-iterations and five 7-second measurement iterations. This adds eight minutes of
-pure measurement/warmup, for 18 minutes 50 seconds per scenario including both
+iterations and five 9-second measurement iterations. This adds nine minutes of
+pure measurement/warmup, for 16 minutes 30 seconds per scenario including both
 batches. Builds, startup and teardown add time. Batches are retained separately,
 without pooling, trimming outliers or retrying until a desired result appears.
-Longer windows do not establish that a hosted VM has reached steady state.
+The two batches launch at most 12 forks. The three initial pairs give fewer
+independent samples than five pairs; longer iteration windows and fewer process
+starts do not establish that a hosted VM has reached steady state.
 
 A regular PR targets completion within 30 minutes: correctness first, then the
 15 JDK 21 scenario jobs, followed by three required quality gates. Each scenario

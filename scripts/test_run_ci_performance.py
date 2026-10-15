@@ -167,7 +167,7 @@ class RunnerTest(unittest.TestCase):
             {'GITHUB_SHA': 'c' * 40}), ('a' * 40, 'c' * 40))
 
     def test_confirmation_is_once_only_and_warning_remains_success(self):
-        screening = records(1.2)
+        screening = records(1.2, pairs=3)
         confirmation = records(1.2, pairs=3)
         batches = []
         def batch(case, stage):
@@ -176,7 +176,7 @@ class RunnerTest(unittest.TestCase):
         summary = runner.compare_case({'name': 'read_t1'}, batch)
         self.assertEqual(batches, ['screening', 'confirmation'])
         self.assertEqual(summary['verdict'], 'WARNING')
-        self.assertEqual(summary['screening']['throughput']['pairs'], 5)
+        self.assertEqual(summary['screening']['throughput']['pairs'], 3)
         self.assertEqual(summary['confirmation']['throughput']['pairs'], 3)
 
     def test_incomplete_batch_cannot_be_rendered_as_success(self):
@@ -233,7 +233,7 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual((root / 'step-summary.md').read_text(),
                                  (root / 'output/reports/summary.md').read_text() + '\n')
                 if not failure:
-                    self.assertEqual(status['completed_forks'], 16)
+                    self.assertEqual(status['completed_forks'], 12)
                     self.assertIn('WARNING', (root / 'output/reports/summary.md').read_text())
                     self.assertIn('Observer CPU / wall', (root / 'output/reports/summary.md').read_text())
                     self.assertIn('::warning title=Performance 21::read_t1: WARNING', output.getvalue())

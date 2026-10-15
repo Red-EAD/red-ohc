@@ -64,14 +64,14 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual(args[args.index('-wi') + 1], '3')
             self.assertEqual(args[args.index('-w') + 1], warmup)
             self.assertEqual(args[args.index('-i') + 1], '5')
-            self.assertEqual(args[args.index('-r') + 1], '7s')
+            self.assertEqual(args[args.index('-r') + 1], '9s')
 
-    def test_sampling_leaves_startup_margin_without_reducing_independent_pairs(self):
-        self.assertEqual([perf.SAMPLING[b]['pairs'] for b in ('screening', 'confirmation')], [5, 3])
+    def test_three_pairs_per_batch_leave_startup_margin_with_longer_windows(self):
+        self.assertEqual([perf.SAMPLING[b]['pairs'] for b in ('screening', 'confirmation')], [3, 3])
         maximum = sum(2 * t['pairs'] * (t['warmup_iterations'] * t['warmup_seconds'] +
                                       t['measurement_iterations'] * t['measurement_seconds'])
                       for t in perf.SAMPLING.values())
-        self.assertEqual(maximum, 18 * 60 + 50)
+        self.assertEqual(maximum, 16 * 60 + 30)
 
     def test_lightweight_gc_and_compilation_diagnostics_are_enabled(self):
         args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases(4)[0],
@@ -103,7 +103,7 @@ class PolicyTest(unittest.TestCase):
 
     def test_pairs_are_adjacent_and_alternate_in_each_independent_batch(self):
         rows = list(perf.batch_plan(perf.cases(4)[0], 'screening'))
-        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(rows), 6)
         self.assertEqual([r['label'] for r in rows[:6]], ['BASE', 'NEW', 'NEW', 'BASE', 'BASE', 'NEW'])
         self.assertEqual(len(list(perf.batch_plan(perf.cases(4)[0], 'confirmation'))), 6)
 
