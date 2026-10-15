@@ -30,6 +30,8 @@ def check_quality_jobs(jobs, system, measured, jdks):
     required = {core_name(system, '21')}
     if measured:
         required |= {performance_name(system, java, case) for java in jdks for case in CASE_NAMES}
+    else:
+        required.add(NOT_MEASURED)
     counts = Counter(job.get('name') for job in jobs)
     successful = {job.get('name') for job in jobs
                   if job.get('status') == 'completed' and job.get('conclusion') == 'success'}

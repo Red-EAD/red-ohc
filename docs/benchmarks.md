@@ -274,6 +274,10 @@ Draft PRs, non-measurement JDK jobs and changes limited to the allowed document,
 image and community files also report `NOT_MEASURED`. Unknown files and build,
 workflow, source or tool changes are measured conservatively. Changing a draft
 to ready triggers fresh CI through `ready_for_review`.
+When measurement is disabled, one lightweight `Performance / NOT_MEASURED` job
+runs instead of the measurement matrix. It records the decision without setting
+up Java, Maven or performance dependencies. Each quality gate requires this job
+to succeed; stable publishing continues to reject all skipped or failed jobs.
 
 ### Workloads and memory budget
 

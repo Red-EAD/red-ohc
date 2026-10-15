@@ -17,6 +17,8 @@ class ChecksTest(unittest.TestCase):
         if measured:
             names += [self.checks.performance_name('ubuntu-latest', jdk, case)
                       for jdk in jdks for case in self.checks.CASE_NAMES]
+        else:
+            names += [self.checks.NOT_MEASURED]
         return [dict(name=name, status='completed', conclusion='success') for name in names]
 
     def test_fourteen_named_checks_retain_all_platform_jdk_gates(self):
@@ -43,6 +45,16 @@ class ChecksTest(unittest.TestCase):
             jobs[-1]['conclusion'] = state
             with self.subTest(state=state), self.assertRaisesRegex(ValueError, 'Performance'):
                 self.checks.check_quality_jobs(jobs, 'ubuntu-latest', True, ['21'])
+
+    def test_unmeasured_placeholder_must_succeed_exactly_once(self):
+        for jobs in (self.jobs(False)[:-1], self.jobs(False) + [self.jobs(False)[-1]]):
+            with self.assertRaisesRegex(ValueError, 'NOT_MEASURED'):
+                self.checks.check_quality_jobs(jobs, 'ubuntu-latest', False, ['21'])
+        for state in ('skipped', 'failure', 'cancelled', None):
+            jobs = self.jobs(False)
+            jobs[-1]['conclusion'] = state
+            with self.subTest(state=state), self.assertRaisesRegex(ValueError, 'NOT_MEASURED'):
+                self.checks.check_quality_jobs(jobs, 'ubuntu-latest', False, ['21'])
         for jobs in (self.jobs()[:-1], self.jobs() + [self.jobs()[-1]]):
             with self.assertRaises(ValueError):
                 self.checks.check_quality_jobs(jobs, 'ubuntu-latest', True, ['21'])

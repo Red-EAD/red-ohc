@@ -16,12 +16,38 @@ from test_ci_performance import records
 
 
 class RunnerTest(unittest.TestCase):
+    def test_workflow_matrix_has_fifteen_named_measurements_or_one_successful_noop(self):
+        from ci_checks import CASE_NAMES, NOT_MEASURED, PLATFORMS, performance_name
+        for enabled, mode, count in [(False, 'off', 1), (True, 'off', 15), (True, 'all-jdks', 60)]:
+            with self.subTest(enabled=enabled, mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan = root / 'plan.json'
+                def select(args):
+                    plan.write_text(json.dumps({'enabled': enabled, 'mode': mode, 'event': 'workflow_dispatch'}))
+                with patch.dict(os.environ, {'GITHUB_OUTPUT': str(root / 'outputs')}), \
+                        patch.object(runner, 'select', side_effect=select):
+                    runner.plan_workflow(SimpleNamespace(plan=plan))
+                outputs = dict(line.split('=', 1) for line in (root / 'outputs').read_text().splitlines())
+                self.assertIn('matrix', outputs, 'A nonempty matrix must also execute the unmeasured job')
+                rows = json.loads(outputs['matrix'])['include']
+                self.assertEqual(len(rows), count)
+                if not enabled:
+                    self.assertEqual(rows, [{'os': 'ubuntu-latest', 'name': NOT_MEASURED}])
+                else:
+                    jdks = ['11', '17', '21', '25'] if mode == 'all-jdks' else ['21']
+                    self.assertEqual({r['name'] for r in rows},
+                                     {performance_name(os_name, jdk, case) for os_name in PLATFORMS
+                                      for jdk in jdks for case in CASE_NAMES})
+                    for row in rows:
+                        self.assertEqual(row['platform'], PLATFORMS[row['os']])
+                        self.assertEqual(row['name'], performance_name(row['os'], row['java'], row['case']))
+
     def test_pr_budget_uses_the_current_run_attempt_start_not_original_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             plan = root / 'plan.json'
             def select(args):
-                plan.write_text(json.dumps({'mode': 'off', 'event': 'pull_request'}))
+                plan.write_text(json.dumps({'enabled': True, 'mode': 'off', 'event': 'pull_request'}))
             run = {'created_at': '2026-10-15T00:00:00Z', 'run_started_at': '2026-10-15T10:00:00Z'}
             env = {'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
                    'GITHUB_OUTPUT': str(root / 'outputs')}
@@ -37,7 +63,7 @@ class RunnerTest(unittest.TestCase):
             root = Path(directory)
             plan = root / 'plan.json'
             def select(args):
-                plan.write_text(json.dumps({'mode': 'all-jdks', 'event': 'workflow_dispatch'}))
+                plan.write_text(json.dumps({'enabled': True, 'mode': 'all-jdks', 'event': 'workflow_dispatch'}))
             with patch.dict(os.environ, {'GITHUB_OUTPUT': str(root / 'outputs')}), \
                     patch.object(runner, 'select', side_effect=select), patch.object(runner, 'github') as api:
                 runner.plan_workflow(SimpleNamespace(plan=plan))

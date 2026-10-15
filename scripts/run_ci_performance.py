@@ -17,7 +17,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import ci_performance as protocol
-from ci_checks import CASE_NAMES, JDKS, PLATFORMS, check_quality_jobs
+from ci_checks import CASE_NAMES, JDKS, NOT_MEASURED, PLATFORMS, check_quality_jobs, performance_name
 from run_paired_benchmarks import check_java11_jar
 from snapshot_publication import github
 
@@ -96,6 +96,11 @@ def plan_workflow(args):
     select(args)
     plan = json.loads(args.plan.read_text(encoding='utf-8'))
     jdks = list(JDKS) if plan['mode'] == 'all-jdks' else ['21']
+    matrix = [{'os': system, 'platform': display, 'java': java, 'case': case,
+               'name': performance_name(system, java, case)}
+              for system, display in PLATFORMS.items() for java in jdks for case in CASE_NAMES]
+    if not plan['enabled']:
+        matrix = [{'os': 'ubuntu-latest', 'name': NOT_MEASURED}]
     # Leave two minutes for evidence uploads and final gates in a PR's 30-minute budget.
     deadline = ''
     if plan['event'] == 'pull_request':
@@ -104,6 +109,7 @@ def plan_workflow(args):
         deadline = datetime.fromisoformat(run['run_started_at'].replace('Z', '+00:00')).timestamp() + 28 * 60
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
         stream.write('jdks=' + json.dumps(jdks) + '\n')
+        stream.write('matrix=' + json.dumps({'include': matrix}) + '\n')
         stream.write('deadline_epoch=' + str(deadline) + '\n')
 
 

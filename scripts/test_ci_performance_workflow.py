@@ -71,10 +71,21 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('performance', jobs)
         performance = jobs['performance']
         self.assertEqual(performance['needs'], ['plan', 'verify'])
-        self.assertEqual(set(performance['strategy']['matrix']['case']),
-                         {'read_t1', 'write_t1', 'read_parallel', 'write_parallel', 'mix_parallel'})
+        self.assertNotIn('if', performance, 'Skipped matrix jobs expose an unevaluated name on GitHub')
+        self.assertEqual(performance['strategy']['matrix'], '${{ fromJSON(needs.plan.outputs.matrix) }}')
+        self.assertEqual(performance['name'], '${{ matrix.name }}')
         self.assertEqual(performance['timeout-minutes'], '26')
         self.assertEqual(performance['strategy']['fail-fast'], 'false')
+
+    def test_unmeasured_job_runs_only_its_explicit_summary_step(self):
+        steps = self.workflow['jobs']['performance']['steps']
+        for step in steps:
+            if step.get('name') == 'Record unmeasured performance':
+                self.assertIn("needs.plan.outputs.enabled != 'true'", step['if'])
+                self.assertIn('NOT_MEASURED', step['run'])
+            elif not step.get('uses', '').startswith('actions/checkout@'):
+                self.assertIn("needs.plan.outputs.enabled == 'true'", step.get('if', ''))
+        self.assertTrue(any(s.get('name') == 'Record unmeasured performance' for s in steps))
 
     def test_checks_have_explicit_names_and_a_per_platform_performance_gate(self):
         jobs = self.workflow['jobs']
