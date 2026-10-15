@@ -19,9 +19,9 @@ BENCHMARK = 'com.red.ohc.jmh.OHCSerializedBenchmark.'
 MODES = ('off', 'jdk21', 'all-jdks', 'aa-jdk21')
 SAMPLING = {
     'screening': {'pairs': 5, 'warmup_iterations': 3, 'warmup_seconds': 10,
-                  'measurement_iterations': 5, 'measurement_seconds': 8},
+                  'measurement_iterations': 5, 'measurement_seconds': 6},
     'confirmation': {'pairs': 3, 'warmup_iterations': 3, 'warmup_seconds': 15,
-                     'measurement_iterations': 5, 'measurement_seconds': 8},
+                     'measurement_iterations': 5, 'measurement_seconds': 6},
 }
 
 

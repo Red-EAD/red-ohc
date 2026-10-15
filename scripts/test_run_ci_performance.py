@@ -16,6 +16,9 @@ from test_ci_performance import records
 
 
 class RunnerTest(unittest.TestCase):
+    def test_phase_budget_reserves_windows_startup_within_the_pr_deadline(self):
+        self.assertEqual(runner.PHASE_TIMEOUT_SECONDS, 25 * 60)
+
     def test_workflow_matrix_has_fifteen_named_measurements_or_one_successful_noop(self):
         from ci_checks import CASE_NAMES, NOT_MEASURED, PLATFORMS, performance_name
         for enabled, mode, count in [(False, 'off', 1), (True, 'off', 15), (True, 'all-jdks', 60)]:

@@ -21,7 +21,8 @@ def result(values=None):
             'jvm': '/jdk/bin/java', 'jvmArgs': perf.FORK_ARGS,
             'warmupIterations': 3,
             'warmupTime': str(perf.SAMPLING['screening']['warmup_seconds']) + ' s',
-            'measurementIterations': 5, 'measurementTime': '8 s',
+            'measurementIterations': 5,
+            'measurementTime': str(perf.SAMPLING['screening']['measurement_seconds']) + ' s',
             'params': {'keyBytes': '32', 'valueBytes': '5120', 'workload': 'READ_100',
                        'distribution': 'UNIFORM', 'writeShape': 'MIXED'},
             'primaryMetric': metric(values), 'secondaryMetrics': counters}
@@ -63,7 +64,14 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual(args[args.index('-wi') + 1], '3')
             self.assertEqual(args[args.index('-w') + 1], warmup)
             self.assertEqual(args[args.index('-i') + 1], '5')
-            self.assertEqual(args[args.index('-r') + 1], '8s')
+            self.assertEqual(args[args.index('-r') + 1], '6s')
+
+    def test_sampling_leaves_startup_margin_without_reducing_independent_pairs(self):
+        self.assertEqual([perf.SAMPLING[b]['pairs'] for b in ('screening', 'confirmation')], [5, 3])
+        maximum = sum(2 * t['pairs'] * (t['warmup_iterations'] * t['warmup_seconds'] +
+                                      t['measurement_iterations'] * t['measurement_seconds'])
+                      for t in perf.SAMPLING.values())
+        self.assertEqual(maximum, 17.5 * 60)
 
     def test_lightweight_gc_and_compilation_diagnostics_are_enabled(self):
         args = perf.command('/jdk/bin/java', ['h.jar', 'core.jar'], perf.cases(4)[0],

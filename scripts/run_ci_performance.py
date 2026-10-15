@@ -22,7 +22,7 @@ from run_paired_benchmarks import check_java11_jar
 from snapshot_publication import github
 
 ROOT = Path(__file__).resolve().parents[1]
-PHASE_TIMEOUT_SECONDS = 24 * 60
+PHASE_TIMEOUT_SECONDS = 25 * 60
 FORK_TIMEOUT_SECONDS = 240
 
 

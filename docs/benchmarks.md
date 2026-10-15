@@ -350,21 +350,21 @@ Each OS/JDK/scenario combination runs in a separate runner VM; the five scenario
 can run concurrently without competing for CPUs inside one VM. BASE and NEW
 execute serially in that same VM, adjacent within each pair, with AB/BA order
 alternating by round. Each scenario starts with five independent pairs. Every
-process has one fork, three 10-second warmup iterations and five 8-second
-measurement iterations: about 11.7 minutes of pure screening per scenario.
+process has one fork, three 10-second warmup iterations and five 6-second
+measurement iterations: ten minutes of pure screening per scenario.
 
 A case that reaches either 10% threshold or has inconclusive screening receives
 exactly one independent confirmation batch: three pairs, three 15-second warmup
-iterations and five 8-second measurement iterations. This adds 8.5 minutes of
-pure measurement/warmup, for about 20.2 minutes per scenario including both
+iterations and five 6-second measurement iterations. This adds 7.5 minutes of
+pure measurement/warmup, for 17.5 minutes per scenario including both
 batches. Builds, startup and teardown add time. Batches are retained separately,
 without pooling, trimming outliers or retrying until a desired result appears.
 Longer windows do not establish that a hosted VM has reached steady state.
 
 A regular PR targets completion within 30 minutes: correctness first, then the
 15 JDK 21 scenario jobs, followed by three required quality gates. Each scenario
-has a 24-minute performance-phase watchdog, a 25-minute step ceiling and a
-26-minute job ceiling; each launched measurement process has a four-minute
+has a 25-minute performance-phase watchdog, a 26-minute step ceiling and a
+27-minute job ceiling; each launched measurement process has a four-minute
 limit. PR measurement also stops at 28 minutes from the current workflow
 attempt's start, leaving room for uploads and gates. A rerun receives a fresh
 attempt budget. Timeout is a real error, not a performance warning or successful

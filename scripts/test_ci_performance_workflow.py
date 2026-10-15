@@ -61,7 +61,7 @@ class WorkflowTest(unittest.TestCase):
     def test_longer_measurements_have_bounded_step_and_job_deadlines(self):
         job = self.workflow['jobs']['performance']
         step = next(s for s in job['steps'] if s.get('name') == 'Compare paired performance')
-        self.assertEqual(step['timeout-minutes'], '25')
+        self.assertEqual(step['timeout-minutes'], '26')
         self.assertIn('--workflow-deadline', step['run'])
         self.assertIn('--case', step['run'])
         self.assertEqual(self.workflow['jobs']['verify']['timeout-minutes'], '30')
@@ -74,7 +74,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn('if', performance, 'Skipped matrix jobs expose an unevaluated name on GitHub')
         self.assertEqual(performance['strategy']['matrix'], '${{ fromJSON(needs.plan.outputs.matrix) }}')
         self.assertEqual(performance['name'], '${{ matrix.name }}')
-        self.assertEqual(performance['timeout-minutes'], '26')
+        self.assertEqual(performance['timeout-minutes'], '27')
         self.assertEqual(performance['strategy']['fail-fast'], 'false')
 
     def test_unmeasured_job_runs_only_its_explicit_summary_step(self):
