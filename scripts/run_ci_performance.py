@@ -19,6 +19,8 @@ import ci_performance as protocol
 from run_paired_benchmarks import check_java11_jar
 
 ROOT = Path(__file__).resolve().parents[1]
+PHASE_TIMEOUT_SECONDS = 120 * 60
+FORK_TIMEOUT_SECONDS = 240
 
 
 def write_json(path, value):
@@ -219,8 +221,9 @@ def prepare(plan, output, compiler_home, deadline):
 
 
 def compare_case(case, run_batch):
-    screening = protocol.analyze(run_batch(case, 'screening'), 5)
-    confirmation = protocol.analyze(run_batch(case, 'confirmation'), 3) if screening['needs_confirmation'] else None
+    screening = protocol.analyze(run_batch(case, 'screening'), protocol.SAMPLING['screening']['pairs'])
+    confirmation = (protocol.analyze(run_batch(case, 'confirmation'), protocol.SAMPLING['confirmation']['pairs'])
+                    if screening['needs_confirmation'] else None)
     return {'case': case, 'screening': screening, 'confirmation': confirmation,
             'verdict': protocol.final_verdict(screening, confirmation)}
 
@@ -252,6 +255,7 @@ def summary_markdown(manifest, results, records, error):
     peak = max((r['sampled_peak_rss_bytes'] for r in records), default=0)
     text += ['', 'Sampled controller + fork peak RSS: {:.3f} GiB. {} completed forks.'.format(peak / 1024**3, len(records)),
              'RSS is sampled without a failure threshold. Missing CPU data is N/A.',
+             'Host CPU busy, cumulative CPU times (including available steal/iowait) and load samples are retained in each process JSON; host load includes this benchmark.',
              'CPU/op is estimated from measurement-window process CPU and corresponding completed-operation rates; it includes the actor.',
              'Warnings and INCONCLUSIVE results do not fail CI. Raw iteration rates, CPU windows, logs, environment and artifact hashes are retained for 90 days.',
              'Hosted-runner comparisons do not establish dedicated Linux/AMD/Intel performance acceptance.', '']
@@ -271,17 +275,17 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     (output / 'logs').mkdir()
     (output / 'reports').mkdir()
-    deadline = time.monotonic() + 45 * 60
-    all_cases = protocol.cases(os.cpu_count() or 1)
+    deadline = time.monotonic() + PHASE_TIMEOUT_SECONDS
+    all_cases = protocol.cases()
     manifest = plan | {'system': platform.system(), 'platform': platform.platform(),
                        'machine': platform.machine(), 'processor': platform.processor(),
                        'cpu_model': cpu_description(),
                        'logical_cpus': os.cpu_count(), 'parallel_threads': all_cases[-1]['threads'],
                        'compiler_home': str(args.compiler_home), 'fork_args': protocol.FORK_ARGS,
                        'controller_args': protocol.CONTROLLER_ARGS, 'cases': all_cases,
-                       'phase_timeout_seconds': 45 * 60,
-                       'sampling': {'screening': {'pairs': 5, 'warmup': '3x2s', 'measurement': '5x3s'},
-                                    'confirmation': {'pairs': 3, 'warmup': '3x5s', 'measurement': '5x3s'}},
+                       'phase_timeout_seconds': PHASE_TIMEOUT_SECONDS,
+                       'fork_timeout_seconds': FORK_TIMEOUT_SECONDS,
+                       'sampling': protocol.SAMPLING,
                        'image': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH')},
                        'tool_sha256': {p.name: artifact(p)['sha256'] for p in
                                       [Path(__file__), ROOT / 'scripts/ci_performance.py', ROOT / 'scripts/ci_performance_process.py']}}
@@ -313,7 +317,7 @@ def run(args):
                 jars = [receipt['harness']['path'], *[j['path'] for j in receipt['artifacts'][row['label']]]]
                 command = protocol.command(plan['java'], jars, case, batch, result_file)
                 print(name, flush=True)
-                process = run_process(command, ROOT, log, 180, deadline=deadline)
+                process = run_process(command, ROOT, log, FORK_TIMEOUT_SECONDS, deadline=deadline)
                 measurement = protocol.measurement(json.loads(result_file.read_text(encoding='utf-8')),
                                                    log.read_text(encoding='utf-8'), case, batch,
                                                    plan['java'], plan['jdk'])

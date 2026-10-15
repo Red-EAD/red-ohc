@@ -272,11 +272,14 @@ to ready triggers fresh CI through `ready_for_review`.
 | --- | --- | --- |
 | read_t1 | 1 | READ_100 |
 | write_t1 | 1 | WRITE_100 |
-| read_parallel | P | READ_100 |
-| write_parallel | P | WRITE_100 |
-| mix_parallel | P | READ_90_WRITE_10 |
+| read_parallel | 4 | READ_100 |
+| write_parallel | 4 | WRITE_100 |
+| mix_parallel | 4 | READ_90_WRITE_10 |
 
-`P = max(1, min(8, logicalCPUs - 1))`; each runner records the actual value.
+Parallel cases always use four benchmark worker threads, independently of the
+runner's logical CPU count. The maintenance actor and JVM threads add CPU demand;
+on a three-vCPU runner this intentionally oversubscribes the available CPUs.
+Each runner records its actual logical CPU count and the four-thread setting.
 All cases use 32-byte keys, 5,120-byte values, UNIFORM distribution and MIXED
 writes. The existing 24,576-key universe, capacity formula for 19,660 entries,
 ten-minute TTL and lightweight first-byte read codec apply. This measures
@@ -295,6 +298,13 @@ JSON. This prevents the benchmark's 1 GiB annotation defaults from taking effect
 
 The tool samples the combined RSS of its controller and fork every 100 ms and
 records the peak without imposing an RSS limit. Sampling can miss brief peaks.
+Each process JSON also retains guest-wide CPU busy samples, cumulative CPU times
+and OS load averages at one-second intervals plus process exit. The first busy
+sample is unavailable while the non-blocking sampler establishes its baseline.
+Unavailable diagnostics remain null; Windows has no OS load-average sample.
+Linux CPU times include steal and iowait when exposed by the guest. These samples
+include the benchmark's own CPU demand and do not expose the physical host's
+other tenants. A high load average alone does not establish external contention.
 OHC's `mmap`/`VirtualAlloc` pages are outside `MaxDirectMemorySize`.
 The 2 GiB heap leaves room for the
 7 GB macOS ARM runner; public Linux and Windows standard runners provide 16 GB.
@@ -323,17 +333,20 @@ For A/A calibration both labels execute the same prepared artifact bytes.
 
 BASE and NEW execute serially in the same runner VM, adjacent within each pair,
 with AB/BA order alternating by round. Each scenario starts with five independent
-pairs. Every process has one fork, three 2-second warmup iterations and five
-3-second measurement iterations. Five cases require 50 screening processes,
-or 17.5 minutes of pure warmup and measurement. Builds and teardown add time;
-20-30 minutes is a planning estimate, not a deadline guarantee.
+pairs. Every process has one fork, three 5-second warmup iterations and five
+10-second measurement iterations. Five cases require 50 screening processes,
+or approximately 54 minutes of pure warmup and measurement. Builds and teardown
+add time. Longer windows reduce short transients but do not establish that a
+hosted VM has reached steady state.
 
 A case that reaches either 10% threshold or has inconclusive screening receives
-exactly one independent confirmation batch: three pairs, three 5-second warmup
-iterations and five 3-second measurement iterations. Screening and confirmation
+exactly one independent confirmation batch: three pairs, three 10-second warmup
+iterations and five 10-second measurement iterations. Confirming every case adds
+40 minutes of pure warmup and measurement. Screening and confirmation
 are retained separately, without pooling, trimming outliers or retrying until
-a desired result appears. The complete performance phase has a 45-minute
-watchdog. Potential performance jobs have a 75-minute total ceiling, including
+a desired result appears. The complete performance phase has a 120-minute
+watchdog and each launched measurement process has a four-minute deadline.
+Potential performance jobs have a 150-minute total ceiling, including
 correctness; other verify jobs keep their 30-minute ceiling.
 
 ### Statistical and CPU interpretation

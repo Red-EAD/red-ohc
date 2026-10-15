@@ -100,6 +100,35 @@ class ProcessTest(unittest.TestCase):
             self.assertGreater(info['wall_seconds'], .1)
             self.assertTrue(info['processes'])
 
+    def test_host_cpu_and_load_samples_are_retained_for_load_diagnosis(self):
+        from collections import namedtuple
+        times = namedtuple('CpuTimes', 'user system idle iowait steal guest')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(monitor.psutil, 'cpu_times', return_value=times(10, 2, 20, 3, 4, 5)), \
+                patch.object(monitor.psutil, 'cpu_percent', return_value=75.), \
+                patch.object(monitor.os, 'getloadavg', return_value=(2., 3., 4.), create=True):
+            info = self.run_command('import time; time.sleep(.15)', directory)
+            self.assertIn('host_samples', info)
+            self.assertGreaterEqual(len(info['host_samples']), 2)
+            for sample in info['host_samples']:
+                self.assertEqual(sample['cpu_times'], dict(user=10, system=2, idle=20,
+                                                         iowait=3, steal=4, guest=5))
+                self.assertEqual(sample['load_average'], [2., 3., 4.])
+            self.assertEqual(info['host_sample_interval_seconds'], 1.)
+            self.assertIsNone(info['host_samples'][0]['cpu_busy_percent'])
+            self.assertEqual(info['host_samples'][-1]['cpu_busy_percent'], 75.)
+
+    def test_unavailable_host_diagnostics_are_null_and_do_not_abort(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(monitor.psutil, 'cpu_times', side_effect=NotImplementedError), \
+                patch.object(monitor.psutil, 'cpu_percent', side_effect=NotImplementedError), \
+                patch.object(monitor.os, 'getloadavg', side_effect=OSError, create=True):
+            info = self.run_command('pass', directory)
+            self.assertIn('host_samples', info)
+            self.assertTrue(info['host_samples'])
+            self.assertTrue(all(s['cpu_times'] is None and s['load_average'] is None
+                                for s in info['host_samples']))
+
     def test_large_sampled_rss_is_recorded_without_rejecting_the_process(self):
         with tempfile.TemporaryDirectory() as directory:
             sampled_rss = 6 * 1024**3

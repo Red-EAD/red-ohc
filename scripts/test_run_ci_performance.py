@@ -118,7 +118,8 @@ class RunnerTest(unittest.TestCase):
                     if failure:
                         raise failure
                     jmh = result([120.] * 5 if 'new.jar' in command[command.index('-cp') + 1] else [100.] * 5)
-                    jmh['warmupTime'] = '5 s' if command[command.index('-w') + 1] == '5s' else '2 s'
+                    jmh['warmupTime'] = command[command.index('-w') + 1][:-1] + ' s'
+                    jmh['measurementTime'] = command[command.index('-r') + 1][:-1] + ' s'
                     Path(command[command.index('-rff') + 1]).write_text(json.dumps([jmh]))
                     log.write_text(windows())
                     return {'sampled_peak_rss_bytes': 10, 'wall_seconds': 25.}

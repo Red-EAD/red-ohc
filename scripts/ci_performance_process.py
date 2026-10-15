@@ -96,12 +96,33 @@ def clean_environment(env=None):
     return result
 
 
+def host_sample(elapsed, initial=False):
+    """Unprivileged guest-wide diagnostics; absent host visibility stays unknown."""
+    sample = {'elapsed_seconds': elapsed, 'cpu_busy_percent': None,
+              'cpu_times': None, 'load_average': None}
+    try:
+        busy = psutil.cpu_percent(interval=None)
+        # The first non-blocking call primes psutil's CPU-delta baseline.
+        sample['cpu_busy_percent'] = None if initial else busy
+        sample['cpu_times'] = psutil.cpu_times()._asdict()
+    except (OSError, NotImplementedError, psutil.Error):
+        pass
+    try:
+        load = getattr(os, 'getloadavg', None)
+        if load is not None:
+            sample['load_average'] = list(load())
+    except (OSError, NotImplementedError):
+        pass
+    return sample
+
+
 def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
     log_file = Path(log_file)
     started = time.monotonic()
     process = tree = None
     error = None
     samples = []
+    host_samples = []
     try:
         with log_file.open('w', encoding='utf-8') as log:
             if os.name == 'nt':
@@ -114,11 +135,15 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
             tree = OwnedTree(process)
             while True:
                 rss = tree.sample()
-                samples.append({'elapsed_seconds': time.monotonic() - started, 'rss_bytes': rss})
                 now = time.monotonic()
+                elapsed = now - started
+                samples.append({'elapsed_seconds': elapsed, 'rss_bytes': rss})
+                finished = process.poll() is not None
+                if not host_samples or elapsed - host_samples[-1]['elapsed_seconds'] >= 1. or finished:
+                    host_samples.append(host_sample(elapsed, initial=not host_samples))
                 if now - started > timeout or (deadline is not None and now > deadline):
                     raise RuntimeError('TIMEOUT: performance process exceeded its deadline')
-                if process.poll() is not None:
+                if finished:
                     if process.returncode:
                         raise RuntimeError('PROCESS_ERROR: exit code ' + str(process.returncode))
                     break
@@ -142,6 +167,7 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
         info = {'command': list(map(str, args)), 'exit_code': process.returncode if process else None,
                 'wall_seconds': time.monotonic() - started,
                 'sample_interval_seconds': .1, 'rss_samples': samples,
+                'host_sample_interval_seconds': 1., 'host_samples': host_samples,
                 'sampled_peak_rss_bytes': max((s['rss_bytes'] for s in samples), default=0),
                 'processes': list(tree.stats.values()) if tree else [],
                 'process_cpu_samples_are_lower_bounds': True,

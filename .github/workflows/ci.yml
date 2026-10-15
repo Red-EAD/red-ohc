@@ -30,7 +30,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         java: ['11', '17', '21', '25']
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ ((github.event_name == 'pull_request' && !github.event.pull_request.draft && matrix.java == '21') || (github.event_name == 'workflow_dispatch' && (inputs.performance == 'all-jdks' || (matrix.java == '21' && (inputs.performance == 'jdk21' || inputs.performance == 'aa-jdk21'))))) && 75 || 30 }}
+    timeout-minutes: ${{ ((github.event_name == 'pull_request' && !github.event.pull_request.draft && matrix.java == '21') || (github.event_name == 'workflow_dispatch' && (inputs.performance == 'all-jdks' || (matrix.java == '21' && (inputs.performance == 'jdk21' || inputs.performance == 'aa-jdk21'))))) && 150 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -103,7 +103,7 @@ jobs:
           java-version: '11'
       - name: Compare paired performance
         if: steps.performance.outputs.enabled == 'true'
-        timeout-minutes: 46
+        timeout-minutes: 121
         shell: bash
         run: 'exec "$PERFORMANCE_PYTHON" scripts/run_ci_performance.py run --plan "$RUNNER_TEMP/performance-plan.json" --output "$RUNNER_TEMP/performance-results" --compiler-home "$JAVA_HOME"'
       - name: Retain performance evidence

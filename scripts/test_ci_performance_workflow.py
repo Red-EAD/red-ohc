@@ -57,6 +57,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('ready_for_review', activities)
         self.assertTrue({'opened', 'synchronize', 'reopened'} <= set(activities))
 
+    def test_longer_measurements_have_bounded_step_and_job_deadlines(self):
+        verify = self.workflow['jobs']['verify']
+        self.assertIn('150 || 30', verify['timeout-minutes'])
+        step = next(s for s in verify['steps'] if s.get('name') == 'Compare paired performance')
+        self.assertEqual(step['timeout-minutes'], '121')
+
     def test_runner_fixture_does_not_publish_fake_actions_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / 'real-summary.md'

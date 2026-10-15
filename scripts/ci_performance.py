@@ -11,17 +11,22 @@ FORK_ARGS = ['-Xms2g', '-Xmx2g', '-XX:MaxDirectMemorySize=2g', '-XX:+UseG1GC']
 CONTROLLER_ARGS = ['-Xms64m', '-Xmx256m']
 BENCHMARK = 'com.red.ohc.jmh.OHCSerializedBenchmark.'
 MODES = ('off', 'jdk21', 'all-jdks', 'aa-jdk21')
+SAMPLING = {
+    'screening': {'pairs': 5, 'warmup_iterations': 3, 'warmup_seconds': 5,
+                  'measurement_iterations': 5, 'measurement_seconds': 10},
+    'confirmation': {'pairs': 3, 'warmup_iterations': 3, 'warmup_seconds': 10,
+                     'measurement_iterations': 5, 'measurement_seconds': 10},
+}
 
 
-def cases(logical_cpus):
-    parallel = max(1, min(8, logical_cpus - 1))
+def cases():
     return [dict(name=name, method=method, threads=threads, workload=workload) for
             name, method, threads, workload in (
                 ('read_t1', 'oneThread', 1, 'READ_100'),
                 ('write_t1', 'oneThread', 1, 'WRITE_100'),
-                ('read_parallel', 'cpuThreads', parallel, 'READ_100'),
-                ('write_parallel', 'cpuThreads', parallel, 'WRITE_100'),
-                ('mix_parallel', 'cpuThreads', parallel, 'READ_90_WRITE_10'))]
+                ('read_parallel', 'cpuThreads', 4, 'READ_100'),
+                ('write_parallel', 'cpuThreads', 4, 'WRITE_100'),
+                ('mix_parallel', 'cpuThreads', 4, 'READ_90_WRITE_10'))]
 
 
 def documentation_only(paths):
@@ -61,7 +66,7 @@ def instrumentation_changed(paths):
 
 
 def batch_plan(case, batch):
-    count = {'screening': 5, 'confirmation': 3}[batch]
+    count = SAMPLING[batch]['pairs']
     for number in range(1, count + 1):
         order = ('BASE', 'NEW') if number % 2 else ('NEW', 'BASE')
         for label in order:
@@ -69,10 +74,13 @@ def batch_plan(case, batch):
 
 
 def command(java, jars, case, batch, result_file):
+    timing = SAMPLING[batch]
     return [java, *CONTROLLER_ARGS, '-cp', os.pathsep.join(map(str, jars)),
             'org.openjdk.jmh.Main', '^' + re.escape(BENCHMARK + case['method']) + '$',
-            '-jvm', java, '-f', '1', '-wi', '3', '-w', '2s' if batch == 'screening' else '5s',
-            '-i', '5', '-r', '3s', '-t', str(case['threads']),
+            '-jvm', java, '-f', '1', '-wi', str(timing['warmup_iterations']),
+            '-w', str(timing['warmup_seconds']) + 's',
+            '-i', str(timing['measurement_iterations']),
+            '-r', str(timing['measurement_seconds']) + 's', '-t', str(case['threads']),
             '-p', 'keyBytes=32', '-p', 'valueBytes=5120', '-p', 'workload=' + case['workload'],
             '-p', 'distribution=UNIFORM', '-p', 'writeShape=MIXED',
             '-jvmArgs', ' '.join(FORK_ARGS), '-jvmArgsPrepend', '', '-jvmArgsAppend', '',
@@ -80,12 +88,15 @@ def command(java, jars, case, batch, result_file):
 
 
 def measurement(results, log, case, batch, java, jdk):
+    timing = SAMPLING[batch]
     throughput = validate_results(results)
     r = results[0]
     expected = {'benchmark': BENCHMARK + case['method'], 'mode': 'thrpt',
                 'threads': case['threads'], 'forks': 1, 'jvm': java, 'jvmArgs': FORK_ARGS,
-                'warmupIterations': 3, 'measurementIterations': 5,
-                'warmupTime': '2 s' if batch == 'screening' else '5 s', 'measurementTime': '3 s'}
+                'warmupIterations': timing['warmup_iterations'],
+                'measurementIterations': timing['measurement_iterations'],
+                'warmupTime': str(timing['warmup_seconds']) + ' s',
+                'measurementTime': str(timing['measurement_seconds']) + ' s'}
     if any(r.get(k) != v for k, v in expected.items()):
         raise ValueError('effective fork configuration differs from the requested protocol')
     if re.match(r'\d+', r.get('jdkVersion', '')) is None or int(re.match(r'\d+', r['jdkVersion'])[0]) != jdk:
