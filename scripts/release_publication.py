@@ -69,7 +69,7 @@ def verified_ci(sha):
     if not decision['publish']:
         raise ValueError(decision['reason'])
     if any(job.get('status') != 'completed' or job.get('conclusion') != 'success' for job in jobs):
-        raise ValueError('All CI jobs, including additional jobs, must succeed')
+        raise ValueError('All active CI jobs, including additional jobs, must succeed')
     return {'ci_run_id': run_id, 'ci_run_attempt': attempt}
 
 

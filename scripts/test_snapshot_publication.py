@@ -9,9 +9,11 @@ SCRIPT = Path(__file__).with_name('snapshot_publication.py')
 REPOSITORY = 'Red-EAD/red-ohc'
 SHA = 'a' * 40
 OTHER_SHA = 'b' * 40
-CHECKS = ['verify ({}, {})'.format(system, java)
-          for system in ('ubuntu-latest', 'macos-latest', 'windows-latest')
-          for java in ('11', '17', '21', '25')] + ['jcstress', 'example']
+CHECKS = ['Core & JMH / {} / JDK {}'.format(system, java)
+          for system in ('Linux', 'macOS', 'Windows')
+          for java in ('11', '17', '25')]
+CHECKS += ['Quality / {} / JDK 21'.format(system) for system in ('Linux', 'macOS', 'Windows')]
+CHECKS += ['Concurrency / JCStress', 'Example / User cache']
 
 
 class PublicationGateTest(unittest.TestCase):
@@ -38,6 +40,13 @@ class PublicationGateTest(unittest.TestCase):
         self.assertTrue(result['publish'])
         self.assertEqual(SHA, result['sha'])
         self.assertEqual(123, result['ci_run_id'])
+
+    def test_obsolete_generic_check_names_do_not_satisfy_the_new_contract(self):
+        names = ['verify ({}, {})'.format(system, java)
+                 for system in ('ubuntu-latest', 'macos-latest', 'windows-latest')
+                 for java in ('11', '17', '21', '25')] + ['jcstress', 'example']
+        self.jobs = [dict(name=name, status='completed', conclusion='success') for name in names]
+        self.assertFalse(self.decide()['publish'])
 
     def test_manual_publication_uses_the_same_ci_gate(self):
         self.assertTrue(self.decide('workflow_dispatch')['publish'])

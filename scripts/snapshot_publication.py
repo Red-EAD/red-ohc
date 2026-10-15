@@ -12,11 +12,10 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ci_checks import REQUIRED_JOBS
+
 REPOSITORY = 'Red-EAD/red-ohc'
 SNAPSHOTS = 'https://central.sonatype.com/repository/maven-snapshots/'
-REQUIRED_JOBS = {'verify ({}, {})'.format(system, java)
-                 for system in ('ubuntu-latest', 'macos-latest', 'windows-latest')
-                 for java in ('11', '17', '21', '25')} | {'jcstress', 'example'}
 
 
 def checked_sha(value):
