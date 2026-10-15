@@ -140,7 +140,7 @@ class HostProcessTest(unittest.TestCase):
         process.info['cpu_times'] = None  # task_for_pid is denied for system services.
         kernel = self.process(0, 0., 0., 'kernel_task')
         kernel.info['cpu_times'] = None
-        with patch.object(sys, 'platform', 'darwin'), \
+        with patch.object(sys, 'platform', 'darwin'), patch.object(monitor.os, 'name', 'posix'), \
                 patch.object(monitor.psutil, 'process_iter', return_value=[process, kernel]), \
                 patch.object(monitor.psutil, 'Process', return_value=SimpleNamespace(create_time=lambda: 2.)), \
                 patch.object(monitor.subprocess, 'check_output', side_effect=[
@@ -160,7 +160,7 @@ class HostProcessTest(unittest.TestCase):
     def test_darwin_native_snapshot_rejects_pid_reuse_and_retains_optional_failure(self):
         process = self.process(20, 1., 0.)
         process.info['cpu_times'] = None
-        with patch.object(sys, 'platform', 'darwin'), \
+        with patch.object(sys, 'platform', 'darwin'), patch.object(monitor.os, 'name', 'posix'), \
                 patch.object(monitor.psutil, 'process_iter', return_value=[process]), \
                 patch.object(monitor.psutil, 'Process', return_value=SimpleNamespace(create_time=lambda: 2.)), \
                 patch.object(monitor.subprocess, 'check_output', return_value='20 1:00.00 worker\n') as native:
