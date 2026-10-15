@@ -415,8 +415,10 @@ improvement, so their warning directions differ.
 Process-tree/RSS and guest CPU/load sampling runs once per second; deadline and
 cancellation polling remains responsive at 100 ms. There is no RSS failure cap.
 The tool records its own Python CPU separately across launch, warmup, measurement
-and cleanup, so observer overhead is not mistaken for benchmark CPU. Guest load
-includes this benchmark and cannot by itself establish interference from other
+and cleanup, so observer overhead is not mistaken for benchmark CPU.
+Unreadable child command metadata is recorded as unknown with its reason;
+primary sampling and process-control errors still fail the job.
+Guest load includes this benchmark and cannot by itself establish interference from other
 workloads. JMH's built-in `gc` and `comp` profilers retain per-iteration allocation,
 collection and compilation diagnostics in their original units, separately from
 operation rates. Missing or unsupported diagnostics remain `N/A`. These lightweight

@@ -37,11 +37,19 @@ class OwnedTree:
                 with process.oneshot():
                     memory = process.memory_info().rss
                     cpu = process.cpu_times()
-                    command = process.cmdline()
+                    command_error = None
+                    try:
+                        command = process.cmdline()
+                    except psutil.AccessDenied:
+                        # macOS may deny KERN_PROCARGS2 for a transitioning child.
+                        # Optional metadata must not abort an owned build or fork.
+                        command = None
+                        command_error = 'access denied'
                 rss += memory
                 previous = self.stats.get(identity, {})
                 self.stats[identity] = {'pid': identity[0], 'created_at': identity[1],
                                         'command': command,
+                                        'command_unavailable_reason': command_error,
                                         'sampled_peak_rss_bytes': max(memory, previous.get('sampled_peak_rss_bytes', 0)),
                                         'user_seconds': max(cpu.user, previous.get('user_seconds', 0)),
                                         'system_seconds': max(cpu.system, previous.get('system_seconds', 0))}

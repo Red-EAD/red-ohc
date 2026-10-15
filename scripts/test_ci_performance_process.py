@@ -15,6 +15,28 @@ import ci_performance_process as monitor
 
 
 class ProcessTest(unittest.TestCase):
+    def test_unreadable_command_is_unknown_metadata_without_aborting_owned_process(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(psutil.Process, 'cmdline', side_effect=psutil.AccessDenied(pid=1)):
+            info = self.run_command('import time; print("ok"); time.sleep(.15)', directory)
+            self.assertEqual(info['exit_code'], 0)
+            self.assertGreater(info['sampled_peak_rss_bytes'], 0)
+            self.assertTrue(info['processes'])
+            for process in info['processes']:
+                self.assertIsNone(process['command'])
+                self.assertEqual(process['command_unavailable_reason'], 'access denied')
+            self.assertIsNone(info['error'])
+            self.assertIsNone(info['cleanup_error'])
+
+    def test_primary_process_sampling_permission_errors_still_fail_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(psutil.Process, 'memory_info', side_effect=psutil.AccessDenied(pid=1)):
+            with self.assertRaises(psutil.AccessDenied):
+                self.run_command('import time; time.sleep(30)', directory)
+            evidence = json.loads((Path(directory)/'child.process.json').read_text())
+            self.assertIsNotNone(evidence['error'])
+            self.assertIsNone(evidence['cleanup_error'])
+
     def test_expensive_sampling_is_one_hertz_and_observer_cpu_is_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             info = self.run_command('import time; time.sleep(1.2)', directory)
