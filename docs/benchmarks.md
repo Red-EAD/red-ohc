@@ -201,7 +201,8 @@ macOS, Windows or non-x86-64 Linux. `--new-ref` selects a committed revision;
 `--jvm-args` replaces the common JVM options for both revisions and all four JDKs.
 The defaults use G1, a 1 GiB heap and a 1 GiB direct-memory limit. The same
 prepared bytes run on Java 11, 17, 21 and 25; both the controller and fork use the
-selected Java binary. No benchmark runs implicitly in CI or local smoke tests.
+selected Java binary. This dedicated-machine runner is never invoked implicitly
+by CI or local smoke tests. CI uses the separate protocol below.
 The runner overrides annotation append/prepend arguments and checks the actual
 fork JVM, version, arguments and workload parameters in JMH's result metadata;
 custom heap/direct-memory settings cannot silently revert to annotation defaults.
@@ -246,3 +247,166 @@ size; investigate repeatable regressions without cancelling them against gains
 elsewhere. Cross-platform CI and passing layout tests do not establish Linux
 performance. Current-main paired Linux performance acceptance remains pending
 until matched results exist.
+
+## CI performance warnings
+
+The existing Linux, macOS and Windows JDK 21 `verify` jobs compare each non-draft
+PR with its main base after correctness tests. The 14 required checks and the
+maintainer's merge decision remain unchanged. A throughput or estimated CPU/op
+ratio at or beyond 0.90 or 1.10 emits a warning in either direction. Performance
+warnings, including `INCONCLUSIVE`, keep the step successful. Build failures,
+crashes, timeouts, resource-limit breaches, wrong artifacts/configuration and
+operation reconciliation failures fail the existing verify check.
+
+Main pushes run correctness checks and report performance as `NOT_MEASURED`.
+Draft PRs, non-measurement JDK jobs and changes limited to the allowed document,
+image and community files also report `NOT_MEASURED`. Unknown files and build,
+workflow, source or tool changes are measured conservatively. Changing a draft
+to ready triggers fresh CI through `ready_for_review`.
+
+### Workloads and memory budget
+
+`scripts/run_ci_performance.py` uses `OHCSerializedBenchmark` with these five cases:
+
+| Case | Threads | Workload |
+| --- | --- | --- |
+| read_t1 | 1 | READ_100 |
+| write_t1 | 1 | WRITE_100 |
+| read_parallel | P | READ_100 |
+| write_parallel | P | WRITE_100 |
+| mix_parallel | P | READ_90_WRITE_10 |
+
+`P = max(1, min(8, logicalCPUs - 1))`; each runner records the actual value.
+All cases use 32-byte keys, 5,120-byte values, UNIFORM distribution and MIXED
+writes. The existing 24,576-key universe, capacity formula for 19,660 entries,
+ten-minute TTL and lightweight first-byte read codec apply. This measures
+lookup/allocation behavior, not full-value materialization or memory bandwidth.
+
+Each measurement fork uses these arguments on every platform:
+
+```text
+-Xms2g -Xmx2g -XX:MaxDirectMemorySize=2g -XX:+UseG1GC
+```
+
+The JMH controller uses `-Xms64m -Xmx256m`. The runner clears annotation append
+and prepend arguments, removes inherited Java option variables and validates
+the fork JVM, arguments, JDK, workload and iteration settings in the actual JMH
+JSON. This prevents the benchmark's 1 GiB annotation defaults from taking effect.
+
+The tool samples the combined RSS of its controller and fork every 100 ms. A
+sample above 4 GiB terminates owned processes and reports `RESOURCE_ERROR`.
+Sampling can miss brief peaks and allows overshoot between samples; this is
+not a physical-memory or native-allocation hard limit. OHC's `mmap`/`VirtualAlloc`
+pages are outside `MaxDirectMemorySize`. The 2 GiB heap leaves room for the
+7 GB macOS ARM runner; public Linux and Windows standard runners provide 16 GB.
+See [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+POSIX process groups and a private Windows Job Object retain ownership even
+when a controller exits before its fork is sampled. Windows starts the controller
+suspended, assigns it to the kill-on-close job, then resumes its primary thread.
+
+### Immutable builds and pairing
+
+Automatic comparisons use the PR event's base SHA for BASE and the tested merge
+SHA for NEW. The report also records the PR head SHA. The current PR's measurement
+tools run with the repository's normal review trust boundary; they are not an
+independent attestation of an adversarial PR. Tooling changes are prominently
+flagged, including during A/A calibration.
+
+Both core revisions are built with the same Java 11 and the same Maven executable
+on that platform. Builds use separate local Maven repositories and Java 11
+bytecode. One thin benchmark harness, built from BASE, is reused byte for byte
+with both cores. Each core resolves its own runtime dependencies through BASE's
+runtime resolver. The resolved core must match the freshly built JAR, even when
+a matching release coordinate already exists in Central. Receipts include every
+runtime JAR checksum, compiler/runtime details and Maven version; artifact bytes
+are rechecked before every measurement process.
+For A/A calibration both labels execute the same prepared artifact bytes.
+
+BASE and NEW execute serially in the same runner VM, adjacent within each pair,
+with AB/BA order alternating by round. Each scenario starts with five independent
+pairs. Every process has one fork, three 2-second warmup iterations and five
+3-second measurement iterations. Five cases require 50 screening processes,
+or 17.5 minutes of pure warmup and measurement. Builds and teardown add time;
+20-30 minutes is a planning estimate, not a deadline guarantee.
+
+A case that reaches either 10% threshold or has inconclusive screening receives
+exactly one independent confirmation batch: three pairs, three 5-second warmup
+iterations and five 3-second measurement iterations. Screening and confirmation
+are retained separately, without pooling, trimming outliers or retrying until
+a desired result appears. The complete performance phase has a 45-minute
+watchdog. Potential performance jobs have a 75-minute total ceiling, including
+correctness; other verify jobs keep their 30-minute ceiling.
+
+### Statistical and CPU interpretation
+
+The statistical unit is an independent fork pair. The tool takes the mean of
+the log NEW/BASE ratios and exponentiates it for the geometric mean ratio.
+A Student t interval on those paired log ratios provides each scenario's 95%
+interval. Iterations inside one fork are not counted as independent processes.
+These are individual scenario intervals, not a simultaneous confidence claim
+over all cases or JDKs. Hosted-runner scheduling noise remains a limitation.
+
+Iteration throughput CV above 5%, first-two versus last-two iteration drift above
+5%, an interval crossing a 10% boundary, or a signal that confirmation does not
+reproduce yields `INCONCLUSIVE`. Noisy or inconclusive screening stays visible
+even if the confirmation batch is quieter. An unavailable CPU measurement is
+`N/A`, never a zero-cost operation.
+
+The JMH auxiliary counters are **operation rates**, not raw operation counts.
+For each fork, estimated CPU/op is:
+
+```text
+sum(measurement-window process CPU seconds)
+--------------------------------------------------------------
+sum(completed operations/second[i] * measurement wall seconds[i])
+```
+
+Process CPU includes the maintenance actor and excludes process startup and
+warmup. Window setup/teardown skew makes this an estimate. Whole-process sampled
+user/system CPU, wall time and normalized CPU are separate diagnostics; sampled
+CPU totals are lower bounds. Throughput increases and CPU/op decreases indicate
+improvement, so their warning directions differ.
+
+Every iteration must reconcile attempted/completed operations and
+attempted/accepted writes, with zero exceptions, incomplete operations or
+unexpected rejections. Aggregate agreement cannot hide a bad iteration.
+
+Actions Summary shows both batches, absolute geometric means, ratios, intervals
+and verdicts. Artifacts retained for 90 days contain raw JMH JSON/logs, operation
+rates, CPU windows, sampled process/RSS data, SHAs, complete commands, image/CPU/
+JDK descriptions and build receipts. Partial evidence is retained on errors.
+
+### Manual comparisons and calibration
+
+Use the existing **CI** workflow's **Run workflow** control on the intended
+branch. Supply full 40-character BASE and NEW commit SHAs for a measurement:
+
+| `performance` | Behavior |
+| --- | --- |
+| `off` (default) | Correctness only |
+| `jdk21` | Compare on JDK 21 across all three OS jobs |
+| `all-jdks` | Compare separately on JDK 11, 17, 21 and 25 across all three OSes |
+| `aa-jdk21` | JDK 21 calibration with identical BASE/NEW SHAs |
+
+The runtime JDK is captured before switching to Java 11 for compilation. Every
+controller and fork explicitly uses that saved runtime. A manual run is a
+diagnostic comparison; it does not replace the main-push CI evidence required
+by publication tools. It never triggers a formal release.
+
+Python 3.12 tooling dependencies are isolated and pinned with wheel hashes in
+`scripts/ci-performance-requirements.txt`. They add no Java runtime dependencies.
+Short protocol tests, including simulated memory limits and cancellation, run
+without invoking a local Java benchmark:
+
+```bash
+python -m venv /path/to/performance-python
+/path/to/performance-python/bin/python -m pip install --require-hashes --only-binary=:all: \
+  -r scripts/ci-performance-requirements.txt
+/path/to/performance-python/bin/python -m unittest discover -s scripts \
+  -p 'test_*ci_performance*.py' -v
+```
+
+On Windows, use the environment's `Scripts/python.exe`. Hosted-runner warnings
+support review; they do not establish dedicated Linux, Zen 4/4c or Intel
+performance acceptance. That acceptance remains pending until matched machine
+measurements exist.

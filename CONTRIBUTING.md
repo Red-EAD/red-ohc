@@ -24,6 +24,10 @@ git diff --check
 Test/tool caches must be released in `finally`, even if flush/setup fails. Keep
 the primary failure and suppress cleanup failures. Long tests and benchmarks
 should run on a dedicated machine, not implicitly in developer smoke commands.
+Non-draft PRs also run paired performance measurements in the existing JDK 21
+CI jobs. Review their warnings and raw evidence before merging; performance
+changes alone do not fail the check. See the
+[CI performance protocol](docs/benchmarks.md#ci-performance-warnings).
 
 Use accurate commit subjects such as `fix(cache): preserve replacement ownership`.
 Explain the behavior and validation actually performed. Keep performance claims
