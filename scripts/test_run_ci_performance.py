@@ -1,4 +1,6 @@
 """Build provenance and orchestration tests; all Maven/JMH launches are replaced."""
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -124,10 +126,13 @@ class RunnerTest(unittest.TestCase):
                     return 'a' * 40 if args[0] == 'rev-parse' else ''
                 arguments = SimpleNamespace(plan=plan, output=root / 'output', compiler_home='/jdk11')
                 case = {'name': 'read_t1', 'method': 'oneThread', 'threads': 1, 'workload': 'READ_100'}
+                output = io.StringIO()
                 with patch.object(runner, 'git', side_effect=git), patch.object(runner, 'prepare', return_value=receipt), \
                         patch.object(runner, 'check_artifacts'), patch.object(runner, 'cpu_description', return_value='Test CPU'), \
                         patch.object(runner.protocol, 'cases', return_value=[case]), \
-                        patch.object(ci_performance_process, 'run_process', side_effect=launch):
+                        patch.object(ci_performance_process, 'run_process', side_effect=launch), \
+                        patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'step-summary.md')}), \
+                        redirect_stdout(output):
                     if failure:
                         with self.assertRaisesRegex(RuntimeError, 'RESOURCE_ERROR'):
                             runner.run(arguments)
@@ -135,9 +140,12 @@ class RunnerTest(unittest.TestCase):
                         runner.run(arguments)
                 status = json.loads((root / 'output/reports/status.json').read_text())
                 self.assertEqual(status['status'], 'ERROR' if failure else 'COMPLETED')
+                self.assertEqual((root / 'step-summary.md').read_text(),
+                                 (root / 'output/reports/summary.md').read_text() + '\n')
                 if not failure:
                     self.assertEqual(status['completed_forks'], 16)
                     self.assertIn('WARNING', (root / 'output/reports/summary.md').read_text())
+                    self.assertIn('::warning title=Performance 21::read_t1: WARNING', output.getvalue())
 
 
 if __name__ == '__main__':

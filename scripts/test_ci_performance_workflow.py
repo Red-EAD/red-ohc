@@ -57,6 +57,21 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('ready_for_review', activities)
         self.assertTrue({'opened', 'synchronize', 'reopened'} <= set(activities))
 
+    def test_runner_fixture_does_not_publish_fake_actions_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / 'real-summary.md'
+            summary.write_text('real step summary\n')
+            env = os.environ | {'GITHUB_STEP_SUMMARY': str(summary)}
+            completed = subprocess.run(
+                [sys.executable, '-m', 'unittest',
+                 'test_run_ci_performance.RunnerTest.test_whole_runner_warnings_succeed_and_real_errors_propagate'],
+                cwd=Path(__file__).resolve().parent, env=env,
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(any(line.startswith('::') for line in completed.stdout.splitlines()),
+                             completed.stdout)
+            self.assertEqual(summary.read_text(), 'real step summary\n')
+
     def test_all_existing_publication_checks_remain_present_on_main_push(self):
         jobs = self.workflow['jobs']
         self.assertEqual(set(jobs), {'verify', 'jcstress', 'example'})
