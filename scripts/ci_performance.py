@@ -177,6 +177,10 @@ def _outside(ratio):
             or math.isclose(ratio, .90, abs_tol=1e-12, rel_tol=0))
 
 
+def _crosses_threshold(low, high):
+    return (low < .90 < high or low < 1.10 < high) and not math.isclose(low, high, rel_tol=1e-12)
+
+
 def _stat(pairs, metric, noisy):
     values = [(pair['BASE'][metric], pair['NEW'][metric]) for pair in pairs]
     if any(base is None or new is None for base, new in values):
@@ -190,7 +194,7 @@ def _stat(pairs, metric, noisy):
     half = float(t.ppf(.975, len(logs) - 1)) * statistics.stdev(logs) / math.sqrt(len(logs))
     ratio = math.exp(mean)
     low, high = math.exp(mean - half), math.exp(mean + half)
-    crosses = (low < .90 < high or low < 1.10 < high) and not math.isclose(low, high, rel_tol=1e-12)
+    crosses = _crosses_threshold(low, high)
     verdict = 'INCONCLUSIVE' if noisy or crosses else 'CHANGE' if _outside(ratio) else 'STABLE'
     direction = 'improvement' if (ratio > 1.) == (metric == 'throughput') else 'regression'
     return {'ratio': ratio, 'interval': [low, high], 'pairs': len(logs),
@@ -236,3 +240,22 @@ def final_verdict(screening, confirmation):
             return 'INCONCLUSIVE'
         changed |= first['verdict'] == 'CHANGE'
     return 'WARNING' if changed else 'STABLE'
+
+
+def verdict_reasons(screening, confirmation):
+    reasons = []
+    for name, batch in [('screening', screening), ('confirmation', confirmation)]:
+        if batch is None:
+            continue
+        reasons.extend(name + ': ' + flag for flag in batch['quality'])
+        for metric in ('throughput', 'cpu_per_op'):
+            value = batch[metric]
+            if value['interval'] is not None and _crosses_threshold(*value['interval']):
+                reasons.append(name + ': ' + metric + ' interval crosses a 10% boundary')
+    if confirmation is not None:
+        for metric in ('throughput', 'cpu_per_op'):
+            first, second = screening[metric], confirmation[metric]
+            if (first['ratio'] is not None and _outside(first['ratio'])
+                    and (second['verdict'] != 'CHANGE' or first['direction'] != second['direction'])):
+                reasons.append(metric + ': initial threshold signal not reproduced by confirmation')
+    return reasons

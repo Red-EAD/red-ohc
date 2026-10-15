@@ -264,7 +264,8 @@ def compare_case(case, run_batch):
     confirmation = (protocol.analyze(run_batch(case, 'confirmation'), protocol.SAMPLING['confirmation']['pairs'])
                     if screening['needs_confirmation'] else None)
     return {'case': case, 'screening': screening, 'confirmation': confirmation,
-            'verdict': protocol.final_verdict(screening, confirmation)}
+            'verdict': protocol.final_verdict(screening, confirmation),
+            'reasons': protocol.verdict_reasons(screening, confirmation)}
 
 
 def _metric_text(metric, cpu=False):
@@ -282,13 +283,14 @@ def summary_markdown(manifest, results, records, error):
     text = ['### Performance — {} / JDK {}'.format(manifest['system'], manifest['jdk']), '',
             'BASE `{base}` → NEW `{new}`; P={parallel_threads}.'.format(**manifest), '',
             '**Measurement tooling changed: {}.**'.format(manifest['instrumentation_changed']), '',
-            '| Case | Batch | Throughput NEW/BASE (95% paired interval) | Estimated CPU/op NEW/BASE (95% interval) | Verdict |',
-            '|---|---|---|---|---|']
+            '| Case | Batch | Throughput NEW/BASE (95% paired interval) | Estimated CPU/op NEW/BASE (95% interval) | Verdict | Reasons |',
+            '|---|---|---|---|---|---|']
     for row in results:
         for batch in ('screening', 'confirmation'):
             if row[batch] is not None:
-                text.append('| {} | {} | {} | {} | {} |'.format(row['case']['name'], batch,
-                            _metric_text(row[batch]['throughput']), _metric_text(row[batch]['cpu_per_op'], cpu=True), row['verdict']))
+                text.append('| {} | {} | {} | {} | {} | {} |'.format(row['case']['name'], batch,
+                            _metric_text(row[batch]['throughput']), _metric_text(row[batch]['cpu_per_op'], cpu=True),
+                            row['verdict'], '; '.join(row['reasons']) or 'none'))
     text += ['', '| Fork | CV / drift | GC count / time (ms) | Measured compilation (ms) | Observer CPU / wall |',
              '|---|---|---|---|---|']
     for record in records:
@@ -306,6 +308,7 @@ def summary_markdown(manifest, results, records, error):
              'RSS is sampled without a failure threshold. Missing CPU data is N/A.',
              'Process/RSS sampling is 1 Hz; observer CPU includes Python launch, monitoring and cleanup, across warmup and measurement. GC/JIT diagnostics retain per-iteration units separately from operation rates.',
              'Host CPU busy, cumulative CPU times (including available steal/iowait) and load samples are retained in each process JSON; host load includes this benchmark.',
+             'Read-only process CPU attribution runs every 10 seconds: names and fresh PID/create-time identities, no command arguments. Outside-tree CPU rates are estimates over per-process observation intervals, with partial coverage of short-lived or unreadable processes. Per-call sampling wall time is recorded. No unrelated process is modified.',
              'CPU/op is estimated from measurement-window process CPU and corresponding completed-operation rates; it includes the actor.',
              'Warnings and INCONCLUSIVE results do not fail CI. Raw iteration rates, CPU windows, logs, environment and artifact hashes are retained for 90 days.',
              'Hosted-runner comparisons do not establish dedicated Linux/AMD/Intel performance acceptance.', '']

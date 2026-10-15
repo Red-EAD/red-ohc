@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import time
 import unittest
 from unittest.mock import patch
@@ -14,7 +15,103 @@ import psutil
 import ci_performance_process as monitor
 
 
+class HostProcessTest(unittest.TestCase):
+    @staticmethod
+    def process(pid, born, cpu, name='background'):
+        return SimpleNamespace(info={'pid': pid, 'create_time': born, 'name': name,
+                                     'cpu_times': SimpleNamespace(user=cpu, system=0.)})
+
+    def test_background_cpu_excludes_owned_tree_and_observer_without_command_lines(self):
+        clock = [0.]
+        with patch.object(monitor.psutil, 'process_iter') as scan, \
+                patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]):
+            sampler = monitor.HostProcessSampler()
+            scan.return_value = [self.process(10, 1., 20.), self.process(20, 2., 10., 'indexer'),
+                                 self.process(os.getpid(), 3., 30., 'observer')]
+            self.assertIsNone(sampler.sample(0., {(10, 1.)})['outside_cpu_cores'])
+            scan.return_value = [self.process(10, 1., 60.), self.process(20, 2., 30., 'indexer'),
+                                 self.process(os.getpid(), 3., 40., 'observer')]
+            clock[0] = 10.
+            measured = sampler.sample(10., {(10, 1.)})
+            self.assertEqual(measured['outside_cpu_cores'], 2.)
+            self.assertEqual(measured['top_processes'],
+                             [{'pid': 20, 'created_at': 2., 'name': 'indexer', 'cpu_cores': 2., 'interval_seconds': 10.}])
+            self.assertNotIn('cmdline', str(scan.call_args))
+            self.assertGreaterEqual(measured['sampling_wall_seconds'], 0.)
+
+    def test_real_iterator_cache_is_refreshed_when_an_existing_pid_is_reused(self):
+        state = {'born': 1., 'cpu': 100., 'now': 0.}
+        class CachedProcess:
+            def __init__(self, pid):
+                self.pid = pid
+                self.born = state['born']
+            def as_dict(self, **kwargs):
+                return {'pid': self.pid, 'create_time': self.born, 'name': 'worker',
+                        'cpu_times': SimpleNamespace(user=state['cpu'], system=0.)}
+        # Exercise the pinned library's real iterator/cache, with only OS reads replaced.
+        monitor.psutil.process_iter.cache_clear()
+        try:
+            with patch.object(monitor.psutil, 'pids', return_value=[20]), \
+                    patch.object(monitor.psutil, 'Process', CachedProcess), \
+                    patch.object(monitor.time, 'monotonic', side_effect=lambda: state['now']):
+                sampler = monitor.HostProcessSampler()
+                sampler.sample(0., set())
+                state.update(born=2., cpu=1000., now=10.)
+                sample = sampler.sample(10., set())
+                self.assertIsNone(sample['outside_cpu_cores'])
+                self.assertEqual(sample['top_processes'], [])
+        finally:
+            monitor.psutil.process_iter.cache_clear()
+
+    def test_cpu_denominator_uses_fresh_observation_time_after_slow_introspection(self):
+        clock = [0.]
+        with patch.object(monitor.psutil, 'process_iter') as scan, \
+                patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]):
+            sampler = monitor.HostProcessSampler()
+            scan.return_value = [self.process(20, 2., 0.)]
+            sampler.sample(0., set())
+            clock[0] = 12.  # Caller retained elapsed=10 before a two-second OS query.
+            scan.return_value = [self.process(20, 2., 24.)]
+            result = sampler.sample(10., set())
+            self.assertEqual(result['outside_cpu_cores'], 2.)
+            self.assertEqual(result['top_processes'][0]['interval_seconds'], 12.)
+
+    def test_pid_reuse_new_and_unreadable_processes_never_invent_cpu_deltas(self):
+        with patch.object(monitor.psutil, 'process_iter') as scan:
+            sampler = monitor.HostProcessSampler()
+            scan.return_value = [self.process(20, 1., 100.)]
+            sampler.sample(0., set())
+            unreadable = SimpleNamespace(info={'pid': 30, 'name': None, 'create_time': None, 'cpu_times': None})
+            scan.return_value = [self.process(20, 2., 1000.), unreadable]
+            sample = sampler.sample(10., set())
+            self.assertIsNone(sample['outside_cpu_cores'])
+            self.assertEqual(sample['unavailable_process_count'], 1)
+            self.assertTrue(sample['coverage_is_partial'])
+            self.assertTrue(sample['cpu_rates_are_estimates'])
+            self.assertEqual(sample['top_processes'], [])
+            scan.side_effect = psutil.AccessDenied(pid=1)
+            sample = sampler.sample(20., set())
+            self.assertIsNone(sample['outside_cpu_cores'])
+            self.assertEqual(sample['error'], 'AccessDenied')
+
+
 class ProcessTest(unittest.TestCase):
+    def test_deadline_is_rechecked_after_a_slow_sample_even_if_process_has_exited(self):
+        clock = [0.]
+        process = SimpleNamespace(pid=123456789, create_time=lambda: 1., poll=lambda: 0,
+                                  returncode=0, close=lambda: None)
+        target = ('ci_performance_windows.WindowsProcess' if os.name == 'nt'
+                  else 'ci_performance_process.psutil.Popen')
+        def sample(tree):
+            clock[0] = 2.
+            return 0
+        with tempfile.TemporaryDirectory() as directory, patch(target, return_value=process), \
+                patch.object(monitor.OwnedTree, 'sample', sample), \
+                patch.object(monitor.OwnedTree, 'stop'), \
+                patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]), \
+                self.assertRaisesRegex(RuntimeError, 'TIMEOUT'):
+            monitor.run_process(['fake-java'], Path(directory), Path(directory) / 'slow.log', timeout=1.)
+
     def test_unreadable_command_is_unknown_metadata_without_aborting_owned_process(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(psutil.Process, 'cmdline', side_effect=psutil.AccessDenied(pid=1)):
@@ -43,6 +140,9 @@ class ProcessTest(unittest.TestCase):
             self.assertEqual(info['sample_interval_seconds'], 1.)
             self.assertLessEqual(len(info['rss_samples']), 4)
             self.assertGreaterEqual(info['sampler_cpu_seconds'], 0.)
+            self.assertEqual(info['background_sample_interval_seconds'], 10.)
+            self.assertGreaterEqual(len(info['background_samples']), 2)
+            self.assertTrue(all('sampling_wall_seconds' in s for s in info['background_samples']))
             self.assertLess(info['sampler_cpu_seconds'], info['wall_seconds'])
 
     def test_zero_duration_startup_failure_keeps_original_error_and_evidence(self):

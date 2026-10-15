@@ -8,6 +8,58 @@ import time
 
 import psutil
 
+
+class HostProcessSampler:
+    """Low-frequency, read-only CPU attribution; never records command arguments."""
+    def __init__(self):
+        self.previous = {}
+        self.elapsed = None
+
+    def sample(self, elapsed, owned):
+        started = time.monotonic()
+        current, top = {}, []
+        unavailable = 0
+        matched = 0
+        error = None
+        interval = started - self.elapsed if self.elapsed is not None else None
+        try:
+            # process_iter and Process.create_time both cache; refresh before testing identities.
+            psutil.process_iter.cache_clear()
+            for process in psutil.process_iter(
+                    attrs=['pid', 'name', 'create_time', 'cpu_times'], ad_value=None):
+                info = process.info
+                cpu, born = info['cpu_times'], info['create_time']
+                if cpu is None or born is None:
+                    unavailable += 1
+                    continue
+                identity = (info['pid'], born)
+                total = cpu.user + cpu.system
+                observed = time.monotonic()
+                current[identity] = (total, observed)
+                if (identity in owned or info['pid'] == os.getpid()
+                        or identity not in self.previous):
+                    continue
+                previous, before = self.previous[identity]
+                duration = observed - before
+                if duration > 0 and total >= previous:
+                    matched += 1
+                if duration > 0 and total > previous:
+                    top.append({'pid': identity[0], 'created_at': born, 'name': info['name'],
+                                'cpu_cores': (total - previous) / duration,
+                                'interval_seconds': duration})
+        except (OSError, NotImplementedError, psutil.Error) as failure:
+            error = type(failure).__name__
+        self.previous = current if error is None else {}
+        self.elapsed = started
+        return {'elapsed_seconds': elapsed, 'interval_seconds': interval,
+                'outside_cpu_cores': (sum(p['cpu_cores'] for p in top)
+                                      if matched and error is None else None),
+                'top_processes': sorted(top, key=lambda p: p['cpu_cores'], reverse=True)[:5],
+                'unavailable_process_count': unavailable, 'coverage_is_partial': True,
+                'cpu_rates_are_estimates': True,
+                'error': error, 'sampling_wall_seconds': time.monotonic() - started}
+
+
 class OwnedTree:
     def __init__(self, root):
         self.root = root
@@ -132,6 +184,8 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
     error = None
     samples = []
     host_samples = []
+    background_samples = []
+    background = HostProcessSampler()
     try:
         with log_file.open('w', encoding='utf-8') as log:
             if os.name == 'nt':
@@ -149,8 +203,19 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
                 # Process-tree enumeration is expensive on some platforms. Keep
                 # deadline/cancellation polling responsive without sampling at 10 Hz.
                 if not samples or elapsed - samples[-1]['elapsed_seconds'] >= 1. or finished:
-                    samples.append({'elapsed_seconds': elapsed, 'rss_bytes': tree.sample()})
-                    host_samples.append(host_sample(elapsed, initial=not host_samples))
+                    sample_started = time.monotonic()
+                    rss = tree.sample()
+                    samples.append({'elapsed_seconds': elapsed, 'rss_bytes': rss,
+                                    'sampling_wall_seconds': time.monotonic() - sample_started})
+                    sample_started = time.monotonic()
+                    host = host_sample(elapsed, initial=not host_samples)
+                    host['sampling_wall_seconds'] = time.monotonic() - sample_started
+                    host_samples.append(host)
+                if (not background_samples
+                        or elapsed - background_samples[-1]['elapsed_seconds'] >= 10. or finished):
+                    background_samples.append(background.sample(time.monotonic() - started, set(tree.known)))
+                # Sampling can block in OS introspection. Never test a stale pre-sample clock.
+                now = time.monotonic()
                 if now - started > timeout or (deadline is not None and now > deadline):
                     raise RuntimeError('TIMEOUT: performance process exceeded its deadline')
                 if finished:
@@ -179,6 +244,7 @@ def run_process(args, cwd, log_file, timeout, deadline=None, env=None):
                 'sampler_cpu_seconds': time.process_time() - cpu_started,
                 'sample_interval_seconds': 1., 'rss_samples': samples,
                 'host_sample_interval_seconds': 1., 'host_samples': host_samples,
+                'background_sample_interval_seconds': 10., 'background_samples': background_samples,
                 'sampled_peak_rss_bytes': max((s['rss_bytes'] for s in samples), default=0),
                 'processes': list(tree.stats.values()) if tree else [],
                 'process_cpu_samples_are_lower_bounds': True,

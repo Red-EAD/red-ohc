@@ -406,6 +406,20 @@ initial quality flags stay visible even when confirmation resolves uncertainty.
 An unavailable CPU measurement is
 `N/A`, never a zero-cost operation.
 
+Reports distinguish per-fork quality flags, paired intervals crossing a 10%
+boundary, and an initial threshold signal not independently reproduced. These
+explanations do not alter the verdict rules. Guest CPU/load alone cannot identify
+interference. A read-only process census every ten seconds records the five
+largest observed outside-tree CPU consumers by name and PID/create-time identity,
+without command arguments. CPU deltas exclude the launched process tree and the
+observer; rates use each process's monotonic observation interval and are
+estimates with partial coverage because short-lived, new or unreadable processes
+may be absent. The iterator cache is cleared for fresh PID/create-time identities.
+The first census has no CPU-rate estimate. Per-call wall durations
+separate slow OS introspection from long sampling intervals. All monitoring CPU
+remains included in the observer cost. No system service or unrelated process is
+stopped, reprioritized or reconfigured by the measurement tool.
+
 The JMH auxiliary counters are **operation rates**, not raw operation counts.
 For each fork, estimated CPU/op is:
 

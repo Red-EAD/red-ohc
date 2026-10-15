@@ -231,6 +231,28 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(stat['verdict'], 'INCONCLUSIVE')
         self.assertEqual(stat['pairs'], 5)
 
+    def test_reasons_distinguish_quality_veto_from_wide_pair_interval(self):
+        rows = records(pairs=3)
+        rows[0]['quality'] = ['iteration throughput CV exceeds 5%']
+        noisy = perf.analyze(rows, 3)
+        reasons = perf.verdict_reasons(noisy, noisy)
+        self.assertTrue(any('CV exceeds 5%' in reason for reason in reasons))
+        self.assertFalse(any('interval crosses' in reason for reason in reasons))
+        variable = records(pairs=3)
+        for index, factor in enumerate([.8, 1., 1.2]):
+            variable[index * 2 + 1]['throughput'] *= factor
+        uncertain = perf.analyze(variable, 3)
+        reasons = perf.verdict_reasons(uncertain, uncertain)
+        self.assertTrue(any('throughput interval crosses' in reason for reason in reasons))
+        self.assertFalse(any('CV exceeds' in reason for reason in reasons))
+
+    def test_reasons_retain_initial_signal_when_confirmation_does_not_reproduce_it(self):
+        initial = perf.analyze(records(1.2, pairs=3), 3)
+        confirmation = perf.analyze(records(pairs=3), 3)
+        self.assertTrue(any('not reproduced' in reason
+                            for reason in perf.verdict_reasons(initial, confirmation)))
+        self.assertEqual(perf.final_verdict(initial, confirmation), 'INCONCLUSIVE')
+
     def test_zero_variance_cpu_na_and_noise_are_not_hidden(self):
         rows = records()
         for row in rows:
