@@ -105,7 +105,7 @@ jobs:
         if: steps.performance.outputs.enabled == 'true'
         timeout-minutes: 46
         shell: bash
-        run: '"$PERFORMANCE_PYTHON" scripts/run_ci_performance.py run --plan "$RUNNER_TEMP/performance-plan.json" --output "$RUNNER_TEMP/performance-results" --compiler-home "$JAVA_HOME"'
+        run: 'exec "$PERFORMANCE_PYTHON" scripts/run_ci_performance.py run --plan "$RUNNER_TEMP/performance-plan.json" --output "$RUNNER_TEMP/performance-results" --compiler-home "$JAVA_HOME"'
       - name: Retain performance evidence
         if: always() && steps.performance.outputs.enabled == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

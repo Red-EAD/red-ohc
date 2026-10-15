@@ -300,7 +300,7 @@ def run(args):
     error = None
     def interrupted(signum, frame):
         raise KeyboardInterrupt('cancelled by signal ' + str(signum))
-    old_term = signal.signal(signal.SIGTERM, interrupted)
+    old_signals = {kind: signal.signal(kind, interrupted) for kind in (signal.SIGINT, signal.SIGTERM)}
     try:
         receipt = prepare(plan, output, args.compiler_home, deadline)
         def run_batch(case, batch):
@@ -334,7 +334,8 @@ def run(args):
         error = failure
         raise
     finally:
-        signal.signal(signal.SIGTERM, old_term)
+        for kind, handler in old_signals.items():
+            signal.signal(kind, handler)
         markdown = summary_markdown(manifest, results, rows, error)
         (output / 'reports/summary.md').write_text(markdown, encoding='utf-8')
         append_summary(markdown)
