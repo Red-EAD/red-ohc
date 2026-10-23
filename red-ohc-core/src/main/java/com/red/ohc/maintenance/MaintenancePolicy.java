@@ -383,6 +383,10 @@ public final class MaintenancePolicy implements AutoCloseable {
     return skipSuppressedAccesses;
   }
 
+  void recordSkipSuppressedAccesses(long count) {
+    skipSuppressedAccesses += count;
+  }
+
   long ghostDeferredPromotions() {
     return ghostDeferredPromotions;
   }

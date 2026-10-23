@@ -24,7 +24,7 @@ import com.red.ohc.storage.NativeMemory;
 public final class MaintenanceIdleHandoffTest {
   @DataProvider
   public Object[][] pendingSources() {
-    return new Object[][] {{"ring"}, {"hits"}, {"misses"}};
+    return new Object[][] {{"ring"}, {"hits"}, {"misses"}, {"skip"}};
   }
 
   @Test(dataProvider = "pendingSources", timeOut = 5_000L)
@@ -48,6 +48,10 @@ public final class MaintenanceIdleHandoffTest {
       int index = slots.firstLiveSlot(0, slots.slotCapacity());
       assertEquals(slots.consumedHits(index), fixture.slot.publishedHits);
       assertEquals(slots.consumedMisses(index), fixture.slot.publishedMisses);
+      assertEquals(fixture.slot.consumedSkipAccesses, fixture.slot.publishedSkipAccesses);
+      if (source.equals("skip")) {
+        assertEquals(fixture.loop.snapshot().skipSuppressedAccessCount, 1L);
+      }
       assertFalse((Boolean) call(fixture.loop, "hasRunnableWork"));
     }
   }
@@ -271,6 +275,8 @@ public final class MaintenanceIdleHandoffTest {
       } else if (source.equals("hits")) {
         // A producer can be paused between publishing its counters and signaling the actor.
         slot.publishedHits++;
+      } else if (source.equals("skip")) {
+        slot.publishedSkipAccesses++;
       } else {
         slot.publishedMisses++;
       }

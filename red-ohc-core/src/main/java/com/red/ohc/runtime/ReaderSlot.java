@@ -17,6 +17,10 @@ public final class ReaderSlot {
   public long localMisses;
   public volatile long publishedHits;
   public volatile long publishedMisses;
+  public long localSkipAccesses;
+  public volatile long publishedSkipAccesses;
+  /** Actor-owned consumption cursor, reset with the slot's lifetime. */
+  public long consumedSkipAccesses;
 
   /** Lazily allocated after the first sampled access. */
   public volatile AccessRing access;

@@ -347,21 +347,69 @@ public final class ThreadContextReadCounterTest {
   }
 
   @Test
+  public void businessAccessSamplingRandomizesPositionWithinEachPeriod() {
+    ThreadContext context = new ThreadContext(null);
+    Entry entry = EntryTestSupport.entry(0, 4, 0L);
+    boolean[] sampledPositions = new boolean[(int) ThreadContext.ACCESS_SAMPLE_MASK + 1];
+
+    for (int period = 0; period < 256; period++) {
+      for (int position = 0; position <= ThreadContext.ACCESS_SAMPLE_MASK; position++) {
+        context.access(entry, position);
+      }
+      assertTrue(
+          context.slot.access.poll(
+              (ignored, observedValueAddress, observedGeneration, observedPolicyState) ->
+                  sampledPositions[(int) observedValueAddress] = true),
+          "each sampling period must publish exactly one event");
+      assertTrue(context.slot.access.isEmpty());
+    }
+
+    int distinctPositions = 0;
+    for (boolean present : sampledPositions) {
+      if (present) {
+        distinctPositions++;
+      }
+    }
+    assertTrue(distinctPositions > 1, "sampling must not keep the same position every period");
+  }
+
+  @Test
   public void businessAccessSamplingCapturesProducerPolicyState() {
     ThreadContext context = new ThreadContext(null);
     Entry entry = EntryTestSupport.entry(0, 5, 0L);
-    entry.policyState(Entry.POLICY_S4_SKIP);
+    entry.policyState(Entry.POLICY_S3_SMALL);
 
     for (int index = 0; index < 16; index++) {
       context.access(entry);
     }
+    entry.policyState(Entry.POLICY_S4_SKIP);
 
     assertTrue(
         context.slot.access.poll(
             (ignored, observedValueAddress, observedGeneration, observedPolicyState) -> {
               assertEquals(observedGeneration, entry.generation());
-              assertEquals(observedPolicyState, Entry.POLICY_S4_SKIP);
+              assertEquals(observedPolicyState, Entry.POLICY_S3_SMALL);
             }));
+  }
+
+  @Test
+  public void businessAccessSamplingSuppressesSkipEventsAtTheProducer() {
+    ThreadContext context = new ThreadContext(null);
+    Entry entry = EntryTestSupport.entry(0, 6, 0L);
+    entry.policyState(Entry.POLICY_S4_SKIP);
+
+    context.beginBulkRead();
+    for (int index = 0; index < 32; index++) {
+      if ((index & 1) == 0) {
+        context.access(entry);
+      } else {
+        context.bulkHit(entry);
+      }
+    }
+    context.finishBulkRead();
+
+    assertTrue(context.slot.access == null || context.slot.access.isEmpty());
+    assertEquals(context.slot.publishedSkipAccesses, 2L);
   }
 
   @Test

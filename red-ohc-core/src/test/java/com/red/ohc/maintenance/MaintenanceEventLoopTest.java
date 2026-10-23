@@ -245,6 +245,45 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
+  public void lifecycleCollectsUnpublishedSkipCountBeforeDetachingReader() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ReaderRegistry readers = newReaderRegistry(memory);
+    ThreadContext context = new ThreadContext(null);
+    Entry skipped = EntryTestSupport.entry(memory, 0, 90, 0L);
+    skipped.policyState(Entry.POLICY_S4_SKIP);
+    Thread owner =
+        new Thread(
+            () -> {
+              readers.register(context.slot);
+              for (int index = 0; index < 16; index++) {
+                context.access(skipped);
+              }
+            });
+    owner.start();
+    owner.join();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.LRU, readers, Long.MAX_VALUE);
+    try {
+      assertEquals(context.slot.localSkipAccesses, 1L);
+      assertEquals(context.slot.publishedSkipAccesses, 0L);
+
+      Method start = MaintenanceEventLoop.class.getDeclaredMethod("startReaderLifecycleSweep");
+      start.setAccessible(true);
+      start.invoke(loop);
+      Method scan =
+          MaintenanceEventLoop.class.getDeclaredMethod("scanTerminatedReaders", int.class);
+      scan.setAccessible(true);
+      assertEquals(scan.invoke(loop, 256), 1);
+
+      assertEquals(loop.snapshot().skipSuppressedAccessCount, 1L);
+      assertEquals(readerCount(readers), 0);
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void lifecycleScanCountsInspectedReadersAsMaintenanceProgress() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     ReaderRegistry readers = newReaderRegistry(memory);
@@ -2275,6 +2314,34 @@ public class MaintenanceEventLoopTest {
       }
       loop.flush().join();
       assertEquals(loop.snapshot().hits, 1_024L);
+    } finally {
+      loop.stop();
+      loop.join(1_000L);
+      memory.closeArenas();
+    }
+  }
+
+  @Test(timeOut = 2_000L)
+  public void actorCollectsProducerSuppressedSkipAccesses() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ReaderRegistry readers = newReaderRegistry(memory);
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(), memory, Ticker.DEFAULT, 1 << 20, Eviction.S3_FIFO, readers, Long.MAX_VALUE);
+    ThreadContext context = new ThreadContext(null);
+    loop.registerReader(context.slot);
+    MaintenanceTestSupport.start(loop);
+    try {
+      Entry entry = EntryTestSupport.entry(memory, 0, 93, 0L);
+      entry.policyState(Entry.POLICY_S4_SKIP);
+      for (int index = 0; index < 32; index++) {
+        context.access(entry);
+      }
+      context.flushRead();
+      loop.flush().join();
+
+      assertTrue(context.slot.access == null, "Skip samples must not allocate an access ring");
+      assertEquals(loop.snapshot().skipSuppressedAccessCount, 2L);
     } finally {
       loop.stop();
       loop.join(1_000L);

@@ -47,17 +47,14 @@ public final class ThreadContextLifecycleTest {
   }
 
   @Test
-  public void accessRingIsCreatedOnlyWhenSamplingFirstHits() {
+  public void accessRingIsCreatedByTheFirstSamplingPeriod() {
     ThreadContext context = new ThreadContext(null);
     Entry entry = EntryTestSupport.entry(0, 1, 0L);
 
     assertNull(context.slot.access);
-    for (int index = 0; index < 15; index++) {
+    for (int index = 0; index < 16; index++) {
       context.access(entry);
     }
-    assertNull(context.slot.access);
-
-    context.access(entry);
     assertNotNull(context.slot.access);
   }
 

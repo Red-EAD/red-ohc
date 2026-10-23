@@ -2121,7 +2121,8 @@ public final class MaintenanceEventLoop
           }
           if (state != AccessScanState.URGENT
               && (slot.publishedHits != slots.consumedHits(index)
-                  || slot.publishedMisses != slots.consumedMisses(index))) {
+                  || slot.publishedMisses != slots.consumedMisses(index)
+                  || slot.publishedSkipAccesses != slot.consumedSkipAccesses)) {
             state = AccessScanState.PENDING;
           }
         }
@@ -2730,10 +2731,18 @@ public final class MaintenanceEventLoop
       misses += missDelta;
       slots.consumedMisses(index, consumedMisses + missDelta);
     }
+    long publishedSkipAccesses = slot.publishedSkipAccesses;
+    long skipDelta = publishedSkipAccesses - slot.consumedSkipAccesses;
+    if (skipDelta != 0L) {
+      policy.recordSkipSuppressedAccesses(skipDelta);
+      slot.consumedSkipAccesses = publishedSkipAccesses;
+    }
   }
 
   private void collectFinalAccess(
       ReaderRegistry.SlotTableSnapshot slots, int index, ReaderSlot slot) {
+    // The owner is known terminated, so publish any final producer-local Skip count before drain.
+    slot.publishedSkipAccesses = slot.localSkipAccesses;
     collectAccessCounters(slots, index, slot);
     AccessRing access = slot.access;
     if (access != null) {
@@ -2768,6 +2777,9 @@ public final class MaintenanceEventLoop
           pending =
               cappedAccessCount(
                   pending, boundedWorkCount(slot.publishedMisses - slots.consumedMisses(index)));
+          pending =
+              cappedAccessCount(
+                  pending, boundedWorkCount(slot.publishedSkipAccesses - slot.consumedSkipAccesses));
           AccessRing access = slot.access;
           if (access != null) {
             pending = cappedAccessCount(pending, access.size());
@@ -3386,6 +3398,11 @@ public final class MaintenanceEventLoop
                   pendingRecords,
                   boundedWorkCount(
                       Math.max(0L, slot.publishedMisses - slots.consumedMisses(index))));
+          pendingRecords =
+              saturatingIntAdd(
+                  pendingRecords,
+                  boundedWorkCount(
+                      Math.max(0L, slot.publishedSkipAccesses - slot.consumedSkipAccesses)));
           AccessRing access = slot.access;
           if (access != null) {
             int depth = access.size();
