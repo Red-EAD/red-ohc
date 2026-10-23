@@ -15,6 +15,7 @@ public final class KeyHash {
   private static final long P2 = 0x8ebc6af09c88c6e3L;
   private static final long P3 = 0xa0761d6478bd642fL;
   private static final long P4 = 0xc2b2ae3d27d4eb4fL;
+  private static final long Q = 0x9fb21c651e98df25L;
 
   /**
    * Head and tail overlapping reads cover every length; middle bytes fold through a
@@ -63,7 +64,7 @@ public final class KeyHash {
     long x = a ^ m ^ P1 ^ length ^ HASH_SEED;
     long y = b ^ P2;
     long folded = (x * y) ^ Math.multiplyHigh(x, y);
-    return finishHash(folded);
+    return length <= 16 ? finishHash(folded) : foldHash(folded);
   }
 
   private static int hashLong(byte[] bytes, int offset, int length) {
@@ -95,7 +96,15 @@ public final class KeyHash {
     long x = a ^ m1 ^ P1 ^ length ^ HASH_SEED;
     long y = b ^ m2 ^ P2;
     long folded = (x * y) ^ Math.multiplyHigh(x, y);
-    return finishHash(folded);
+    return foldHash(folded);
+  }
+
+  /** Folds the multi-word state with one 128-bit product instead of the Murmur finalizer. */
+  private static int foldHash(long value) {
+    value ^= value >>> 31;
+    value = (value * Q) ^ Math.multiplyHigh(value, Q);
+    int folded = (int) (value ^ (value >>> 32));
+    return folded ^ (folded >>> 16);
   }
 
   private static int finishHash(long value) {
