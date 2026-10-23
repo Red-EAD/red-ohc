@@ -203,6 +203,11 @@ This logical charge excludes value allocator prefixes and page/size-class slack.
 slots. `SizeClasses` chooses pages between 64 KiB and 2 MiB and sends larger blocks
 to direct native allocation. Freed slots and fully empty pages can be reused;
 retained or pooled pages can keep physical allocation above live payload size.
+Periodic maintenance starts an idle-age timer when it observes an empty ready page,
+then trims eligible pages after 30 seconds while keeping two warm empty pages per
+size class. Each turn bounds scanning and releases at most four pages or 8 MiB;
+allocation failure retains a separate emergency path that can drain all ready pages.
+Periodic page release is independent of the cache's logical capacity.
 Page mapping uses anonymous mmap/munmap on Linux/macOS and VirtualAlloc/VirtualFree
 on Windows. Unavailable mapping symbols use the allocator's malloc path.
 
@@ -222,11 +227,12 @@ gaps away from the owner fields. Layout tests check byte ranges at every possibl
 base offset within a 64-byte cache line; heap objects need not be line-aligned.
 This isolation target is Linux/x86-64 with 64-byte cache lines, not a universal
 claim about every processor. The padding belongs to each allocator page descriptor,
-not each cache entry. In local HotSpot Java 11/21 measurements with 12-byte headers
-and 8-byte object alignment, the descriptor grows from 280 to 368 bytes (+88 bytes
-per page). CI reports actual Page and Entry sizes for its JVM configurations;
-different header/pointer/alignment settings can change these sizes. Layout evidence
-does not establish throughput improvement; matched Linux measurements are separate.
+not each cache entry. In the local HotSpot JDK 21 run with 12-byte headers and 8-byte
+object alignment, the descriptor is 376 bytes: 88 bytes of field-isolation padding
+plus the 8-byte idle-trim timestamp over the 280-byte unpadded layout. CI reports
+actual Page and Entry sizes for its JVM configurations; different
+header/pointer/alignment settings can change these sizes. Layout evidence does not
+establish throughput improvement; matched Linux measurements are separate.
 
 ## Scheduling, failure and lifetime
 

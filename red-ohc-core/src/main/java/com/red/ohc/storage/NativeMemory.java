@@ -1,6 +1,7 @@
 package com.red.ohc.storage;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,6 +51,11 @@ public final class NativeMemory {
 
   public static final class Memory {
     private static final long ALIGNMENT_PADDING_BYTES = 128L;
+    private static final int IDLE_TRIM_MAX_RELEASES_PER_TURN = 4;
+    private static final int IDLE_TRIM_MAX_SCANNED_PER_TURN = 64;
+    private static final int IDLE_TRIM_MAX_CANDIDATES_PER_CLASS = 16;
+    private static final int IDLE_TRIM_WARM_PAGES_PER_CLASS = 2;
+    private static final long IDLE_TRIM_MAX_BYTES_PER_TURN = 8L << 20;
     /** Merged-release marker: direct-class record decoded, free deferred to the publish pass. */
     private static final int DIRECT_RELEASE_PENDING = -2;
     private final NativeAllocator allocator;
@@ -67,10 +73,15 @@ public final class NativeMemory {
     private final AtomicLong directEntryAllocations = new AtomicLong();
     private final AtomicInteger nextArenaId = new AtomicInteger(1);
     private final AtomicBoolean trimOwner = new AtomicBoolean();
+    private int idleTrimClassCursor;
+    /** Per-class publication stack; the trimmer scans the other stack as a stable snapshot. */
+    private final AtomicIntegerArray readyActiveStacks =
+        new AtomicIntegerArray(SizeClasses.count());
+    private final int[] idleTrimEmptyKept = new int[SizeClasses.count()];
     private static final int READY_STACK_STRIDE = 8;
     /**
-     * Packed ABA-safe page-id heads; each independently mutated size-class head owns one 64-byte
-     * lane so unrelated page traffic cannot bounce the same cache line.
+     * Packed ABA-safe page-id heads; both stacks for a size class share its 64-byte lane, while
+     * different classes stay isolated from one another.
      */
     private final AtomicLongArray readyPageStacks =
         new AtomicLongArray(SizeClasses.count() * READY_STACK_STRIDE);
@@ -444,18 +455,19 @@ public final class NativeMemory {
     }
 
     private void restoreReadyPage(WriterArena.Page page) {
+      int stack = readyActiveStacks.get(page.sizeClass);
       recordPageReady(page.sizeClass);
       try {
-        pushReadyPage(page);
+        pushReadyPage(page, stack);
       } catch (Throwable failure) {
         pageReadyCounts[page.sizeClass].decrement();
         throw failure;
       }
     }
 
-    private void pushReadyPage(WriterArena.Page page) {
+    private void pushReadyPage(WriterArena.Page page, int stack) {
       int sizeClass = page.sizeClass;
-      int stackIndex = readyStackIndex(sizeClass);
+      int stackIndex = readyStackIndex(sizeClass) + stack;
       while (true) {
         long current = readyPageStacks.get(stackIndex);
         int headId = readyPageId(current);
@@ -467,9 +479,15 @@ public final class NativeMemory {
       }
     }
 
-    /** Pops one token from the per-size-class ABA-safe LIFO stack. */
+    /** Writers take unexamined pages first, then pages already visited by the idle trimmer. */
     private WriterArena.Page popReadyPage(int sizeClass) {
-      int stackIndex = readyStackIndex(sizeClass);
+      int activeStack = readyActiveStacks.get(sizeClass);
+      WriterArena.Page page = popReadyPage(sizeClass, activeStack);
+      return page != null ? page : popReadyPage(sizeClass, activeStack ^ 1);
+    }
+
+    private WriterArena.Page popReadyPage(int sizeClass, int stack) {
+      int stackIndex = readyStackIndex(sizeClass) + stack;
       while (true) {
         long current = readyPageStacks.get(stackIndex);
         int headId = readyPageId(current);
@@ -1087,6 +1105,92 @@ public final class NativeMemory {
       for (LongAdder count : pageReadyCounts) {
         count.reset();
       }
+      for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
+        readyActiveStacks.set(sizeClass, 0);
+      }
+      Arrays.fill(idleTrimEmptyKept, 0);
+    }
+
+    /** Bounded age-based release, independent of the cache's logical capacity. */
+    public long trimIdlePages(long nowNanos) {
+      if (!trimOwner.compareAndSet(false, true)) {
+        return 0L;
+      }
+      long bytes = 0L;
+      int released = 0;
+      int scanned = 0;
+      try {
+        for (int visited = 0;
+            visited < SizeClasses.count()
+                && released < IDLE_TRIM_MAX_RELEASES_PER_TURN
+                && scanned < IDLE_TRIM_MAX_SCANNED_PER_TURN;
+            visited++) {
+          int sizeClass = idleTrimClassCursor;
+          idleTrimClassCursor = (idleTrimClassCursor + 1) % SizeClasses.count();
+          long readyCount = Math.max(0L, pageReadyCounts[sizeClass].sum());
+          if (readyCount == 0L) {
+            continue;
+          }
+          int activeStack = readyActiveStacks.get(sizeClass);
+          int scanStack = activeStack ^ 1;
+          if (readyPageId(readyPageStacks.get(readyStackIndex(sizeClass) + scanStack)) == 0) {
+            // Start a scan immediately when the inactive snapshot is empty. Publications now
+            // target the empty stack while this turn drains the previous active stack.
+            readyActiveStacks.set(sizeClass, scanStack);
+            scanStack = activeStack;
+            idleTrimEmptyKept[sizeClass] = 0;
+          }
+          long candidates = Math.min(IDLE_TRIM_MAX_CANDIDATES_PER_CLASS, readyCount);
+          for (int candidate = 0;
+              candidate < candidates
+                  && released < IDLE_TRIM_MAX_RELEASES_PER_TURN
+                  && scanned < IDLE_TRIM_MAX_SCANNED_PER_TURN;
+              candidate++) {
+            WriterArena.Page page = popReadyPage(sizeClass, scanStack);
+            if (page == null) {
+              break;
+            }
+            scanned++;
+            if (!isCurrentPage(page)) {
+              continue;
+            }
+            boolean consumed = false;
+            try {
+              boolean empty = page.emptyForTrim();
+              boolean oldEnough = page.idleForTrim(nowNanos, empty);
+              boolean reserve =
+                  empty && idleTrimEmptyKept[sizeClass] < IDLE_TRIM_WARM_PAGES_PER_CLASS;
+              if (reserve) {
+                idleTrimEmptyKept[sizeClass]++;
+              }
+              if (!reserve
+                  && oldEnough
+                  && bytes + page.pageBytes <= IDLE_TRIM_MAX_BYTES_PER_TURN
+                  && page.beginTrimming()
+                  && freeEntryPage(page, false)) {
+                consumed = true;
+                released++;
+                bytes += page.pageBytes;
+                pageTrimmedCount.incrementAndGet();
+                trimmedBytesTotal.addAndGet(page.pageBytes);
+              }
+            } finally {
+              if (!consumed) {
+                restoreReadyPage(page);
+              }
+            }
+          }
+          if (readyPageId(readyPageStacks.get(readyStackIndex(sizeClass) + scanStack)) == 0) {
+            // New publications always target the active stack, so they cannot hold this scan
+            // snapshot open. Once drained, swap roles and inspect the previously active stack.
+            readyActiveStacks.set(sizeClass, scanStack);
+            idleTrimEmptyKept[sizeClass] = 0;
+          }
+        }
+      } finally {
+        trimOwner.set(false);
+      }
+      return bytes;
     }
 
     /** Allocation-failure cold path. Exactly one caller drains each ready LIFO once. */

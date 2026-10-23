@@ -1175,33 +1175,24 @@ public final class MaintenanceEventLoop
       requestWork(WORK_CLOCK);
     }
     sampleRetirementRates();
-    trimReadyPagesWhenOverCapacity();
+    trimIdleReadyPages();
     sealIdleArenaRetention();
     return work;
   }
 
   private static final long READY_TRIM_CHECK_INTERVAL_NANOS = 1_000_000_000L;
-  private static final long READY_TRIM_BACKOFF_NANOS = 10_000_000_000L;
   private long nextReadyTrimCheckNanos;
 
-  /** Returns fully-empty ready pages to the allocator once native use exceeds the byte capacity. */
-  private void trimReadyPagesWhenOverCapacity() {
+  /** Periodically releases idle ready pages while preserving logical allocation headroom. */
+  private void trimIdleReadyPages() {
     long now = sampleMonotonicNow();
     if (now < nextReadyTrimCheckNanos) {
       return;
     }
-    LogicalAdmission admission = logicalAdmission;
-    if (admission == null || admission.isCountBounded()) {
-      nextReadyTrimCheckNanos = now + READY_TRIM_BACKOFF_NANOS;
-      return;
+    if (memory.pageReadyCount() != 0L) {
+      memory.trimIdlePages(now);
     }
-    if (memory.allocated() <= capacity || memory.pageReadyCount() == 0L) {
-      nextReadyTrimCheckNanos = now + READY_TRIM_CHECK_INTERVAL_NANOS;
-      return;
-    }
-    long trimmedBytes = memory.trimAvailablePages();
-    nextReadyTrimCheckNanos =
-        now + (trimmedBytes > 0L ? READY_TRIM_CHECK_INTERVAL_NANOS : READY_TRIM_BACKOFF_NANOS);
+    nextReadyTrimCheckNanos = now + READY_TRIM_CHECK_INTERVAL_NANOS;
   }
 
   private static final long IDLE_RETENTION_SEAL_NANOS = 60_000_000_000L;

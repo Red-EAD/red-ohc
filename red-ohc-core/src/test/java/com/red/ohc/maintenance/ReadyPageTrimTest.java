@@ -16,7 +16,7 @@ import com.red.ohc.storage.WriterArena;
 
 public final class ReadyPageTrimTest {
   @Test
-  public void overCapacityReturnsEmptyReadyPagesToTheAllocator() throws Exception {
+  public void overCapacityKeepsWarmEmptyReadyPages() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     try (Fixture fixture = new Fixture(memory, 1 << 10)) {
       assertEquals(memory.pageReadyCount(), 1L);
@@ -24,9 +24,9 @@ public final class ReadyPageTrimTest {
 
       fixture.trim();
 
-      assertEquals(memory.pageTrimmedCount(), 1L);
-      assertEquals(memory.pageReadyCount(), 0L);
-      assertTrue(memory.trimmedBytesTotal() > 0L);
+      assertEquals(memory.pageTrimmedCount(), 0L);
+      assertEquals(memory.pageReadyCount(), 1L);
+      assertEquals(memory.trimmedBytesTotal(), 0L);
 
       long after = fixture.arena.allocate(112L);
       assertTrue(after != 0L, "allocation must work after the trim");
@@ -74,7 +74,7 @@ public final class ReadyPageTrimTest {
       memory.releaseEntry(first, 32_700L);
       assertEquals(memory.pageReadyCount(), 1L);
 
-      Method trim = MaintenanceEventLoop.class.getDeclaredMethod("trimReadyPagesWhenOverCapacity");
+      Method trim = MaintenanceEventLoop.class.getDeclaredMethod("trimIdleReadyPages");
       trim.setAccessible(true);
       trim.invoke(loop);
 
@@ -114,7 +114,7 @@ public final class ReadyPageTrimTest {
       arena.detach();
       memory.releaseEntry(first, 32_700L);
       memory.releaseEntry(second, 32_700L);
-      trim = MaintenanceEventLoop.class.getDeclaredMethod("trimReadyPagesWhenOverCapacity");
+      trim = MaintenanceEventLoop.class.getDeclaredMethod("trimIdleReadyPages");
       trim.setAccessible(true);
     }
 
