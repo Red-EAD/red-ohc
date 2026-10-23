@@ -2372,11 +2372,11 @@ public final class MaintenanceEventLoop
       // Clear stale advisory queue/retry bits before the key block is retired; otherwise a later
       // stale queue node can keep EntryLinks alive forever.
       writerRemovalRecord.entry.clearStalePendingFlags();
+      releaseLinksBeforeKeyRetirement(writerRemovalRecord.entry);
       retireActorValueBlock(writerRemovalRecord.valueAddress, writerRemovalRecord.allocation);
       retireActorValue(
           writerRemovalRecord.entry.nativeKeyAddress,
           writerRemovalRecord.entry.nativeKeyAllocationLength());
-      links.maybeRelease(writerRemovalRecord.entry);
     } else if (writerRemovalRecord.operation == WriterLifecycleLane.MUTATION
         && writerRemovalRecord.entry != null) {
       processEntry(
@@ -3018,11 +3018,18 @@ public final class MaintenanceEventLoop
   }
 
   private void retireEntryBlocks(Entry entry, long value) {
+    releaseLinksBeforeKeyRetirement(entry);
     long valueAllocation = value == 0L ? 0L : ValueBlock.allocationLength(ValueBlock.length(value));
     retireActorValueBlock(value, valueAllocation);
     long keyAllocation = entry.nativeKeyAllocationLength();
     retireActorValue(entry.nativeKeyAddress, keyAllocation);
+  }
+
+  private void releaseLinksBeforeKeyRetirement(Entry entry) {
     links.maybeRelease(entry);
+    if (entry.policyLinkId() != 0) {
+      throw new IllegalStateException("cannot retire a key with active maintenance links");
+    }
   }
 
   /** Records a low-frequency writer-side replacement sample at pointer publication time. */

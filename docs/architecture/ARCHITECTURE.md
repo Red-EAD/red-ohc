@@ -156,7 +156,10 @@ progress before reusing segments. A stalled protected reader can retain retired
 memory, but the actor uses retry deadlines and notifications to park instead of
 continually spinning. An expired reader-blocked retry runs one bounded pass to
 re-arm reader notifications and advance the backoff deadline; it never releases
-blocks that remain protected. Sources: [`ReaderRegistry`](../../red-ohc-core/src/main/java/com/red/ohc/runtime/ReaderRegistry.java),
+blocks that remain protected. Before scheduling a retired key block, the actor
+releases its policy and timer link record and verifies that no link remains; a
+recycled link id cannot outlive the native key identity it names. Sources:
+[`ReaderRegistry`](../../red-ohc-core/src/main/java/com/red/ohc/runtime/ReaderRegistry.java),
 [`RetirementJournal`](../../red-ohc-core/src/main/java/com/red/ohc/maintenance/RetirementJournal.java)
 and [`RetirementSegment`](../../red-ohc-core/src/main/java/com/red/ohc/maintenance/RetirementSegment.java).
 

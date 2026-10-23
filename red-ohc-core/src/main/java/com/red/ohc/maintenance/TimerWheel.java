@@ -92,7 +92,7 @@ public final class TimerWheel implements AutoCloseable {
   }
 
   boolean hasPendingExpiry() {
-    return pendingExpirySlot >= 0 || tickPhase == PHASE_EXPIRE_L0;
+    return pendingExpirySlot >= 0 || tickPhase != PHASE_IDLE;
   }
 
   /**

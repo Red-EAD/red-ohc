@@ -175,6 +175,113 @@ public class TimerWheelTest {
   }
 
   @Test
+  public void higherCascadesAndOverflowPromotionShareTheWorkLimit() throws Exception {
+    for (long targetTick : new long[] {65_536L, 4_194_304L, 134_217_728L}) {
+      TimerWheel wheel = new TimerWheel(0L);
+      try {
+        Entry[] entries = new Entry[8];
+        int[] locations = new int[entries.length];
+        for (int index = 0; index < entries.length; index++) {
+          entries[index] = EntryTestSupport.entry(0, index + 41_000, 0L);
+          wheel.add(entries[index], targetTick * TimerWheel.TICK_NANOS);
+          locations[index] = entries[index].timerInOverflowHeap()
+              ? -1
+              : entries[index].timerLocation();
+        }
+        Field tick = TimerWheel.class.getDeclaredField("tick");
+        tick.setAccessible(true);
+        tick.setLong(wheel, targetTick - 1L);
+        wheel.advance(
+            targetTick * TimerWheel.TICK_NANOS, 1, (entry, generation, address) -> {});
+        int moved = 0;
+        for (int index = 0; index < entries.length; index++) {
+          int location = entries[index].timerInOverflowHeap()
+              ? -1
+              : entries[index].timerLocation();
+          if (location != locations[index]) {
+            moved++;
+          }
+        }
+        assertEquals(moved, 1, "one work unit must move only one timer node");
+        assertEquals(wheel.scheduled(), 8L);
+        assertTrue(wheel.hasPendingExpiry());
+        assertEquals(wheel.nextWakeTick(), targetTick);
+        for (int pass = 0; pass < 32 && wheel.hasPending(); pass++) {
+          assertTrue(
+              wheel.advance(targetTick * TimerWheel.TICK_NANOS, 1,
+                  (entry, generation, address) -> {})
+                  <= 1);
+        }
+        assertEquals(wheel.scheduled(), 0L);
+      } finally {
+        wheel.close();
+      }
+    }
+  }
+
+  @Test
+  public void extendingDuringPartialCascadeAcrossTheLevelCycleDoesNotReenterTheBucket() {
+    for (long extendedTick : new long[] {66_559L, 66_560L}) {
+      TimerWheel wheel = new TimerWheel(0L);
+      long deadline = 1_024L * TimerWheel.TICK_NANOS;
+      try {
+        Entry[] entries = new Entry[4];
+        for (int index = 0; index < entries.length; index++) {
+          entries[index] = EntryTestSupport.entry(0, index + 43_000, 0L);
+          wheel.add(entries[index], deadline);
+        }
+        wheel.advance(deadline, 1, (entry, generation, address) -> {});
+        wheel.reschedule(entries[1], extendedTick * TimerWheel.TICK_NANOS);
+        for (int pass = 0; pass < 32; pass++) {
+          assertTrue(
+              wheel.advance(deadline, 1, (entry, generation, address) -> {}) <= 1);
+        }
+        assertEquals(wheel.scheduled(), 1L);
+        assertFalse(wheel.hasPendingExpiry(), "the previous tick must finish after extension");
+        assertTrue(wheel.nextWakeTick() > 1_024L);
+      } finally {
+        wheel.close();
+      }
+    }
+  }
+
+  @Test
+  public void pendingCascadeRemainsRemovableAndReschedulable() {
+    TimerWheel wheel = new TimerWheel(0L);
+    Entry[] entries = new Entry[8];
+    long deadline = 1_024L * TimerWheel.TICK_NANOS;
+    try {
+      for (int index = 0; index < entries.length; index++) {
+        entries[index] = EntryTestSupport.entry(0, index + 42_000, 0L);
+        wheel.add(entries[index], deadline);
+      }
+      wheel.advance(deadline, 1, (entry, generation, address) -> {});
+      wheel.remove(entries[0]);
+      wheel.reschedule(entries[1], deadline + TimerWheel.TICK_NANOS);
+      assertTrue(entries[1].timerScheduled());
+      assertEquals(entries[1].timerDeadlineTick(), 1_025L);
+      for (int pass = 0; pass < 32; pass++) {
+        assertTrue(wheel.advance(deadline, 1, (entry, generation, address) -> {}) <= 1);
+      }
+      assertEquals(
+          wheel.scheduled(),
+          1L,
+          "rescheduled deadline="
+              + entries[1].timerDeadlineTick()
+              + ", location="
+              + entries[1].timerLocation()
+              + ", scheduled="
+              + entries[1].timerScheduled());
+      assertTrue(entries[1].timerScheduled());
+      assertFalse(entries[0].timerScheduled());
+      wheel.advance(deadline + TimerWheel.TICK_NANOS, 1, (entry, generation, address) -> {});
+      assertEquals(wheel.scheduled(), 0L);
+    } finally {
+      wheel.close();
+    }
+  }
+
+  @Test
   public void overflowPromotionIsBoundedAcrossActorTurns() {
     long deadlineTick = 140_000_000L;
     long promotionTick = deadlineTick - 134_217_728L + 1L;
