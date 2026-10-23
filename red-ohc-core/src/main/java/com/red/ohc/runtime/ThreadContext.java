@@ -817,8 +817,6 @@ public final class ThreadContext {
               new IdentityHashMap<>(Math.min(expected, MAX_REUSABLE_BULK_KEYS)));
       bulkEntrySets[depth] = entries;
       bulkEntrySetCapacities[depth] = reusable ? expected : 0;
-    } else {
-      entries.clear();
     }
     reusableBulkEntrySets[depth] = reusable;
     return entries;

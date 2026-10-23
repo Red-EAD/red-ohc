@@ -12,15 +12,48 @@ import com.red.ohc.storage.NativeMemory;
 /** Internal non-owning {@link ByteBuffer} views over cache-owned native memory. */
 final class NativeByteBuffer {
   private static final Unsafe UNSAFE = NativeMemory.unsafe();
-  private static final Layout LAYOUT = Layout.detect();
   private static final Object VIEW_MARKER = new Object();
+  private static final boolean SUPPORTED;
+  private static final Throwable FAILURE;
+  private static final Class<?> DIRECT_CLASS;
+  private static final Class<?> READ_ONLY_CLASS;
+  private static final long MARK_OFFSET;
+  private static final long POSITION_OFFSET;
+  private static final long LIMIT_OFFSET;
+  private static final long CAPACITY_OFFSET;
+  private static final long ADDRESS_OFFSET;
+  private static final long HEAP_BUFFER_OFFSET;
+  private static final long OFFSET_OFFSET;
+  private static final long READ_ONLY_OFFSET;
+  private static final long BIG_ENDIAN_OFFSET;
+  private static final long NATIVE_BYTE_ORDER_OFFSET;
+  private static final long ATTACHMENT_OFFSET;
+
+  static {
+    Layout layout = Layout.detect();
+    SUPPORTED = layout.supported;
+    FAILURE = layout.failure;
+    DIRECT_CLASS = layout.directClass;
+    READ_ONLY_CLASS = layout.readOnlyClass;
+    MARK_OFFSET = layout.markOffset;
+    POSITION_OFFSET = layout.positionOffset;
+    LIMIT_OFFSET = layout.limitOffset;
+    CAPACITY_OFFSET = layout.capacityOffset;
+    ADDRESS_OFFSET = layout.addressOffset;
+    HEAP_BUFFER_OFFSET = layout.heapBufferOffset;
+    OFFSET_OFFSET = layout.offsetOffset;
+    READ_ONLY_OFFSET = layout.readOnlyOffset;
+    BIG_ENDIAN_OFFSET = layout.bigEndianOffset;
+    NATIVE_BYTE_ORDER_OFFSET = layout.nativeByteOrderOffset;
+    ATTACHMENT_OFFSET = layout.attachmentOffset;
+  }
 
   private NativeByteBuffer() {}
 
   static void verifySupported() {
-    if (!LAYOUT.supported) {
+    if (!SUPPORTED) {
       throw new UnsupportedOperationException(
-          "native-backed ByteBuffer is unsupported by this JDK", LAYOUT.failure);
+          "native-backed ByteBuffer is unsupported by this JDK", FAILURE);
     }
   }
 
@@ -36,7 +69,7 @@ final class NativeByteBuffer {
   static ByteBuffer writable(ByteBuffer buffer, long address, int length) {
     verifySupported();
     Objects.requireNonNull(buffer, "buffer");
-    requireOwned(buffer, LAYOUT.directClass, "buffer is not a writable native view");
+    requireOwned(buffer, DIRECT_CLASS, "buffer is not a writable native view");
     validateAddress(address, length);
     initialize(buffer, address, length, false);
     return buffer;
@@ -47,14 +80,14 @@ final class NativeByteBuffer {
     // The shell was created by writable() and is reachable only from its owning ThreadContext.
     // Keep validation and allocation out of this path, but restore mutable Buffer state that a
     // caller may have changed before the previous lease was invalidated.
-    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.limitOffset, length);
-    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, length);
-    UNSAFE.putLong(buffer, LAYOUT.addressOffset, address);
-    UNSAFE.putBoolean(buffer, LAYOUT.bigEndianOffset, true);
+    UNSAFE.putInt(buffer, POSITION_OFFSET, 0);
+    UNSAFE.putInt(buffer, LIMIT_OFFSET, length);
+    UNSAFE.putInt(buffer, CAPACITY_OFFSET, length);
+    UNSAFE.putLong(buffer, ADDRESS_OFFSET, address);
+    UNSAFE.putBoolean(buffer, BIG_ENDIAN_OFFSET, true);
     UNSAFE.putBoolean(
         buffer,
-        LAYOUT.nativeByteOrderOffset,
+        NATIVE_BYTE_ORDER_OFFSET,
         ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN);
     return buffer;
   }
@@ -63,7 +96,7 @@ final class NativeByteBuffer {
   static ByteBuffer readOnly(ByteBuffer buffer, long address, int length) {
     verifySupported();
     Objects.requireNonNull(buffer, "buffer");
-    requireOwned(buffer, LAYOUT.readOnlyClass, "buffer is not a read-only native view");
+    requireOwned(buffer, READ_ONLY_CLASS, "buffer is not a read-only native view");
     validateAddress(address, length);
     initialize(buffer, address, length, true);
     return buffer;
@@ -74,14 +107,14 @@ final class NativeByteBuffer {
     // The shell was created by readOnly() and is reachable only from its owning ThreadContext.
     // Keep validation and allocation out of this path, but restore mutable Buffer state that a
     // caller may have changed before the previous lease was invalidated.
-    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.limitOffset, length);
-    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, length);
-    UNSAFE.putLong(buffer, LAYOUT.addressOffset, address);
-    UNSAFE.putBoolean(buffer, LAYOUT.bigEndianOffset, true);
+    UNSAFE.putInt(buffer, POSITION_OFFSET, 0);
+    UNSAFE.putInt(buffer, LIMIT_OFFSET, length);
+    UNSAFE.putInt(buffer, CAPACITY_OFFSET, length);
+    UNSAFE.putLong(buffer, ADDRESS_OFFSET, address);
+    UNSAFE.putBoolean(buffer, BIG_ENDIAN_OFFSET, true);
     UNSAFE.putBoolean(
         buffer,
-        LAYOUT.nativeByteOrderOffset,
+        NATIVE_BYTE_ORDER_OFFSET,
         ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN);
     return buffer;
   }
@@ -91,28 +124,28 @@ final class NativeByteBuffer {
     Objects.requireNonNull(buffer, "buffer");
     verifySupported();
     requireOwned(buffer, null, "buffer is not an OHC native view");
-    UNSAFE.putInt(buffer, LAYOUT.markOffset, -1);
-    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.limitOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, 0);
-    UNSAFE.putLong(buffer, LAYOUT.addressOffset, 0L);
+    UNSAFE.putInt(buffer, MARK_OFFSET, -1);
+    UNSAFE.putInt(buffer, POSITION_OFFSET, 0);
+    UNSAFE.putInt(buffer, LIMIT_OFFSET, 0);
+    UNSAFE.putInt(buffer, CAPACITY_OFFSET, 0);
+    UNSAFE.putLong(buffer, ADDRESS_OFFSET, 0L);
   }
 
   /** Invalidates a shell whose ownership was established by ThreadContext. */
   static void invalidateTrusted(ByteBuffer buffer) {
-    UNSAFE.putInt(buffer, LAYOUT.markOffset, -1);
-    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.limitOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, 0);
-    UNSAFE.putLong(buffer, LAYOUT.addressOffset, 0L);
+    UNSAFE.putInt(buffer, MARK_OFFSET, -1);
+    UNSAFE.putInt(buffer, POSITION_OFFSET, 0);
+    UNSAFE.putInt(buffer, LIMIT_OFFSET, 0);
+    UNSAFE.putInt(buffer, CAPACITY_OFFSET, 0);
+    UNSAFE.putLong(buffer, ADDRESS_OFFSET, 0L);
   }
 
   private static void requireOwned(ByteBuffer buffer, Class<?> expectedClass, String message) {
     if ((expectedClass != null && buffer.getClass() != expectedClass)
         || (expectedClass == null
-            && buffer.getClass() != LAYOUT.directClass
-            && buffer.getClass() != LAYOUT.readOnlyClass)
-        || UNSAFE.getObject(buffer, LAYOUT.attachmentOffset) != VIEW_MARKER) {
+            && buffer.getClass() != DIRECT_CLASS
+            && buffer.getClass() != READ_ONLY_CLASS)
+        || UNSAFE.getObject(buffer, ATTACHMENT_OFFSET) != VIEW_MARKER) {
       throw new IllegalArgumentException(message);
     }
   }
@@ -122,7 +155,7 @@ final class NativeByteBuffer {
     validateAddress(address, length);
     try {
       Object buffer =
-          UNSAFE.allocateInstance(readOnly ? LAYOUT.readOnlyClass : LAYOUT.directClass);
+          UNSAFE.allocateInstance(readOnly ? READ_ONLY_CLASS : DIRECT_CLASS);
       initialize(buffer, address, length, readOnly);
       return (ByteBuffer) buffer;
     } catch (InstantiationException failure) {
@@ -140,19 +173,19 @@ final class NativeByteBuffer {
   }
 
   private static void initialize(Object buffer, long address, int length, boolean readOnly) {
-    UNSAFE.putInt(buffer, LAYOUT.markOffset, -1);
-    UNSAFE.putInt(buffer, LAYOUT.positionOffset, 0);
-    UNSAFE.putInt(buffer, LAYOUT.limitOffset, length);
-    UNSAFE.putInt(buffer, LAYOUT.capacityOffset, length);
-    UNSAFE.putLong(buffer, LAYOUT.addressOffset, address);
-    UNSAFE.putObject(buffer, LAYOUT.heapBufferOffset, null);
-    UNSAFE.putInt(buffer, LAYOUT.offsetOffset, 0);
-    UNSAFE.putObject(buffer, LAYOUT.attachmentOffset, VIEW_MARKER);
-    UNSAFE.putBoolean(buffer, LAYOUT.readOnlyOffset, readOnly);
-    UNSAFE.putBoolean(buffer, LAYOUT.bigEndianOffset, true);
+    UNSAFE.putInt(buffer, MARK_OFFSET, -1);
+    UNSAFE.putInt(buffer, POSITION_OFFSET, 0);
+    UNSAFE.putInt(buffer, LIMIT_OFFSET, length);
+    UNSAFE.putInt(buffer, CAPACITY_OFFSET, length);
+    UNSAFE.putLong(buffer, ADDRESS_OFFSET, address);
+    UNSAFE.putObject(buffer, HEAP_BUFFER_OFFSET, null);
+    UNSAFE.putInt(buffer, OFFSET_OFFSET, 0);
+    UNSAFE.putObject(buffer, ATTACHMENT_OFFSET, VIEW_MARKER);
+    UNSAFE.putBoolean(buffer, READ_ONLY_OFFSET, readOnly);
+    UNSAFE.putBoolean(buffer, BIG_ENDIAN_OFFSET, true);
     UNSAFE.putBoolean(
         buffer,
-        LAYOUT.nativeByteOrderOffset,
+        NATIVE_BYTE_ORDER_OFFSET,
         ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN);
   }
 

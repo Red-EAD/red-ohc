@@ -7,7 +7,18 @@ import java.lang.reflect.Method;
 
 import org.testng.annotations.Test;
 
+import com.red.ohc.api.Eviction;
+
 public class FrequencySketchTest {
+  @Test
+  public void countBoundedPolicyPlansTheSketchFromItsEntryLimit() {
+    try (MaintenancePolicy policy =
+        new MaintenancePolicy(Eviction.W_TINY_LFU, 1_000_000L, true)) {
+      assertEquals(policy.sketchBytes(), new FrequencySketch(1_000_000L).bytes());
+      assertEquals(policy.sampleSize(), 10_000_000L);
+    }
+  }
+
   @Test
   public void countersAreFourBitAndSaturateAtFifteen() {
     FrequencySketch sketch = new FrequencySketch();
