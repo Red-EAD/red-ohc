@@ -6,7 +6,7 @@ import com.red.ohc.storage.CacheMath;
 import com.red.ohc.storage.NativeMemory;
 
 /** The one Java metadata object stored in the authoritative CHM as both key and value. */
-public final class Entry {
+public class Entry {
   private static final long VALUE_TAG_MASK = 7L;
   private static final long VALUE_HAS_TTL = 1L;
   private static final long VALUE_RETIRED = 1L << 1;
@@ -87,6 +87,11 @@ public final class Entry {
 
   /** Immutable 32-bit key hash stored in the native prefix at +48; 0 without a native block. */
   public int keyHash() {
+    return nativeKeyAddress == 0L ? 0 : NativeMemory.getInt(nativeKeyAddress - 16L);
+  }
+
+  /** Reads the immutable key hash for a native maintenance identity. */
+  public static int keyHashAt(long nativeKeyAddress) {
     return nativeKeyAddress == 0L ? 0 : NativeMemory.getInt(nativeKeyAddress - 16L);
   }
 
@@ -488,8 +493,20 @@ public final class Entry {
     return NativeMemory.getLongVolatile(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET);
   }
 
+  /** Reads timer metadata for a maintenance link whose Entry is resolved through the CHM. */
+  public static long timerDeadlineTickAt(long nativeKeyAddress) {
+    return NativeMemory.getLongVolatile(
+        nativeKeyAddress - NATIVE_METADATA_BYTES + TIMER_DEADLINE_OFFSET);
+  }
+
   public void timerDeadlineTick(long tick) {
     NativeMemory.putLongRelease(nativeMetadataAddress() + TIMER_DEADLINE_OFFSET, tick);
+  }
+
+  /** Publishes timer metadata for a maintenance link whose Entry is resolved through the CHM. */
+  public static void timerDeadlineTickAt(long nativeKeyAddress, long tick) {
+    NativeMemory.putLongRelease(
+        nativeKeyAddress - NATIVE_METADATA_BYTES + TIMER_DEADLINE_OFFSET, tick);
   }
 
   /** Actor-owned packed timer location; exposed for one-snapshot maintenance paths. */
@@ -497,9 +514,21 @@ public final class Entry {
     return NativeMemory.getIntVolatile(nativeMetadataAddress() + TIMER_LOCATION_OFFSET);
   }
 
+  /** Reads timer metadata for a maintenance link whose Entry is resolved through the CHM. */
+  public static int timerLocationAt(long nativeKeyAddress) {
+    return NativeMemory.getIntVolatile(
+        nativeKeyAddress - NATIVE_METADATA_BYTES + TIMER_LOCATION_OFFSET);
+  }
+
   /** Publishes an already encoded timer location. */
   public void timerLocation(int location) {
     NativeMemory.putIntVolatile(nativeMetadataAddress() + TIMER_LOCATION_OFFSET, location);
+  }
+
+  /** Publishes timer metadata for a maintenance link whose Entry is resolved through the CHM. */
+  public static void timerLocationAt(long nativeKeyAddress, int location) {
+    NativeMemory.putIntVolatile(
+        nativeKeyAddress - NATIVE_METADATA_BYTES + TIMER_LOCATION_OFFSET, location);
   }
 
   /** Publishes a normal timer location with one volatile write. */

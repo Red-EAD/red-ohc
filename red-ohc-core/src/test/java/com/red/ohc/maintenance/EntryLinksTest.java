@@ -7,6 +7,8 @@ import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.testng.annotations.Test;
 
@@ -15,6 +17,57 @@ import com.red.ohc.index.EntryTestSupport;
 import com.red.ohc.storage.NativeMemory;
 
 public final class EntryLinksTest {
+  @Test
+  public void nativeLinkIndexDoesNotRetainAnEntryRegistry() {
+    assertFalse(
+        Arrays.stream(EntryLinks.class.getDeclaredFields())
+            .anyMatch(
+                field ->
+                    field.getType().isArray()
+                        && field.getType().getComponentType() == Entry.class),
+        "the actor link index must retain native identities instead of Entry references");
+  }
+
+  @Test
+  public void nativeIdentityResolvesOnlyThroughTheAuthoritativeMap() {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ConcurrentHashMap<Entry, Entry> data = new ConcurrentHashMap<>();
+    Entry entry = EntryTestSupport.entry(memory, 1, 53, 0x5353L, 0L);
+    data.put(entry, entry);
+    EntryLinks links = new EntryLinks(memory, data);
+    try {
+      int id = links.ensure(entry);
+
+      assertTrue(links.entry(id) == entry);
+      data.remove(entry, entry);
+      assertNull(links.entry(id), "a native identity cannot outlive CHM ownership");
+    } finally {
+      links.close();
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void ensureSurvivesAnEntryRemovedBeforeActorLinksIt() {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    ConcurrentHashMap<Entry, Entry> data = new ConcurrentHashMap<>();
+    Entry entry = EntryTestSupport.entry(memory, 1, 54, 0x5454L, 0L);
+    EntryLinks links = new EntryLinks(memory, data);
+    try {
+      data.put(entry, entry);
+      data.remove(entry, entry);
+      int id = links.ensure(entry);
+
+      assertTrue(id != 0);
+      assertNull(links.entry(id), "unmapped native identities must not resolve to an Entry");
+      links.maybeRelease(entry);
+      assertEquals(links.activeLinkCount(), 0);
+    } finally {
+      links.close();
+      memory.closeArenas();
+    }
+  }
+
   @Test
   public void nativeRecordsAreDenseAndRegistryIdsAreReused() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
@@ -164,8 +217,8 @@ public final class EntryLinksTest {
   public void policyMetadataMirrorSurvivesPackedLinkUpdates() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);
-    Entry first = EntryTestSupport.entry(memory, 1, 21, 0L, 0L);
-    Entry second = EntryTestSupport.entry(memory, 1, 22, 0L, 0L);
+    Entry first = EntryTestSupport.entry(memory, 1, 21, 0x21L, 0L);
+    Entry second = EntryTestSupport.entry(memory, 1, 22, 0x22L, 0L);
     try {
       int firstId = links.ensure(first);
       int secondId = links.ensure(second);

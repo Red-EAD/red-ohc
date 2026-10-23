@@ -1655,9 +1655,10 @@ public class MaintenanceEventLoopTest {
   public void accessScanRejectsAnOldGenerationEvenWhenTheValueAddressIsUnchanged()
       throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
+    ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(),
+            data,
             memory,
             Ticker.DEFAULT,
             1_000L,
@@ -1665,6 +1666,7 @@ public class MaintenanceEventLoopTest {
             newReaderRegistry(memory),
             Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 90, 0L);
+    data.put(entry, entry);
     ((MaintenancePolicy) getField(loop, "policy")).add(entry);
     try {
       loop.accept(entry, 0L, 0L, Entry.POLICY_S3_SMALL);
@@ -1687,9 +1689,10 @@ public class MaintenanceEventLoopTest {
   @Test
   public void accessScanUsesThePolicyStateCapturedAtHitTime() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
+    ConcurrentHashMap<Entry, Entry> data = index();
     MaintenanceEventLoop loop =
         new MaintenanceEventLoop(
-            index(),
+            data,
             memory,
             Ticker.DEFAULT,
             4_000L,
@@ -1697,9 +1700,11 @@ public class MaintenanceEventLoopTest {
             newReaderRegistry(memory),
             Long.MAX_VALUE);
     Entry entry = EntryTestSupport.entry(memory, 0, 91, 0L);
+    data.put(entry, entry);
     MaintenancePolicy policy = (MaintenancePolicy) getField(loop, "policy");
     policy.add(entry);
     Entry trigger = EntryTestSupport.entry(memory, 0, 92, 0L);
+    data.put(trigger, trigger);
     policy.add(trigger);
     try {
       loop.accept(entry, 0L, 0L, Entry.POLICY_S4_SKIP);

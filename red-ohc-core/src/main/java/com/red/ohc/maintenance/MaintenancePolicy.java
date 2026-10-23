@@ -53,7 +53,7 @@ public final class MaintenancePolicy implements AutoCloseable {
   private long liveBytes;
   private long smallWeight;
   private long smallSkipWeight;
-  private Entry smallSkipTail;
+  private int smallSkipTail;
   private long mainWeight;
   private long windowWeight;
   private long probationWeight;
@@ -69,7 +69,7 @@ public final class MaintenancePolicy implements AutoCloseable {
   private double hillStep;
 
   /** First Window entry moved to probation and not yet processed by main admission. */
-  private Entry tinyCandidate;
+  private int tinyCandidate;
 
   private long admissionSequence;
   private final Selection selection = new Selection();
@@ -195,7 +195,7 @@ public final class MaintenancePolicy implements AutoCloseable {
    */
   void beginWriteBatch() {
     if (eviction == Eviction.W_TINY_LFU) {
-      tinyCandidate = null;
+      tinyCandidate = 0;
     }
   }
 
@@ -324,8 +324,9 @@ public final class MaintenancePolicy implements AutoCloseable {
         lastVictimScanCount = 1;
         return tinyLfuVictim();
       default:
-        lastVictimScanCount = lru.tail == null ? 0 : 1;
-        return lru.tail == null ? selection.none() : selection.entry(lru.tail);
+        Entry candidate = lru.tailEntry();
+        lastVictimScanCount = lru.tailId == 0 ? 0 : 1;
+        return candidate == null ? selection.none() : selection.entry(candidate);
     }
   }
 
@@ -429,8 +430,10 @@ public final class MaintenancePolicy implements AutoCloseable {
   private Selection s3Victim(int scanLimit) {
     lastVictimScanCount = 0;
     while (lastVictimScanCount < scanLimit) {
-      if (small.tail != null && (smallWeight >= smallMaximum || main.tail == null)) {
-        Entry candidate = small.tail;
+      Entry smallTail = small.tailEntry();
+      Entry mainTail = main.tailEntry();
+      if (smallTail != null && (smallWeight >= smallMaximum || mainTail == null)) {
+        Entry candidate = smallTail;
         lastVictimScanCount++;
         if (accessCountOf(candidate) >= S3_SMALL_PROMOTION_HITS) {
           long candidateWeight = weightOf(candidate);
@@ -439,9 +442,9 @@ public final class MaintenancePolicy implements AutoCloseable {
         }
         return selection.entry(candidate);
       }
-      Entry candidate = main.tail;
+      Entry candidate = mainTail;
       if (candidate == null) {
-        candidate = small.tail;
+        candidate = smallTail;
         if (candidate != null) {
           lastVictimScanCount++;
         }
@@ -462,12 +465,12 @@ public final class MaintenancePolicy implements AutoCloseable {
   private Selection tinyLfuVictim() {
     demoteProtected();
     drainWindow();
-    Entry candidate = tinyCandidate;
+    Entry candidate = links.entry(tinyCandidate);
     if (candidate != null && stateOf(candidate) != Entry.POLICY_TINY_PROBATION) {
-      tinyCandidate = null;
+      tinyCandidate = 0;
       candidate = null;
     }
-    Entry victim = probation.tail;
+    Entry victim = probation.tailEntry();
     if (candidate != null && victim == candidate) {
       advanceTinyCandidate(candidate);
       return selection.entry(candidate);
@@ -483,8 +486,9 @@ public final class MaintenancePolicy implements AutoCloseable {
       advanceTinyCandidate(candidate);
       return selection.entry(candidate);
     }
-    if (protectedQueue.tail != null) {
-      return selection.entry(protectedQueue.tail);
+    Entry protectedTail = protectedQueue.tailEntry();
+    if (protectedTail != null) {
+      return selection.entry(protectedTail);
     }
     return selection.none();
   }
@@ -511,21 +515,27 @@ public final class MaintenancePolicy implements AutoCloseable {
     windowWeight -= weight;
     link(probation, candidate, Entry.POLICY_TINY_PROBATION);
     probationWeight += weight;
-    if (tinyCandidate == null) {
-      tinyCandidate = candidate;
+    if (tinyCandidate == 0) {
+      tinyCandidate = candidate.policyLinkId();
     }
   }
 
   private void drainWindow() {
-    while (windowWeight > windowMaximum && window.tail != null) {
-      Entry candidate = window.tail;
+    while (windowWeight > windowMaximum && window.tailId != 0) {
+      Entry candidate = window.tailEntry();
+      if (candidate == null) {
+        break;
+      }
       promoteWindow(candidate);
     }
   }
 
   private void demoteProtected() {
-    while (protectedWeight > protectedMaximum && protectedQueue.tail != null) {
-      Entry candidate = protectedQueue.tail;
+    while (protectedWeight > protectedMaximum && protectedQueue.tailId != 0) {
+      Entry candidate = protectedQueue.tailEntry();
+      if (candidate == null) {
+        break;
+      }
       long weight = weightOf(candidate);
       unlink(protectedQueue, candidate);
       protectedWeight -= weight;
@@ -536,8 +546,9 @@ public final class MaintenancePolicy implements AutoCloseable {
 
   /** Candidate traversal is oldest-to-newest, opposite to the intrusive deque's head links. */
   private void advanceTinyCandidate(Entry entry) {
-    if (entry == tinyCandidate) {
-      tinyCandidate = links.policyPrevEntry(entry);
+    int linkId = entry.policyLinkId();
+    if (linkId == tinyCandidate) {
+      tinyCandidate = links.policyPrev(linkId);
     }
   }
 
@@ -668,18 +679,21 @@ public final class MaintenancePolicy implements AutoCloseable {
     link(small, entry, Entry.POLICY_S4_SKIP);
     smallWeight += weight;
     smallSkipWeight += weight;
-    if (smallSkipTail == null) {
-      smallSkipTail = entry;
+    if (smallSkipTail == 0) {
+      smallSkipTail = entry.policyLinkId();
     }
     trimSmallSkip();
   }
 
   /** Converts the oldest virtual Skip entries into ordinary Small entries at the fixed 25% mark. */
   private void trimSmallSkip() {
-    while (smallSkipWeight > smallSkipMaximum && smallSkipTail != null) {
-      Entry candidate = smallSkipTail;
-      Entry previous = links.policyPrevEntry(candidate);
-      smallSkipTail = previous;
+    while (smallSkipWeight > smallSkipMaximum && smallSkipTail != 0) {
+      int candidateId = smallSkipTail;
+      Entry candidate = links.entry(candidateId);
+      smallSkipTail = links.policyPrev(candidateId);
+      if (candidate == null) {
+        continue;
+      }
       if (stateOf(candidate) == Entry.POLICY_S4_SKIP) {
         smallSkipWeight -= weightOf(candidate);
         setPolicyState(candidate, Entry.POLICY_S3_SMALL);
@@ -690,8 +704,8 @@ public final class MaintenancePolicy implements AutoCloseable {
   /** Removes an entry from Small accounting while its intrusive links still identify its neighbors. */
   private void removeSmallWeight(Entry entry, long weight) {
     if (stateOf(entry) == Entry.POLICY_S4_SKIP) {
-      if (smallSkipTail == entry) {
-        smallSkipTail = links.policyPrevEntry(entry);
+      if (smallSkipTail == entry.policyLinkId()) {
+        smallSkipTail = links.policyPrev(entry.policyLinkId());
       }
       smallSkipWeight -= weight;
     }
@@ -703,8 +717,8 @@ public final class MaintenancePolicy implements AutoCloseable {
     long weight = weightOf(entry);
     boolean wasSkip = stateOf(entry) == Entry.POLICY_S4_SKIP;
     if (wasSkip) {
-      if (smallSkipTail == entry) {
-        smallSkipTail = links.policyPrevEntry(entry);
+      if (smallSkipTail == entry.policyLinkId()) {
+        smallSkipTail = links.policyPrev(entry.policyLinkId());
       }
       smallSkipWeight -= weight;
     } else {
@@ -713,8 +727,8 @@ public final class MaintenancePolicy implements AutoCloseable {
     small.unlink(entry);
     link(small, entry, Entry.POLICY_S4_SKIP);
     smallSkipWeight += weight;
-    if (smallSkipTail == null) {
-      smallSkipTail = entry;
+    if (smallSkipTail == 0) {
+      smallSkipTail = entry.policyLinkId();
     }
     trimSmallSkip();
   }
@@ -865,8 +879,8 @@ public final class MaintenancePolicy implements AutoCloseable {
   }
 
   private final class EntryDeque {
-    Entry head;
-    Entry tail;
+    int headId;
+    int tailId;
 
     void linkHead(Entry entry) {
       linkHead(entry, entry.policyLinkId());
@@ -875,13 +889,13 @@ public final class MaintenancePolicy implements AutoCloseable {
     void linkHead(Entry entry, int linkId) {
       links.linkHead(
           linkId,
-          head,
+          headId,
           EntryLinks.POLICY_PREVIOUS_OFFSET,
           EntryLinks.POLICY_NEXT_OFFSET);
-      if (head == null) {
-        tail = entry;
+      if (headId == 0) {
+        tailId = linkId;
       }
-      head = entry;
+      headId = linkId;
     }
 
     void unlink(Entry entry) {
@@ -897,15 +911,19 @@ public final class MaintenancePolicy implements AutoCloseable {
       int previousId = (int) (neighbors >>> 32);
       int nextId = (int) neighbors;
       if (previousId == 0) {
-        head = links.entry(nextId);
+        headId = nextId;
       }
       if (nextId == 0) {
-        tail = links.entry(previousId);
+        tailId = previousId;
       }
     }
 
+    Entry tailEntry() {
+      return links.entry(tailId);
+    }
+
     void moveToHead(Entry entry) {
-      if (head == entry) {
+      if (headId == entry.policyLinkId()) {
         return;
       }
       unlink(entry);

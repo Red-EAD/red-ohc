@@ -5,6 +5,7 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.annotations.Test;
@@ -13,6 +14,17 @@ import com.red.ohc.index.Entry;
 import com.red.ohc.index.EntryTestSupport;
 
 public class TimerWheelTest {
+  @Test
+  public void timerBucketsRetainOnlyNativeLinkIds() {
+    assertTrue(
+        Arrays.stream(TimerWheel.class.getDeclaredFields())
+            .noneMatch(
+                field ->
+                    field.getType().isArray()
+                        && field.getType().getComponentType() == Entry.class),
+        "timer buckets and overflow storage must not retain Entry references");
+  }
+
   @Test
   public void maximumExpiryDoesNotOverflowIntoTheCurrentWheelRound() {
     TimerWheel wheel = new TimerWheel(0L);
@@ -122,6 +134,69 @@ public class TimerWheelTest {
     assertEquals(
         wheel.advance(TimerWheel.TICK_NANOS, 1_024, (ignored, generation, address) -> {}), 1);
     assertEquals(wheel.scheduled(), 0L);
+  }
+
+  @Test
+  public void cascadeWorkIsBoundedAndContinuesOnTheNextActorTurn() {
+    long deadlineTick = 1_024L;
+    long deadlineNanos = deadlineTick * TimerWheel.TICK_NANOS;
+    TimerWheel wheel = new TimerWheel(0L);
+    Entry[] entries = new Entry[2_049];
+    AtomicInteger processed = new AtomicInteger();
+    for (int index = 0; index < entries.length; index++) {
+      entries[index] = EntryTestSupport.entry(0, index + 20_000, 0L);
+      wheel.add(entries[index], deadlineNanos);
+    }
+
+    int firstTurn = wheel.advance(deadlineNanos, (ignored, generation, address) -> {});
+    processed.addAndGet(firstTurn);
+
+    int cascaded = 0;
+    for (Entry entry : entries) {
+      if (entry.timerLocation() == 0) {
+        cascaded++;
+      }
+    }
+    assertTrue(cascaded > 0, "the actor turn must make progress through the cascade");
+    assertTrue(
+        cascaded <= TimerWheel.MAX_TURN_WORK,
+        "cascade work must share the same actor budget as expiry");
+    assertTrue(firstTurn <= 1_024, "cascade plus expiry must share the actor work budget");
+    assertTrue(firstTurn < entries.length, "one turn must leave due timers for later turns");
+    int turns = 1;
+    while (wheel.scheduled() != 0L && turns++ < 16) {
+      int expired = wheel.advance(deadlineNanos, (ignored, generation, address) -> {});
+      processed.addAndGet(expired);
+      assertTrue(expired <= 1_024, "expiry work must stay within the per-turn budget");
+    }
+
+    assertEquals(wheel.scheduled(), 0L, "deferred cascades must resume without a wheel wrap");
+    assertEquals(processed.get(), entries.length);
+  }
+
+  @Test
+  public void overflowPromotionIsBoundedAcrossActorTurns() {
+    long deadlineTick = 140_000_000L;
+    long promotionTick = deadlineTick - 134_217_728L + 1L;
+    long deadlineNanos = deadlineTick * TimerWheel.TICK_NANOS;
+    long promotionNanos = promotionTick * TimerWheel.TICK_NANOS;
+    TimerWheel wheel = new TimerWheel(0L);
+    Entry[] entries = new Entry[2_049];
+    for (int index = 0; index < entries.length; index++) {
+      entries[index] = EntryTestSupport.entry(0, index + 30_000, 0L);
+      wheel.add(entries[index], deadlineNanos);
+    }
+
+    wheel.advance(promotionNanos, (ignored, generation, address) -> {});
+
+    int promoted = 0;
+    for (Entry entry : entries) {
+      if (!entry.timerInOverflowHeap()) {
+        promoted++;
+      }
+    }
+    assertTrue(promoted > 0, "the turn must make progress through the overflow heap");
+    assertTrue(promoted <= 1_024, "overflow promotion must share the actor work budget");
   }
 
   @Test
