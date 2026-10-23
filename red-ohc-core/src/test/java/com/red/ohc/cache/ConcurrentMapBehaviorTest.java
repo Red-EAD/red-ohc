@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.ConcurrentModificationException;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -37,6 +38,7 @@ import com.red.ohc.api.CacheSerializer;
 import com.red.ohc.api.Eviction;
 import com.red.ohc.api.OHCache;
 import com.red.ohc.api.Ticker;
+import com.red.ohc.codec.KeyHash;
 import com.red.ohc.index.Entry;
 import com.red.ohc.maintenance.LogicalAdmission;
 import com.red.ohc.maintenance.MaintenanceEventLoop;
@@ -48,6 +50,8 @@ import com.red.ohc.storage.NativeMemory;
 import com.red.ohc.storage.ValueBlock;
 
 public final class ConcurrentMapBehaviorTest {
+  private static final byte[] HEX_BYTES = "0123456789abcdef".getBytes(StandardCharsets.US_ASCII);
+  private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
   private static final CacheSerializer<String> STRING =
       new CacheSerializer<String>() {
         @Override
@@ -672,9 +676,10 @@ public final class ConcurrentMapBehaviorTest {
     OffHeapCache<String, String> cache = newCache();
     Throwable failure = null;
     try {
-      // These equal-length serialized keys share the canonical 32-bit hash.
-      String first = "085bba11604b2d7b";
-      String second = "6c3494923b494c1d";
+      // Find a collision under this process's seeded hash instead of assuming fixed hashes.
+      String[] collisionKeys = findCollisionKeys();
+      String first = collisionKeys[0];
+      String second = collisionKeys[1];
       cache.put(first, "first");
       cache.put(second, "second");
       Iterator<Entry> entries = cache.dataForTest().values().iterator();
@@ -693,6 +698,42 @@ public final class ConcurrentMapBehaviorTest {
     } finally {
       CacheTestSupport.stop(cache, failure);
     }
+  }
+
+  private static String[] findCollisionKeys() {
+    int candidates = 1 << 19;
+    long[] hashes = new long[candidates];
+    byte[] key = new byte[8];
+    for (int value = 0; value < candidates; value++) {
+      fillHexKey(key, value);
+      int hash = KeyHash.hash(key, 0, key.length);
+      hashes[value] = ((long) hash << 32) | (value & 0xffff_ffffL);
+    }
+    Arrays.sort(hashes);
+    for (int index = 1; index < hashes.length; index++) {
+      if ((int) (hashes[index] >>> 32) == (int) (hashes[index - 1] >>> 32)) {
+        return new String[] {
+          hexKey((int) hashes[index - 1]), hexKey((int) hashes[index])
+        };
+      }
+    }
+    throw new AssertionError("expected a 32-bit hash collision in the candidate set");
+  }
+
+  private static void fillHexKey(byte[] key, int value) {
+    for (int index = key.length - 1; index >= 0; index--) {
+      key[index] = HEX_BYTES[value & 0xf];
+      value >>>= 4;
+    }
+  }
+
+  private static String hexKey(int value) {
+    char[] result = new char[8];
+    for (int index = result.length - 1; index >= 0; index--) {
+      result[index] = HEX_CHARS[value & 0xf];
+      value >>>= 4;
+    }
+    return new String(result);
   }
 
   @Test

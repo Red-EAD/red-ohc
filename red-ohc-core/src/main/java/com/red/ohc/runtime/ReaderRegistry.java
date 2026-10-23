@@ -316,14 +316,18 @@ public final class ReaderRegistry {
     blocked[0] = false;
     blocked[1] = false;
     SlotStorage current = storage;
+    if (seqSnapshot.length < current.slotCapacity) {
+      // Registration may grow the table after the actor arms its cut. An incomplete snapshot
+      // cannot confirm either class of reader; leave reclamation blocked until the next cut.
+      blocked[0] = true;
+      blocked[1] = true;
+      return;
+    }
     for (int chunkIndex = 0; chunkIndex < current.liveBitmaps.length; chunkIndex++) {
       long bits = liveBits(current.liveBitmaps, chunkIndex);
       while (bits != 0L) {
         int offset = Long.numberOfTrailingZeros(bits);
         int index = (chunkIndex << SLOT_CHUNK_SHIFT) | offset;
-        if (index >= seqSnapshot.length) {
-          continue;
-        }
         long seq = getWordVolatile(seqAddress(current, chunkIndex, offset));
         if (seq == seqSnapshot[index] && (seq & 1L) != 0L) {
           blocked[0] = true;

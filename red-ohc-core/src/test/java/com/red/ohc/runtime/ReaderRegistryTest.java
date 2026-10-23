@@ -97,6 +97,17 @@ public final class ReaderRegistryTest {
   }
 
   @Test
+  public void confirmationWithAnUndersizedSnapshotBlocksUntilTheNextCut() {
+    ReaderRegistry registry = newRegistry();
+    boolean[] blocked = new boolean[2];
+
+    registry.confirmReaderQuiescence(new long[0], blocked);
+
+    assertTrue(blocked[0], "an incomplete reader snapshot cannot confirm lookup quiescence");
+    assertTrue(blocked[1], "an incomplete reader snapshot cannot confirm value quiescence");
+  }
+
+  @Test
   public void registrationPublishesStrongMetadataThroughTheLiveBitmap() {
     ReaderRegistry registry = newRegistry();
     ReaderSlot slot = new ReaderSlot();
