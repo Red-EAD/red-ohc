@@ -28,6 +28,11 @@ public class ReaderSlotTest {
     assertActorFieldIsolation(64);
   }
 
+  @Test
+  public void actorWritesAreIsolatedFromReadersOn128ByteLines() {
+    assertActorFieldIsolation(128);
+  }
+
   private static void assertActorFieldIsolation(int lineBytes) {
     ClassLayout layout = ClassLayout.parseClass(ReaderSlot.class);
     Map<String, FieldLayout> fields = new HashMap<>();

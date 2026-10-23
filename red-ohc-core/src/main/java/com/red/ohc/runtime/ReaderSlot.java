@@ -39,7 +39,7 @@ class ReaderSlotActorFields {
   public long consumedSkipAccesses;
 }
 
-/** A 64-byte gap separates actor consumption from the mixed-access notification marker. */
+/** Padding isolates actor consumption from the mixed-access notification marker. */
 class ReaderSlotActorPadding extends ReaderSlotActorFields {
   // Consume a possible superclass tail hole before the next layout segment can backfill it.
   int actorAlignmentPadding;
@@ -51,6 +51,14 @@ class ReaderSlotActorPadding extends ReaderSlotActorFields {
   long actorLinePad5;
   long actorLinePad6;
   long actorLinePad7;
+  long actorLinePad8;
+  long actorLinePad9;
+  long actorLinePad10;
+  long actorLinePad11;
+  long actorLinePad12;
+  long actorLinePad13;
+  long actorLinePad14;
+  long actorLinePad15;
 }
 
 /** Actor marking and reader exit both touch this slow-path notification marker. */
@@ -58,7 +66,7 @@ class ReaderSlotNotificationFields extends ReaderSlotActorPadding {
   volatile int readerNotification;
 }
 
-/** A 64-byte gap isolates notification writes from reader hot-path state. */
+/** Padding isolates notification writes from reader hot-path state. */
 class ReaderSlotReaderPadding extends ReaderSlotNotificationFields {
   // Consume a possible superclass tail hole before ReaderSlot can backfill it.
   int readerAlignmentPadding;
@@ -70,4 +78,12 @@ class ReaderSlotReaderPadding extends ReaderSlotNotificationFields {
   long readerLinePad5;
   long readerLinePad6;
   long readerLinePad7;
+  long readerLinePad8;
+  long readerLinePad9;
+  long readerLinePad10;
+  long readerLinePad11;
+  long readerLinePad12;
+  long readerLinePad13;
+  long readerLinePad14;
+  long readerLinePad15;
 }

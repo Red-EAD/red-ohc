@@ -5,6 +5,7 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Random;
@@ -212,6 +213,27 @@ public final class KeyHashTest {
     assertTrue(
         KeyHash.hash(first, 0, first.length) != KeyHash.hash(second, 0, second.length),
         "a fixed short-key collision must not survive the process hash seed");
+  }
+
+  @Test
+  public void pairedWordHighBitFlipsDoNotCancelForSixteenByteKeys() {
+    int highBitByte = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? 7 : 0;
+    for (int offset : new int[] {0, 5}) {
+      Random random = new Random(0x70616972L);
+      byte[] key = new byte[offset + 16];
+      int collisions = 0;
+      for (int trial = 0; trial < 4_096; trial++) {
+        random.nextBytes(key);
+        int before = KeyHash.hash(key, offset, 16);
+        key[offset + highBitByte] ^= (byte) 0x80;
+        key[offset + 8 + highBitByte] ^= (byte) 0x80;
+        int after = KeyHash.hash(key, offset, 16);
+        if (before == after) {
+          collisions++;
+        }
+      }
+      assertTrue(collisions <= 2, "offset=" + offset + ", paired collisions=" + collisions);
+    }
   }
 
   @Test
