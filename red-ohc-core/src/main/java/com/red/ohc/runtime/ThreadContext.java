@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BiFunction;
 
 import com.red.ohc.codec.LookupKey;
@@ -48,6 +49,7 @@ public final class ThreadContext {
   private WriterState writerState;
   private long readSequence;
   private long accessSequence;
+  private int accessSamplePosition;
   private int bulkReadDepth;
   private boolean bulkReadChanged;
   private int replacementSampleCounter;
@@ -880,11 +882,8 @@ public final class ThreadContext {
   public void bulkHit(Entry entry) {
     slot.localHits++;
     readSequence++;
-    if ((++accessSequence & ACCESS_SAMPLE_MASK) == 0L) {
-      long observedValueAddress = entry.valueAddress;
-      long observedGeneration = entry.generation();
-      int observedPolicyState = entry.policyState();
-      accessRing().offer(entry, observedValueAddress, observedGeneration, observedPolicyState);
+    if (shouldSampleAccess()) {
+      publishSampledAccess(entry, entry.valueAddress);
     }
     bulkReadChanged = true;
   }
@@ -918,15 +917,27 @@ public final class ThreadContext {
 
   /** Delivers a sampled hit with the value token observed by the lookup. */
   public void access(Entry entry, long observedValueAddress) {
-    if ((++accessSequence & ACCESS_SAMPLE_MASK) != 0L) {
-      return;
+    if (shouldSampleAccess()) {
+      publishSampledAccess(entry, observedValueAddress);
     }
-    publishSampledAccess(entry, observedValueAddress);
+  }
+
+  private boolean shouldSampleAccess() {
+    int position = (int) (accessSequence++ & ACCESS_SAMPLE_MASK);
+    if (position == 0) {
+      accessSamplePosition =
+          ThreadLocalRandom.current().nextInt((int) ACCESS_SAMPLE_MASK + 1);
+    }
+    return position == accessSamplePosition;
   }
 
   private void publishSampledAccess(Entry entry, long observedValueAddress) {
-    long observedGeneration = entry.generation();
     int observedPolicyState = entry.policyState();
+    if (observedPolicyState == Entry.POLICY_S4_SKIP) {
+      slot.localSkipAccesses++;
+      return;
+    }
+    long observedGeneration = entry.generation();
     accessRing().offer(entry, observedValueAddress, observedGeneration, observedPolicyState);
   }
 
@@ -949,6 +960,7 @@ public final class ThreadContext {
   public void publish() {
     slot.publishedHits = slot.localHits;
     slot.publishedMisses = slot.localMisses;
+    slot.publishedSkipAccesses = slot.localSkipAccesses;
   }
 
   private AccessRing accessRing() {
