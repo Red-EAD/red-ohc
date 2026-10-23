@@ -1,5 +1,7 @@
 package com.red.ohc.codec;
 
+import java.security.SecureRandom;
+
 import com.red.ohc.storage.NativeMemory;
 
 /**
@@ -7,6 +9,8 @@ import com.red.ohc.storage.NativeMemory;
  * (insert and lookup share this function) and never persisted, so the function may change.
  */
 public final class KeyHash {
+  /** Hashes are process-local, so a fresh unpredictable seed protects every cache in this VM. */
+  private static final long HASH_SEED = new SecureRandom().nextLong();
   private static final long P1 = 0xe7037ed1a0b428dbL;
   private static final long P2 = 0x8ebc6af09c88c6e3L;
   private static final long P3 = 0xa0761d6478bd642fL;
@@ -56,10 +60,10 @@ public final class KeyHash {
       a = 0L;
       b = 0L;
     }
-    long x = a ^ m ^ P1 ^ length;
+    long x = a ^ m ^ P1 ^ length ^ HASH_SEED;
     long y = b ^ P2;
     long folded = (x * y) ^ Math.multiplyHigh(x, y);
-    return (int) folded;
+    return finishHash(folded);
   }
 
   private static int hashLong(byte[] bytes, int offset, int length) {
@@ -88,10 +92,19 @@ public final class KeyHash {
     if (partial != 0L) {
       m1 ^= (partial * P3) ^ Math.multiplyHigh(partial, P3);
     }
-    long x = a ^ m1 ^ P1 ^ length;
+    long x = a ^ m1 ^ P1 ^ length ^ HASH_SEED;
     long y = b ^ m2 ^ P2;
     long folded = (x * y) ^ Math.multiplyHigh(x, y);
-    return (int) folded;
+    return finishHash(folded);
+  }
+
+  private static int finishHash(long value) {
+    value ^= value >>> 33;
+    value *= 0xff51afd7ed558ccdL;
+    value ^= value >>> 33;
+    value *= 0xc4ceb9fe1a85ec53L;
+    value ^= value >>> 33;
+    return (int) (value ^ (value >>> 32));
   }
 
   private KeyHash() {}

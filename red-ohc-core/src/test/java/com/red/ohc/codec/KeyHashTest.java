@@ -205,6 +205,16 @@ public final class KeyHashTest {
   }
 
   @Test
+  public void processSeedBreaksPrecomputedShortKeyCollisions() {
+    byte[] first = {(byte) 0x4c, (byte) 0x9a, (byte) 0xfc};
+    byte[] second = {(byte) 0xf3, (byte) 0x64, (byte) 0x0b};
+
+    assertTrue(
+        KeyHash.hash(first, 0, first.length) != KeyHash.hash(second, 0, second.length),
+        "a fixed short-key collision must not survive the process hash seed");
+  }
+
+  @Test
   public void singleBitFlipsAvalancheAcrossThe24OutputBits() {
     Random random = new Random(0xa17a1L);
     for (int length : new int[] {8, 16, 32, 255}) {
