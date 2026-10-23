@@ -165,6 +165,35 @@ Linux experiments after approval, retain all rounds, investigate stable regressi
 and publish limitations alongside results. No results from this six-framework
 suite are included here.
 
+## Key hash microbenchmark and CPU counters
+
+`KeyHashBenchmark` reports average time per key for fixed or mixed key lengths.
+It includes a traversal control and a 1,024-key hot fixture or an entry count
+sized for 64 MiB at the configured maximum key length. Mixed-length fixtures
+contain fewer serialized bytes than that sizing target. Run selected cases with
+the shaded JMH JAR:
+
+```bash
+java -jar red-ohc-jmh/target/red-ohc-jmh-1.0.0-benchmarks.jar \
+  'KeyHashBenchmark.*' -p keyBytes=32 -p workingSetMiB=0,64 \
+  -p lengths=FIXED,MIXED
+```
+
+For Linux hardware counters, run the probe once in each mode with the same
+operation count, JDK, JVM arguments and CPU placement, using a fresh output
+directory each time:
+
+```bash
+scripts/run_hash_cpu_probe.sh /srv/results/hash-32 32 100000000 hash -Xms2g -Xmx2g
+scripts/run_hash_cpu_probe.sh /srv/results/control-32 32 100000000 control -Xms2g -Xmx2g
+```
+
+The probe warms up before enabling `perf stat` counters and records raw counts,
+wall time, current-thread CPU time, system/JDK details, and per-operation values.
+Keep hash and control results separate; do not subtract their latency or treat
+this isolated probe as a cache-level performance result. Unsupported counters
+remain in the output directory for inspection and cause the command to fail.
+
 ## Paired revisions across JDKs
 
 `scripts/run_paired_benchmarks.py` compares Red OHC revisions through the existing
