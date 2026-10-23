@@ -8,8 +8,8 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
  * One writer-owned allocator. Allocation is single-consumer while native retirement may return
  * slots from any thread. The current page stays writer-exclusive; available pages may move to
  * another writer resource so skew cannot force unbounded native allocation.
- * Pages are retained at the workload high-water mark; only allocation pressure and close
- * physically release them.
+ * Pages are retained at the workload high-water mark; periodic idle trimming, allocation
+ * pressure, and close physically release them.
  */
 public final class WriterArena {
   public static final int PREFIX_BYTES = 64;
@@ -368,6 +368,7 @@ public final class WriterArena {
     private static final int REBALANCING = 4;
     private static final int TRIMMING = 5;
     private static final int FREED = 6;
+    private static final long IDLE_TRIM_AGE_NANOS = 30_000_000_000L;
     private static final VarHandle ALLOCATED_SLOTS;
     private static final VarHandle FREED_SLOTS;
     private static final VarHandle FREE_SUMMARY;
@@ -411,6 +412,8 @@ public final class WriterArena {
     final int slotBytes;
     final int slotCount;
     final boolean directMapped;
+    /** Written only while owning the shared-ready token, or after an activation claim. */
+    long trimEmptySinceNanos = Long.MIN_VALUE;
     Page(
         SizeClassState ownerClass,
         int id,
@@ -669,7 +672,12 @@ public final class WriterArena {
     }
 
     boolean tryActivate(SizeClassState expectedOwner) {
-      return ownerClass == expectedOwner && STATE.compareAndSet(this, AVAILABLE, ACTIVE);
+      boolean activated =
+          ownerClass == expectedOwner && STATE.compareAndSet(this, AVAILABLE, ACTIVE);
+      if (activated) {
+        trimEmptySinceNanos = Long.MIN_VALUE;
+      }
+      return activated;
     }
 
     boolean tryRebalance(SizeClassState expectedOwner, SizeClassState newOwner) {
@@ -678,8 +686,25 @@ public final class WriterArena {
         return false;
       }
       ownerClass = newOwner;
+      trimEmptySinceNanos = Long.MIN_VALUE;
       STATE.setRelease(this, ACTIVE);
       return true;
+    }
+
+    boolean emptyForTrim() {
+      return !hasLiveSlots();
+    }
+
+    boolean idleForTrim(long nowNanos, boolean empty) {
+      if (!empty) {
+        trimEmptySinceNanos = Long.MIN_VALUE;
+        return false;
+      }
+      if (trimEmptySinceNanos == Long.MIN_VALUE) {
+        trimEmptySinceNanos = nowNanos;
+        return false;
+      }
+      return nowNanos - trimEmptySinceNanos >= IDLE_TRIM_AGE_NANOS;
     }
 
     boolean beginTrimming() {

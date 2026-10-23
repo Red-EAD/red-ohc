@@ -61,7 +61,7 @@ public final class SizeClasses {
     for (int value = 1152; value <= 4096; value += 128) {
       slots[cursor++] = value;
     }
-    slots[cursor++] = 4128;
+    slots[cursor++] = 4176;
     for (int value = 4608; value <= 5120; value += 256) {
       slots[cursor++] = value;
     }
@@ -69,7 +69,7 @@ public final class SizeClasses {
     for (int value = 5248; value <= 16384; value += 256) {
       slots[cursor++] = value;
     }
-    slots[cursor++] = 16384;
+    slots[cursor++] = 16464;
     for (int value = 18432; value <= 32768; value += 2048) {
       slots[cursor++] = value;
     }
