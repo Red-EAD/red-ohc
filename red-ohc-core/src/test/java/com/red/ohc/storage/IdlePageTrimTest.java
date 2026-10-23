@@ -1,6 +1,7 @@
 package com.red.ohc.storage;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 
 import org.testng.annotations.Test;
 
@@ -91,6 +92,34 @@ public final class IdlePageTrimTest {
       }
 
       assertEquals(releasedBytes, 6L * SizeClasses.pageBytes(SizeClasses.indexForEntry(1L)));
+    } finally {
+      memory.closeArenas();
+    }
+  }
+
+  @Test
+  public void scanBudgetCannotStarveOldEmptyPagesBehindManyPartialPages() {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    try {
+      long[] emptyAddresses = new long[10];
+      long[] partialAddresses = new long[32];
+      WriterArena[] emptyArenas = allocatedPages(memory, emptyAddresses);
+      WriterArena[] partialArenas = allocatedPages(memory, partialAddresses);
+
+      detach(emptyArenas);
+      for (long address : emptyAddresses) {
+        memory.releaseEntry(address, 32_700L);
+      }
+      detach(partialArenas);
+
+      assertEquals(memory.pageReadyCount(), 42L);
+      for (int pass = 0; pass < 96; pass++) {
+        long releasedBytes = memory.trimIdlePages(1L + pass * 1_000_000_000L);
+        assertTrue(releasedBytes <= (8L << 20));
+      }
+
+      assertEquals(memory.pageReadyCount(), 34L);
+      assertEquals(memory.pageTrimmedCount(), 8L);
     } finally {
       memory.closeArenas();
     }
