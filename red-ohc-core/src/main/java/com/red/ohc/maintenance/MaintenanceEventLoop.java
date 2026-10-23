@@ -277,7 +277,7 @@ public final class MaintenanceEventLoop
         false,
         new RetirementJournal(memory),
         nativeDebtBudgetBytes,
-        new EntryLinks(memory));
+        new EntryLinks(memory, data));
   }
 
   public MaintenanceEventLoop(
@@ -347,7 +347,7 @@ public final class MaintenanceEventLoop
         false,
         retirementJournal,
         nativeDebtBudgetBytes,
-        new EntryLinks(memory));
+        new EntryLinks(memory, data));
   }
 
   public MaintenanceEventLoop(
@@ -370,7 +370,7 @@ public final class MaintenanceEventLoop
         false,
         new RetirementJournal(memory),
         nativeDebtBudgetBytes,
-        new EntryLinks(memory));
+        new EntryLinks(memory, data));
   }
 
   public MaintenanceEventLoop(
@@ -395,7 +395,7 @@ public final class MaintenanceEventLoop
         countBounded,
         retirementJournal,
         nativeDebtBudgetBytes,
-        new EntryLinks(memory));
+        new EntryLinks(memory, data));
   }
 
   public void start() {

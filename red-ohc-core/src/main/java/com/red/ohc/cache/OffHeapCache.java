@@ -105,7 +105,7 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
     this.writerLifecycleJournal = new WriterLifecycleJournal();
     this.memory = new NativeMemory.Memory();
     this.readers = new ReaderRegistry(this.memory);
-    EntryLinks links = new EntryLinks(memory);
+    EntryLinks links = new EntryLinks(memory, data);
     this.logicalAdmission = new LogicalAdmission(limit, countBounded);
     this.retirementJournal = new RetirementJournal(memory);
     this.writerResources =

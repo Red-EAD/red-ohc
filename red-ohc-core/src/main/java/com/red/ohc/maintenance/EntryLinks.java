@@ -1,6 +1,7 @@
 package com.red.ohc.maintenance;
 
 import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.red.ohc.index.Entry;
 import com.red.ohc.storage.NativeMemory;
@@ -26,6 +27,8 @@ public final class EntryLinks implements AutoCloseable {
   private static final int POLICY_STATE_MASK = 0x7;
   private static final int POLICY_ACCESS_SHIFT = 3;
   private static final int POLICY_ACCESS_MASK = 0x3 << POLICY_ACCESS_SHIFT;
+  private static final int TIMER_UNSCHEDULED = -1;
+  private static final int TIMER_HEAP_BASE = -2;
   private static final long ALLOCATION_BYTES = SUPERPAGE_BYTES + LOGICAL_PAGE_BYTES - 1L;
   static final int POLICY_PREVIOUS_OFFSET = 0;
   static final int POLICY_NEXT_OFFSET = 4;
@@ -36,35 +39,53 @@ public final class EntryLinks implements AutoCloseable {
   private static final int KEY_HASH_OFFSET = 24;
 
   private final NativeMemory.Memory memory;
+  private final ConcurrentHashMap<Entry, Entry> data;
   private final boolean ownsMemory;
+  private final boolean ownsData;
   private volatile long[] rawSuperpages = new long[2];
   private volatile long[] alignedSuperpages = new long[2];
-  private volatile Entry[] registry = new Entry[1024];
+  private volatile long[][] nativeKeyAddressPages = new long[2][];
+  private final EntryResolver resolver;
   private int freeHead;
   private int nextId = 1;
   private boolean closed;
 
   /** Production constructor; all reservations are charged to the cache's native hard limit. */
-  public EntryLinks(NativeMemory.Memory memory) {
-    if (memory == null) {
-      throw new NullPointerException("memory");
-    }
-    this.memory = memory;
-    this.ownsMemory = false;
+  public EntryLinks(
+      NativeMemory.Memory memory, ConcurrentHashMap<Entry, Entry> data) {
+    this(memory, data, false, false);
+  }
+
+  /** Test-only constructor with an independently owned index and native budget. */
+  EntryLinks(NativeMemory.Memory memory) {
+    this(memory, new ConcurrentHashMap<>(), false, true);
   }
 
   /** Test-only convenience constructor with an independently owned native budget. */
   EntryLinks() {
-    this(new NativeMemory.Memory(), true);
+    this(new NativeMemory.Memory(), new ConcurrentHashMap<>(), true, true);
+  }
+
+  private EntryLinks(
+      NativeMemory.Memory memory,
+      ConcurrentHashMap<Entry, Entry> data,
+      boolean ownsMemory,
+      boolean ownsData) {
+    if (memory == null) {
+      throw new NullPointerException("memory");
+    }
+    if (data == null) {
+      throw new NullPointerException("data");
+    }
+    this.memory = memory;
+    this.data = data;
+    this.ownsMemory = ownsMemory;
+    this.ownsData = ownsData;
+    this.resolver = new EntryResolver(data);
   }
 
   NativeMemory.Memory memory() {
     return memory;
-  }
-
-  private EntryLinks(NativeMemory.Memory memory, boolean ownsMemory) {
-    this.memory = memory;
-    this.ownsMemory = ownsMemory;
   }
 
   /** Returns the native record id, allocating one lazily on the first policy/timer link. */
@@ -72,11 +93,13 @@ public final class EntryLinks implements AutoCloseable {
     checkOpen();
     int id = entry.policyLinkId();
     if (id != 0) {
-      Entry[] entries = registry;
-      if (id >= entries.length || entries[id] != entry) {
-        throw new IllegalStateException("link registry mismatch for id " + id);
+      if (nativeKeyAddress(id) != entry.nativeKeyAddress) {
+        throw new IllegalStateException("link identity mismatch for id " + id);
       }
       return id;
+    }
+    if (ownsData) {
+      indexEntry(entry);
     }
     boolean fromFreeList = false;
     id = freeHead;
@@ -93,9 +116,8 @@ public final class EntryLinks implements AutoCloseable {
         throw new IllegalStateException("native link id exhausted");
       }
     }
-    ensureRegistryCapacity(id);
     ensureSuperpage(id);
-    registry[id] = entry;
+    setNativeKeyAddress(id, entry.nativeKeyAddress);
     if (!fromFreeList) {
       NativeMemory.setMemory(recordAddress(id), RECORD_BYTES, (byte) 0);
     }
@@ -104,11 +126,36 @@ public final class EntryLinks implements AutoCloseable {
   }
 
   Entry entry(int id) {
-    Entry[] entries = registry;
-    if (id <= 0 || id >= entries.length) {
+    long nativeKeyAddress = nativeKeyAddress(id);
+    if (nativeKeyAddress == 0L) {
       return null;
     }
-    return entries[id];
+    return resolver.resolve(nativeKeyAddress, Entry.keyHashAt(nativeKeyAddress));
+  }
+
+  int timerLocation(int linkId) {
+    return linkId == 0 ? TIMER_UNSCHEDULED : Entry.timerLocationAt(nativeKeyAddress(linkId));
+  }
+
+  void timerLocation(int linkId, int location) {
+    Entry.timerLocationAt(nativeKeyAddress(linkId), location);
+  }
+
+  long timerDeadlineTick(int linkId) {
+    return Entry.timerDeadlineTickAt(nativeKeyAddress(linkId));
+  }
+
+  void timerDeadlineTick(int linkId, long tick) {
+    Entry.timerDeadlineTickAt(nativeKeyAddress(linkId), tick);
+  }
+
+  int timerHeapIndex(int linkId) {
+    int location = timerLocation(linkId);
+    return location <= TIMER_HEAP_BASE ? -location - 2 : -1;
+  }
+
+  void timerHeapIndex(int linkId, int index) {
+    timerLocation(linkId, index < 0 ? TIMER_HEAP_BASE : -index - 2);
   }
 
   int policyPrev(Entry entry) {
@@ -200,6 +247,9 @@ public final class EntryLinks implements AutoCloseable {
     return entry(policyPrev(entry));
   }
 
+  Entry policyPrevEntry(int linkId) {
+    return entry(policyPrev(linkId));
+  }
 
   Entry policyNextEntry(Entry entry) {
     return entry(policyNext(entry));
@@ -255,6 +305,10 @@ public final class EntryLinks implements AutoCloseable {
     put(linkId, 8, idOf(previous));
   }
 
+  void timerPrev(int linkId, int previousId) {
+    put(linkId, 8, previousId);
+  }
+
   void timerNext(Entry entry, Entry next) {
     int linkId = entry.policyLinkId();
     if (linkId == 0) {
@@ -269,8 +323,12 @@ public final class EntryLinks implements AutoCloseable {
 
   /** Links one actor-owned list head while resolving the two involved records once. */
   void linkHead(int linkId, Entry head, int previousOffset, int nextOffset) {
+    linkHead(linkId, idOf(head), previousOffset, nextOffset);
+  }
+
+  /** Links one actor-owned list head using only native record identities. */
+  void linkHead(int linkId, int headId, int previousOffset, int nextOffset) {
     long linkAddress = writableRecordAddress(linkId);
-    int headId = idOf(head);
     putLink(linkAddress, previousOffset, 0);
     putLink(linkAddress, nextOffset, headId);
     if (headId != 0) {
@@ -332,15 +390,18 @@ public final class EntryLinks implements AutoCloseable {
         return;
       }
     }
-    if (registry[id] != entry) {
-      throw new IllegalStateException("link registry mismatch while releasing id " + id);
+    if (nativeKeyAddress(id) != entry.nativeKeyAddress) {
+      throw new IllegalStateException("link identity mismatch while releasing id " + id);
     }
     long address = recordAddress(id);
     NativeMemory.setMemory(address, RECORD_BYTES, (byte) 0);
-    registry[id] = null;
+    setNativeKeyAddress(id, 0L);
     NativeMemory.putInt(address, freeHead);
     freeHead = id;
     entry.policyLinkId(0);
+    if (ownsData) {
+      data.remove(entry, entry);
+    }
   }
 
   int activeLinkCount() {
@@ -357,7 +418,10 @@ public final class EntryLinks implements AutoCloseable {
       return;
     }
     closed = true;
-    Arrays.fill(registry, null);
+    Arrays.fill(nativeKeyAddressPages, null);
+    if (ownsData) {
+      data.clear();
+    }
     for (int index = 0; index < rawSuperpages.length; index++) {
       long raw = rawSuperpages[index];
       if (raw != 0L) {
@@ -376,8 +440,7 @@ public final class EntryLinks implements AutoCloseable {
       return 0;
     }
     int id = entry.policyLinkId();
-    Entry[] entries = registry;
-    if (id == 0 || id >= entries.length || entries[id] != entry) {
+    if (id == 0 || nativeKeyAddress(id) != entry.nativeKeyAddress) {
       throw new IllegalStateException("entry has no active native link record");
     }
     return id;
@@ -419,9 +482,8 @@ public final class EntryLinks implements AutoCloseable {
   }
 
   private long writableRecordAddress(int id) {
-    Entry[] entries = registry;
-    if (id <= 0 || id >= entries.length || entries[id] == null) {
-      throw new IllegalStateException("link registry mismatch for id " + id);
+    if (nativeKeyAddress(id) == 0L) {
+      throw new IllegalStateException("link identity is not active for id " + id);
     }
     return recordAddress(id);
   }
@@ -448,11 +510,13 @@ public final class EntryLinks implements AutoCloseable {
       return;
     }
     ensureSuperpageCapacity(superpage);
+    long[] identities = new long[RECORDS_PER_SUPERPAGE];
     long raw = memory.allocateRaw(ALLOCATION_BYTES);
     long aligned = (raw + LOGICAL_PAGE_BYTES - 1L) & -((long) LOGICAL_PAGE_BYTES);
     NativeMemory.setMemory(aligned, SUPERPAGE_BYTES, (byte) 0);
     rawSuperpages[superpage] = raw;
     alignedSuperpages[superpage] = aligned;
+    nativeKeyAddressPages[superpage] = identities;
   }
 
   private void ensureSuperpageCapacity(int superpage) {
@@ -465,17 +529,45 @@ public final class EntryLinks implements AutoCloseable {
     }
     rawSuperpages = Arrays.copyOf(rawSuperpages, length);
     alignedSuperpages = Arrays.copyOf(alignedSuperpages, length);
+    nativeKeyAddressPages = Arrays.copyOf(nativeKeyAddressPages, length);
   }
 
-  private void ensureRegistryCapacity(int id) {
-    if (id < registry.length) {
-      return;
+  private long nativeKeyAddress(int id) {
+    if (id <= 0) {
+      return 0L;
     }
-    int length = registry.length;
-    while (length <= id) {
-      length <<= 1;
+    int zeroBased = id - 1;
+    int superpage = zeroBased >>> RECORD_SHIFT;
+    int slot = zeroBased & PAGE_MASK;
+    long[][] pages = nativeKeyAddressPages;
+    if (superpage >= pages.length || pages[superpage] == null) {
+      return 0L;
     }
-    registry = Arrays.copyOf(registry, length);
+    return pages[superpage][slot];
+  }
+
+  private void setNativeKeyAddress(int id, long nativeKeyAddress) {
+    int zeroBased = id - 1;
+    int superpage = zeroBased >>> RECORD_SHIFT;
+    int slot = zeroBased & PAGE_MASK;
+    nativeKeyAddressPages[superpage][slot] = nativeKeyAddress;
+  }
+
+  private void indexEntry(Entry entry) {
+    if (entry == null) {
+      throw new NullPointerException("entry");
+    }
+    Entry current = data.get(entry);
+    if (ownsData) {
+      if (current == null) {
+        current = data.putIfAbsent(entry, entry);
+      }
+      if (current != null && current != entry) {
+        throw new IllegalStateException("standalone maintenance index contains another Entry");
+      }
+    } else if (current != entry) {
+      throw new IllegalStateException("entry is not the authoritative CHM value");
+    }
   }
 
   private int allocatedSuperpageCount() {
@@ -499,6 +591,34 @@ public final class EntryLinks implements AutoCloseable {
   private void checkOpen() {
     if (closed) {
       throw new IllegalStateException("entry links are closed");
+    }
+  }
+
+  /** Reusable actor-confined CHM probe; native address is the maintenance identity. */
+  private static final class EntryResolver extends Entry {
+    private final ConcurrentHashMap<Entry, Entry> data;
+    private long nativeKeyAddress;
+    private int keyHash;
+
+    private EntryResolver(ConcurrentHashMap<Entry, Entry> data) {
+      super(0L, 0, 0L);
+      this.data = data;
+    }
+
+    private Entry resolve(long nativeKeyAddress, int keyHash) {
+      this.nativeKeyAddress = nativeKeyAddress;
+      this.keyHash = keyHash;
+      return data.get(this);
+    }
+
+    @Override
+    public int hashCode() {
+      return keyHash;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other instanceof Entry && ((Entry) other).nativeKeyAddress == nativeKeyAddress;
     }
   }
 }
