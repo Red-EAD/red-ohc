@@ -1704,6 +1704,10 @@ public final class MaintenanceEventLoop
         readerLifecycleWork((decision.requested & WORK_READER_LIFECYCLE) != 0 || stopping);
     decision.testTaskWork = hasTestTasks();
     decision.ttlDue = ttlWorkDue();
+    decision.readyTrimDue =
+        !stopping
+            && memory.pageReadyCount() != 0L
+            && nextReadyTrimCheckNanos <= sampleMonotonicNow();
     decision.pendingSealed = (decision.retirementState & RetirementJournal.WORK_STATE_SEALED) != 0;
     decision.pendingSafe = (decision.retirementState & RetirementJournal.WORK_STATE_SAFE) != 0;
     decision.pendingWriterLifecycleWatermark =
@@ -1728,6 +1732,7 @@ public final class MaintenanceEventLoop
             || stopping
             || decision.readerLifecycleWork;
     plan.ttl = decision.ttlDue && (!isStopping() || plan.flush);
+    plan.readyTrim = decision.readyTrimDue;
     plan.seal =
         (plan.requested & WORK_RETIREMENT) != 0
             || (plan.requested & WORK_READER_NOTIFICATION) != 0
@@ -1770,6 +1775,7 @@ public final class MaintenanceEventLoop
         || decision.writerLifecycleWork
         || decision.writerResourceWork
         || decision.ghostRehash
+        || decision.readyTrimDue
         || decision.accessScanActive
         || decision.readerLifecycleWork) {
       return RUNNABLE_CHECK_WORK;
@@ -1948,10 +1954,15 @@ public final class MaintenanceEventLoop
     long retryWakeNanos = nextRetryDeadlineNanos(decision.retirementState, decision.runnableCheck);
     long readerLifecycleWakeNanos = nextReaderLifecycleWakeNanos();
     long accessWakeNanos = nextAccessWakeWallClockNanos();
+    long readyTrimWakeNanos = Long.MAX_VALUE;
+    if (memory.pageReadyCount() != 0L) {
+      sampleMonotonicNow();
+      readyTrimWakeNanos = retryDeadlineToWallClock(nextReadyTrimCheckNanos);
+    }
     long wakeNanos =
         Math.min(
             Math.min(Math.min(ttlWakeNanos, retryWakeNanos), readerLifecycleWakeNanos),
-            accessWakeNanos);
+            Math.min(accessWakeNanos, readyTrimWakeNanos));
     if (wakeNanos == Long.MAX_VALUE) {
       while (idleBackoff.takeSpinTurn()) {
         Thread.onSpinWait();
@@ -2014,6 +2025,7 @@ public final class MaintenanceEventLoop
         || decision.readerNotificationWork
         || decision.accessScanActive
         || decision.ttlDue
+        || decision.readyTrimDue
         || decision.ghostRehash
         || decision.writerLifecycleWork
         || decision.writerResourceWork
@@ -3472,6 +3484,7 @@ public final class MaintenanceEventLoop
     private boolean readerNotificationWork;
     private boolean testTaskWork;
     private boolean ttlDue;
+    private boolean readyTrimDue;
     private boolean pendingSealed;
     private boolean pendingSafe;
     private boolean pendingWriterLifecycleWatermark;
@@ -3495,6 +3508,7 @@ public final class MaintenanceEventLoop
     private boolean accessUrgent;
     private boolean readerLifecycle;
     private boolean ttl;
+    private boolean readyTrim;
     private boolean seal;
     private boolean safe;
     private boolean ghostRehash;
@@ -3519,6 +3533,7 @@ public final class MaintenanceEventLoop
       accessUrgent = false;
       readerLifecycle = false;
       ttl = false;
+      readyTrim = false;
       seal = false;
       safe = false;
       ghostRehash = false;
@@ -3546,6 +3561,7 @@ public final class MaintenanceEventLoop
           || access
           || readerLifecycle
           || ttl
+          || readyTrim
           || seal
           || safe
           || ghostRehash
