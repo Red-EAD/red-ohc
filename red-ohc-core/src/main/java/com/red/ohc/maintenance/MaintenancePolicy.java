@@ -108,7 +108,7 @@ public final class MaintenancePolicy implements AutoCloseable {
     this.window = new EntryDeque();
     this.probation = new EntryDeque();
     this.protectedQueue = new EntryDeque();
-    long plannedEntries = Math.max(256L, capacity / 128L);
+    long plannedEntries = countBounded ? capacity : Math.max(256L, capacity / 128L);
     this.sketch = eviction == Eviction.W_TINY_LFU ? new FrequencySketch(plannedEntries) : null;
     this.smallMaximum = Math.max(1L, capacity / S3_SMALL_TARGET_DIVISOR);
     this.smallSkipMaximum = smallMaximum / S3_SKIP_WEIGHT_DIVISOR;

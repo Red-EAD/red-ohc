@@ -4398,7 +4398,10 @@ public final class OffHeapCache<K, V> implements OHCache<K, V> {
 
   /** Eager value-header read issued while the equals and absence-word misses are in flight. */
   private static long preReadValueDeadline(long taggedValue) {
-    if (taggedValue == 0L || !isAliveTaggedValue(taggedValue)) {
+    if (taggedValue == 0L
+        || !isAliveTaggedValue(taggedValue)
+        || Entry.isAbsentTaggedValue(taggedValue)
+        || !Entry.hasTtl(taggedValue)) {
       return 0L;
     }
     return ValueBlock.deadlineNanos(Entry.rawValueAddress(taggedValue));
