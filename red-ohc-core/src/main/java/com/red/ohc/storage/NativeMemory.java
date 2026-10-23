@@ -74,9 +74,10 @@ public final class NativeMemory {
     private final AtomicInteger nextArenaId = new AtomicInteger(1);
     private final AtomicBoolean trimOwner = new AtomicBoolean();
     private int idleTrimClassCursor;
-    /** Per-class publication stack; the trimmer scans the other stack as a stable snapshot. */
-    private final AtomicIntegerArray readyActiveStacks =
-        new AtomicIntegerArray(SizeClasses.count());
+    /** Pages published by writers; the trimmer atomically snapshots batches onto stack 1. */
+    private static final int READY_PUBLISH_STACK = 0;
+    /** Stable candidate batch consumed by writers and the idle trimmer. */
+    private static final int READY_TRIM_STACK = 1;
     private final int[] idleTrimEmptyKept = new int[SizeClasses.count()];
     private static final int READY_STACK_STRIDE = 8;
     /**
@@ -455,10 +456,9 @@ public final class NativeMemory {
     }
 
     private void restoreReadyPage(WriterArena.Page page) {
-      int stack = readyActiveStacks.get(page.sizeClass);
       recordPageReady(page.sizeClass);
       try {
-        pushReadyPage(page, stack);
+        pushReadyPage(page, READY_PUBLISH_STACK);
       } catch (Throwable failure) {
         pageReadyCounts[page.sizeClass].decrement();
         throw failure;
@@ -479,11 +479,10 @@ public final class NativeMemory {
       }
     }
 
-    /** Writers take unexamined pages first, then pages already visited by the idle trimmer. */
+    /** Writers can use newly published pages or the trimmer's stable candidate batch. */
     private WriterArena.Page popReadyPage(int sizeClass) {
-      int activeStack = readyActiveStacks.get(sizeClass);
-      WriterArena.Page page = popReadyPage(sizeClass, activeStack);
-      return page != null ? page : popReadyPage(sizeClass, activeStack ^ 1);
+      WriterArena.Page page = popReadyPage(sizeClass, READY_PUBLISH_STACK);
+      return page != null ? page : popReadyPage(sizeClass, READY_TRIM_STACK);
     }
 
     private WriterArena.Page popReadyPage(int sizeClass, int stack) {
@@ -513,6 +512,37 @@ public final class NativeMemory {
 
     private static int readyStackIndex(int sizeClass) {
       return sizeClass * READY_STACK_STRIDE;
+    }
+
+    /** Moves one finite publication batch to the trim stack without blocking new publishers. */
+    private void snapshotReadyPagesForTrim(int sizeClass) {
+      int publishIndex = readyStackIndex(sizeClass) + READY_PUBLISH_STACK;
+      int trimIndex = readyStackIndex(sizeClass) + READY_TRIM_STACK;
+      if (readyPageId(readyPageStacks.get(trimIndex)) != 0) {
+        return;
+      }
+      while (true) {
+        long current = readyPageStacks.get(publishIndex);
+        int headId = readyPageId(current);
+        if (headId == 0) {
+          return;
+        }
+        if (!readyPageStacks.compareAndSet(publishIndex, current, nextReadyPageHead(current, 0))) {
+          continue;
+        }
+        // The trimmer is the only publisher to this stack. Writers can only drain it, so an
+        // empty head remains available for this atomic handoff after the publication CAS.
+        while (true) {
+          long trimHead = readyPageStacks.get(trimIndex);
+          if (readyPageId(trimHead) != 0) {
+            throw new IllegalStateException("ready trim stack changed during snapshot");
+          }
+          if (readyPageStacks.compareAndSet(
+              trimIndex, trimHead, nextReadyPageHead(trimHead, headId))) {
+            return;
+          }
+        }
+      }
     }
 
     private static long nextReadyPageHead(long head, int pageId) {
@@ -1105,9 +1135,6 @@ public final class NativeMemory {
       for (LongAdder count : pageReadyCounts) {
         count.reset();
       }
-      for (int sizeClass = 0; sizeClass < SizeClasses.count(); sizeClass++) {
-        readyActiveStacks.set(sizeClass, 0);
-      }
       Arrays.fill(idleTrimEmptyKept, 0);
     }
 
@@ -1131,14 +1158,12 @@ public final class NativeMemory {
           if (readyCount == 0L) {
             continue;
           }
-          int activeStack = readyActiveStacks.get(sizeClass);
-          int scanStack = activeStack ^ 1;
-          if (readyPageId(readyPageStacks.get(readyStackIndex(sizeClass) + scanStack)) == 0) {
-            // Start a scan immediately when the inactive snapshot is empty. Publications now
-            // target the empty stack while this turn drains the previous active stack.
-            readyActiveStacks.set(sizeClass, scanStack);
-            scanStack = activeStack;
+          snapshotReadyPagesForTrim(sizeClass);
+          if (readyPageId(
+                  readyPageStacks.get(readyStackIndex(sizeClass) + READY_TRIM_STACK))
+              == 0) {
             idleTrimEmptyKept[sizeClass] = 0;
+            continue;
           }
           long candidates = Math.min(IDLE_TRIM_MAX_CANDIDATES_PER_CLASS, readyCount);
           for (int candidate = 0;
@@ -1146,7 +1171,7 @@ public final class NativeMemory {
                   && released < IDLE_TRIM_MAX_RELEASES_PER_TURN
                   && scanned < IDLE_TRIM_MAX_SCANNED_PER_TURN;
               candidate++) {
-            WriterArena.Page page = popReadyPage(sizeClass, scanStack);
+            WriterArena.Page page = popReadyPage(sizeClass, READY_TRIM_STACK);
             if (page == null) {
               break;
             }
@@ -1180,10 +1205,9 @@ public final class NativeMemory {
               }
             }
           }
-          if (readyPageId(readyPageStacks.get(readyStackIndex(sizeClass) + scanStack)) == 0) {
-            // New publications always target the active stack, so they cannot hold this scan
-            // snapshot open. Once drained, swap roles and inspect the previously active stack.
-            readyActiveStacks.set(sizeClass, scanStack);
+          if (readyPageId(
+                  readyPageStacks.get(readyStackIndex(sizeClass) + READY_TRIM_STACK))
+              == 0) {
             idleTrimEmptyKept[sizeClass] = 0;
           }
         }
