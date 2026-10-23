@@ -1,6 +1,6 @@
 package com.red.ohc.runtime;
 
-public final class ReaderSlot {
+public final class ReaderSlot extends ReaderSlotReaderPadding {
   volatile ReaderRegistry registry;
   int registryIndex = -1;
   /** Absolute address of word0 in this reader's stable 64-byte native lane. */
@@ -9,8 +9,6 @@ public final class ReaderSlot {
   long seqAddress;
   volatile Thread owner;
   volatile WriterResource writerResource;
-  /** Actor-owned slow-path marker; reader exit consumes it to request one maintenance rescan. */
-  volatile int readerNotification;
   private volatile Runnable accessSignal;
 
   public long localHits;
@@ -19,8 +17,6 @@ public final class ReaderSlot {
   public volatile long publishedMisses;
   public long localSkipAccesses;
   public volatile long publishedSkipAccesses;
-  /** Actor-owned consumption cursor, reset with the slot's lifetime. */
-  public long consumedSkipAccesses;
 
   /** Lazily allocated after the first sampled access. */
   public volatile AccessRing access;
@@ -35,4 +31,43 @@ public final class ReaderSlot {
       signal.run();
     }
   }
+}
+
+/** Actor-only consumption state. */
+class ReaderSlotActorFields {
+  /** Actor-owned consumption cursor, reset with the slot's lifetime. */
+  public long consumedSkipAccesses;
+}
+
+/** A 64-byte gap separates actor consumption from the mixed-access notification marker. */
+class ReaderSlotActorPadding extends ReaderSlotActorFields {
+  // Consume a possible superclass tail hole before the next layout segment can backfill it.
+  int actorAlignmentPadding;
+  long actorLinePad0;
+  long actorLinePad1;
+  long actorLinePad2;
+  long actorLinePad3;
+  long actorLinePad4;
+  long actorLinePad5;
+  long actorLinePad6;
+  long actorLinePad7;
+}
+
+/** Actor marking and reader exit both touch this slow-path notification marker. */
+class ReaderSlotNotificationFields extends ReaderSlotActorPadding {
+  volatile int readerNotification;
+}
+
+/** A 64-byte gap isolates notification writes from reader hot-path state. */
+class ReaderSlotReaderPadding extends ReaderSlotNotificationFields {
+  // Consume a possible superclass tail hole before ReaderSlot can backfill it.
+  int readerAlignmentPadding;
+  long readerLinePad0;
+  long readerLinePad1;
+  long readerLinePad2;
+  long readerLinePad3;
+  long readerLinePad4;
+  long readerLinePad5;
+  long readerLinePad6;
+  long readerLinePad7;
 }
