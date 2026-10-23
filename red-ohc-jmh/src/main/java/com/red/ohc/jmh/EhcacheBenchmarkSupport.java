@@ -14,7 +14,8 @@ import org.ehcache.spi.serialization.Serializer;
 
 /** Backend-specific support keeps unrelated libraries out of isolated runtime graphs. */
 public final class EhcacheBenchmarkSupport {
-  private static final int EHCACHE_ENTRY_OVERHEAD_BYTES = 256;
+  // Include one word of alignment slack; 256 bytes underfilled the target set by two entries.
+  private static final int EHCACHE_ENTRY_OVERHEAD_BYTES = 256 + Long.BYTES;
   private EhcacheBenchmarkSupport() {}
 
   public static EhcacheStore newEhcache(long offHeapBytes, long ttlMillis) {

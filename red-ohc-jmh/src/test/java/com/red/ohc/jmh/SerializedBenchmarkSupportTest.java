@@ -305,6 +305,13 @@ public class SerializedBenchmarkSupportTest {
   }
 
   @Test
+  public void ehcacheCapacityIncludesEntryAlignmentSlack() {
+    Assert.assertEquals(
+        EhcacheBenchmarkSupport.ehcacheCapacityBytes(32, 5120),
+        5_416L * SerializedBenchmarkSupport.CAPACITY_ENTRIES);
+  }
+
+  @Test
   public void mapDbDirectStoreRoundTripsTheRawByteCodecWithoutPersistence() {
     MapDbBenchmarkSupport.MapDbStore store =
         MapDbBenchmarkSupport.newMapDb(2, SerializedBenchmarkSupport.TTL_MILLIS);
