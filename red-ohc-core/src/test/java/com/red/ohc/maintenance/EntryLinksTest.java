@@ -104,6 +104,33 @@ public final class EntryLinksTest {
   }
 
   @Test
+  public void activeLinkCountTracksAllocationReleaseAndReuse() {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    EntryLinks links = new EntryLinks(memory);
+    Entry first = EntryTestSupport.entry(memory, 1, 31, 0x31L, 0L);
+    Entry second = EntryTestSupport.entry(memory, 1, 32, 0x32L, 0L);
+    try {
+      int firstId = links.ensure(first);
+      int secondId = links.ensure(second);
+      assertEquals(links.activeLinkCount(), 2);
+
+      links.maybeRelease(first);
+      assertEquals(links.activeLinkCount(), 1);
+      Entry replacement = EntryTestSupport.entry(memory, 1, 33, 0x33L, 0L);
+      assertEquals(links.ensure(replacement), firstId);
+      assertEquals(links.activeLinkCount(), 2);
+
+      links.maybeRelease(second);
+      links.maybeRelease(replacement);
+      assertEquals(links.activeLinkCount(), 0);
+      assertTrue(secondId != firstId);
+    } finally {
+      links.close();
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void retiredEntryReleasesItsUnlinkedNativeRecord() {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     EntryLinks links = new EntryLinks(memory);

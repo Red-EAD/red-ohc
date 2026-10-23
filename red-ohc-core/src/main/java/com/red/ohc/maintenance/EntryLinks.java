@@ -46,6 +46,7 @@ public final class EntryLinks implements AutoCloseable {
   private volatile long[] alignedSuperpages = new long[2];
   private volatile long[][] nativeKeyAddressPages = new long[2][];
   private final EntryResolver resolver;
+  private int activeCount;
   private int freeHead;
   private int nextId = 1;
   private boolean closed;
@@ -122,6 +123,7 @@ public final class EntryLinks implements AutoCloseable {
       NativeMemory.setMemory(recordAddress(id), RECORD_BYTES, (byte) 0);
     }
     entry.policyLinkId(id);
+    activeCount++;
     return id;
   }
 
@@ -399,13 +401,14 @@ public final class EntryLinks implements AutoCloseable {
     NativeMemory.putInt(address, freeHead);
     freeHead = id;
     entry.policyLinkId(0);
+    activeCount--;
     if (ownsData) {
       data.remove(entry, entry);
     }
   }
 
   int activeLinkCount() {
-    return nextId - 1 - freeCount();
+    return activeCount;
   }
 
   long nativeBytes() {
@@ -422,6 +425,7 @@ public final class EntryLinks implements AutoCloseable {
     if (ownsData) {
       data.clear();
     }
+    activeCount = 0;
     for (int index = 0; index < rawSuperpages.length; index++) {
       long raw = rawSuperpages[index];
       if (raw != 0L) {
@@ -576,14 +580,6 @@ public final class EntryLinks implements AutoCloseable {
       if (address != 0L) {
         count++;
       }
-    }
-    return count;
-  }
-
-  private int freeCount() {
-    int count = 0;
-    for (int id = freeHead; id != 0; id = NativeMemory.getInt(recordAddress(id)) & LINK_ID_MASK) {
-      count++;
     }
     return count;
   }

@@ -100,6 +100,39 @@ public class MaintenanceEventLoopTest {
   }
 
   @Test
+  public void keyRetirementRequiresMaintenanceLinksToBeReleasedFirst() throws Exception {
+    NativeMemory.Memory memory = new NativeMemory.Memory();
+    MaintenanceEventLoop loop =
+        new MaintenanceEventLoop(
+            index(),
+            memory,
+            Ticker.DEFAULT,
+            1 << 20,
+            Eviction.LRU,
+            newReaderRegistry(memory),
+            Long.MAX_VALUE);
+    Entry entry = EntryTestSupport.entry(memory, 1, 92, 0L);
+    EntryLinks links = (EntryLinks) getField(loop, "links");
+    int linkId = links.ensure(entry);
+    entry.policyState(Entry.POLICY_LRU);
+    links.policyState(linkId, Entry.POLICY_LRU);
+    Method retire = MaintenanceEventLoop.class.getDeclaredMethod("retireEntryBlocks", Entry.class, long.class);
+    retire.setAccessible(true);
+    try {
+      java.lang.reflect.InvocationTargetException failure =
+          org.testng.Assert.expectThrows(
+              java.lang.reflect.InvocationTargetException.class,
+              () -> retire.invoke(loop, entry, 0L));
+
+      assertTrue(failure.getCause() instanceof IllegalStateException);
+      assertEquals(loop.retiredBytes(), 0L, "the key must remain owned until its links are gone");
+    } finally {
+      loop.stop();
+      memory.closeArenas();
+    }
+  }
+
+  @Test
   public void lifecycleTurnDrainsOnlyRecordsReservedBeforeItsPerLaneWatermark() throws Exception {
     NativeMemory.Memory memory = new NativeMemory.Memory();
     WriterLifecycleJournal lifecycle = new WriterLifecycleJournal(2);
